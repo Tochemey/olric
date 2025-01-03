@@ -80,7 +80,7 @@ func (s *Service) evictKeysAtBackground() {
 		}
 
 		if err := sem.Acquire(s.ctx, 1); err != nil {
-			s.log.V(3).Printf("[ERROR] Failed to acquire semaphore: %v", err)
+			s.log.V(3).Printf("[WARN] Failed to acquire semaphore: %v", err)
 			return
 		}
 
