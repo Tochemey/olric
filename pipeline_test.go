@@ -16,7 +16,6 @@ package olric
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -286,11 +285,8 @@ func TestDMapPipeline_GetPut(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, fp := range futures {
-		gr, err := fp.Result()
+		_, err := fp.Result()
 		require.NoError(t, err)
-		if gr != nil {
-			fmt.Println(gr.String())
-		}
 	}
 }
 
