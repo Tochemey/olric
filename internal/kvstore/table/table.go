@@ -22,9 +22,10 @@ import (
 	"time"
 
 	"github.com/RoaringBitmap/roaring/roaring64"
+	"github.com/pkg/errors"
+
 	"github.com/buraksezer/olric/internal/kvstore/entry"
 	"github.com/buraksezer/olric/pkg/storage"
-	"github.com/pkg/errors"
 )
 
 const (

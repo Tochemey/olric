@@ -17,10 +17,11 @@ package dmap
 import (
 	"errors"
 
+	"github.com/tidwall/redcon"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/tidwall/redcon"
 )
 
 func (dm *DMap) destroyFragmentOnPartition(part *partitions.Partition) error {

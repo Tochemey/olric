@@ -17,9 +17,10 @@ package server
 import (
 	"fmt"
 
+	"github.com/tidwall/redcon"
+
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/internal/util"
-	"github.com/tidwall/redcon"
 )
 
 type ServeMuxWrapper struct {

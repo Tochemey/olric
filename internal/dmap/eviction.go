@@ -22,9 +22,10 @@ import (
 	"sort"
 	"time"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/pkg/storage"
-	"golang.org/x/sync/semaphore"
 )
 
 // isKeyIdleOnFragment is not a thread-safe function. It accesses underlying fragment for the given hkey.

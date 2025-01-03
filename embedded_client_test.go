@@ -20,9 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buraksezer/olric/internal/testutil"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/buraksezer/olric/internal/testutil"
 )
 
 func TestEmbeddedClient_NewDMap(t *testing.T) {

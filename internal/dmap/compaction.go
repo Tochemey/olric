@@ -21,8 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/buraksezer/olric/internal/cluster/partitions"
 )
 
 func (s *Service) callCompactionOnFragment(f *fragment) bool {

@@ -16,11 +16,13 @@ package dmap
 
 import (
 	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/internal/cluster/routingtable"
 	"github.com/buraksezer/olric/internal/testcluster"
 	"github.com/buraksezer/olric/internal/testutil"
-	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestDMap_Get_Standalone(t *testing.T) {

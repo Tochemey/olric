@@ -16,8 +16,6 @@ package discovery
 
 import (
 	"fmt"
-	"github.com/buraksezer/olric/pkg/service_discovery"
-	"github.com/hashicorp/memberlist"
 	"log"
 	"net"
 	"strconv"
@@ -25,8 +23,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/hashicorp/memberlist"
+
+	"github.com/buraksezer/olric/pkg/service_discovery"
+
 	"github.com/stretchr/testify/require"
+
+	"github.com/buraksezer/olric/internal/testutil"
 )
 
 type testCluster struct {

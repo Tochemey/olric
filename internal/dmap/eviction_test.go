@@ -19,10 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/testcluster"
 	"github.com/buraksezer/olric/internal/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDMap_Eviction_TTL(t *testing.T) {

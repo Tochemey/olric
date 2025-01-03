@@ -24,6 +24,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/cluster/routingtable"
@@ -32,8 +35,6 @@ import (
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/internal/testutil"
 	"github.com/buraksezer/olric/internal/testutil/mockfragment"
-	"github.com/stretchr/testify/require"
-	"golang.org/x/sync/errgroup"
 )
 
 func newTestEnvironment(c *config.Config) *environment.Environment {

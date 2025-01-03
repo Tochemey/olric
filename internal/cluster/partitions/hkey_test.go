@@ -17,8 +17,9 @@ package partitions
 import (
 	"testing"
 
-	"github.com/buraksezer/olric/hasher"
 	"github.com/stretchr/testify/require"
+
+	"github.com/buraksezer/olric/hasher"
 )
 
 func TestPartitions_HKey(t *testing.T) {

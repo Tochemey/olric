@@ -19,9 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/internal/testutil"
 	"github.com/buraksezer/olric/internal/testutil/mockfragment"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRoutingTable_LeftOverData(t *testing.T) {

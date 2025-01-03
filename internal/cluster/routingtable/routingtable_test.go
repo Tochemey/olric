@@ -23,14 +23,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/memberlist"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/discovery"
 	"github.com/buraksezer/olric/internal/environment"
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/internal/testutil"
-	"github.com/hashicorp/memberlist"
-	"golang.org/x/sync/errgroup"
 )
 
 func newRoutingTableForTest(c *config.Config, srv *server.Server) *RoutingTable {

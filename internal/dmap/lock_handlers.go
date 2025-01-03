@@ -18,8 +18,9 @@ import (
 	"encoding/hex"
 	"time"
 
-	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/tidwall/redcon"
+
+	"github.com/buraksezer/olric/internal/protocol"
 )
 
 func (s *Service) unlockCommandHandler(conn redcon.Conn, cmd redcon.Command) {

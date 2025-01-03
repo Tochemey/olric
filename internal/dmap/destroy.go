@@ -18,10 +18,11 @@ import (
 	"context"
 	"runtime"
 
-	"github.com/buraksezer/olric/internal/discovery"
-	"github.com/buraksezer/olric/internal/protocol"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/buraksezer/olric/internal/discovery"
+	"github.com/buraksezer/olric/internal/protocol"
 )
 
 func (dm *DMap) destroyOnCluster(ctx context.Context) error {

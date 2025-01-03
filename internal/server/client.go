@@ -19,9 +19,10 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/roundrobin"
-	"github.com/redis/go-redis/v9"
 )
 
 type Client struct {
@@ -52,7 +53,7 @@ func (c *Client) Addresses() map[string]struct{} {
 	defer c.mu.RUnlock()
 
 	addresses := make(map[string]struct{})
-	for address, _ := range c.clients {
+	for address := range c.clients {
 		addresses[address] = struct{}{}
 	}
 	return addresses

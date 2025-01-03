@@ -20,12 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"github.com/tidwall/redcon"
+
 	"github.com/buraksezer/olric/events"
 	"github.com/buraksezer/olric/internal/discovery"
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/internal/testutil"
-	"github.com/stretchr/testify/require"
-	"github.com/tidwall/redcon"
 )
 
 func TestRoutingTable_publishNodeJoinEvent(t *testing.T) {

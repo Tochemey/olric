@@ -15,14 +15,16 @@
 package routingtable
 
 import (
-	"github.com/buraksezer/olric/internal/protocol"
 	"runtime"
 	"sync"
 
-	"github.com/buraksezer/olric/internal/discovery"
+	"github.com/buraksezer/olric/internal/protocol"
+
 	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/buraksezer/olric/internal/discovery"
 )
 
 type leftOverDataReport struct {

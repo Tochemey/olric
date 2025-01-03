@@ -18,10 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/buraksezer/olric/internal/kvstore"
-	"github.com/buraksezer/olric/pkg/storage"
 	"testing"
 	"time"
+
+	"github.com/buraksezer/olric/internal/kvstore"
+	"github.com/buraksezer/olric/pkg/storage"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
@@ -29,7 +32,6 @@ import (
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/internal/testcluster"
 	"github.com/buraksezer/olric/internal/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func checkEmptyStorageEngine(t *testing.T, s *Service) {

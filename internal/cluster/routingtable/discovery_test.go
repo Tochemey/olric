@@ -17,9 +17,10 @@ package routingtable
 import (
 	"context"
 	"errors"
-	"github.com/buraksezer/olric/internal/testutil"
 	"testing"
 	"time"
+
+	"github.com/buraksezer/olric/internal/testutil"
 )
 
 func TestRoutingTable_tryWithInterval(t *testing.T) {

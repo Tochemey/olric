@@ -24,10 +24,11 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/sean-/seed"
+
 	"github.com/buraksezer/olric"
 	"github.com/buraksezer/olric/cmd/olricd/server"
 	"github.com/buraksezer/olric/config"
-	"github.com/sean-/seed"
 )
 
 func usage() {

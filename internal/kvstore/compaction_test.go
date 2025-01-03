@@ -19,10 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buraksezer/olric/internal/kvstore/entry"
-	"github.com/buraksezer/olric/internal/kvstore/table"
 	"github.com/cespare/xxhash/v2"
 	"github.com/stretchr/testify/require"
+
+	"github.com/buraksezer/olric/internal/kvstore/entry"
+	"github.com/buraksezer/olric/internal/kvstore/table"
 )
 
 func TestKVStore_Compaction(t *testing.T) {

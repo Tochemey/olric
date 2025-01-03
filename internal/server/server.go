@@ -21,10 +21,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tidwall/redcon"
+
 	"github.com/buraksezer/olric/internal/checkpoint"
 	"github.com/buraksezer/olric/internal/stats"
 	"github.com/buraksezer/olric/pkg/flog"
-	"github.com/tidwall/redcon"
 )
 
 var (

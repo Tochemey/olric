@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"sync"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/cluster/balancer"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
@@ -30,7 +32,6 @@ import (
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/internal/service"
 	"github.com/buraksezer/olric/internal/testutil"
-	"golang.org/x/sync/errgroup"
 )
 
 type TestCluster struct {

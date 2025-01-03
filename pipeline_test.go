@@ -20,8 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buraksezer/olric/internal/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/buraksezer/olric/internal/testutil"
 )
 
 func TestDMapPipeline_Put(t *testing.T) {

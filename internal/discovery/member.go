@@ -18,9 +18,10 @@ import (
 	"encoding/binary"
 	"time"
 
-	"github.com/buraksezer/olric/config"
 	"github.com/cespare/xxhash/v2"
 	"github.com/vmihailenco/msgpack/v5"
+
+	"github.com/buraksezer/olric/config"
 )
 
 // Member represents a node in the cluster.

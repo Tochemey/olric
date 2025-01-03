@@ -19,8 +19,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/buraksezer/olric/internal/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/buraksezer/olric/internal/testutil"
 )
 
 func TestClusterClient_ScanMatch(t *testing.T) {

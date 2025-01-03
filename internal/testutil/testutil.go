@@ -21,11 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/memberlist"
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/pkg/flog"
-	"github.com/hashicorp/memberlist"
-	"github.com/stretchr/testify/require"
 )
 
 func GetFreePort() (int, error) {

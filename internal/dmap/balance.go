@@ -19,13 +19,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/tidwall/redcon"
+	"github.com/vmihailenco/msgpack/v5"
+
 	"github.com/buraksezer/olric/events"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/pkg/neterrors"
 	"github.com/buraksezer/olric/pkg/storage"
-	"github.com/tidwall/redcon"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type fragmentPack struct {

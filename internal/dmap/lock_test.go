@@ -17,13 +17,15 @@ package dmap
 import (
 	"context"
 	"encoding/hex"
-	"github.com/buraksezer/olric/internal/protocol"
 	"strconv"
 	"testing"
 	"time"
 
-	"github.com/buraksezer/olric/internal/testcluster"
+	"github.com/buraksezer/olric/internal/protocol"
+
 	"github.com/stretchr/testify/require"
+
+	"github.com/buraksezer/olric/internal/testcluster"
 )
 
 func TestDMap_Lock_With_Timeout_Standalone(t *testing.T) {

@@ -16,6 +16,7 @@ package config
 
 import (
 	"fmt"
+
 	"github.com/buraksezer/olric/internal/kvstore"
 	"github.com/buraksezer/olric/pkg/storage"
 )

@@ -20,10 +20,11 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
+
+	"github.com/buraksezer/olric/config"
+	"github.com/buraksezer/olric/internal/protocol"
 )
 
 func TestServer_Client_Get(t *testing.T) {

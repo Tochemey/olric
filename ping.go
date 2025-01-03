@@ -18,8 +18,9 @@ import (
 	"context"
 	"strings"
 
-	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/tidwall/redcon"
+
+	"github.com/buraksezer/olric/internal/protocol"
 )
 
 const DefaultPingResponse = "PONG"

@@ -20,6 +20,8 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/tidwall/redcon"
+
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/discovery"
 	"github.com/buraksezer/olric/internal/dmap"
@@ -27,7 +29,6 @@ import (
 	"github.com/buraksezer/olric/internal/pubsub"
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/stats"
-	"github.com/tidwall/redcon"
 )
 
 func toMember(member discovery.Member) stats.Member {

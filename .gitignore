@@ -18,6 +18,8 @@
 
 # GoLand creates this
 .idea/
+vendor
+.vscode/
 
 # OSX creates this
 .DS_Store

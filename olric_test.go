@@ -21,11 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/memberlist"
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/testutil"
 	"github.com/buraksezer/olric/stats"
-	"github.com/hashicorp/memberlist"
-	"github.com/stretchr/testify/require"
 )
 
 // newTestOlricWithConfig creates a new Olric instance with the given configuration.

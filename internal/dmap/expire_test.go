@@ -19,9 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/internal/testcluster"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDMap_Expire(t *testing.T) {

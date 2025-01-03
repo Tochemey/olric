@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/bufpool"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
@@ -28,7 +30,6 @@ import (
 	"github.com/buraksezer/olric/internal/resp"
 	"github.com/buraksezer/olric/internal/stats"
 	"github.com/buraksezer/olric/pkg/storage"
-	"github.com/redis/go-redis/v9"
 )
 
 var pool = bufpool.New()

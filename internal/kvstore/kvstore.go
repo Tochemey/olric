@@ -454,7 +454,7 @@ func (k *KVStore) RangeHKey(f func(hkey uint64) bool) {
 
 func (k *KVStore) findCoefficient(coefficient uint64) (uint64, error) {
 	var sortedCoefficients []uint64
-	for newCf, _ := range k.tablesByCoefficient {
+	for newCf := range k.tablesByCoefficient {
 		sortedCoefficients = append(sortedCoefficients, newCf)
 	}
 	sort.Slice(sortedCoefficients, func(i, j int) bool { return sortedCoefficients[i] < sortedCoefficients[j] })

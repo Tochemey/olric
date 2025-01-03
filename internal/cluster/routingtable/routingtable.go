@@ -24,6 +24,8 @@ import (
 	"github.com/buraksezer/olric/internal/protocol"
 
 	"github.com/buraksezer/consistent"
+	"github.com/hashicorp/memberlist"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/internal/checkpoint"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
@@ -32,7 +34,6 @@ import (
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/internal/service"
 	"github.com/buraksezer/olric/pkg/flog"
-	"github.com/hashicorp/memberlist"
 )
 
 // ErrClusterQuorum means that the cluster could not reach a healthy numbers of members to operate.

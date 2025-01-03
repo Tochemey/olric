@@ -15,11 +15,13 @@
 package dmap
 
 import (
+	"strconv"
+
+	"github.com/tidwall/redcon"
+
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/pkg/storage"
-	"github.com/tidwall/redcon"
-	"strconv"
 )
 
 func (dm *DMap) scanOnFragment(f *fragment, cursor uint64, sc *ScanConfig) ([]string, uint64, error) {

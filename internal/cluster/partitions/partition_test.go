@@ -18,9 +18,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/internal/discovery"
 	"github.com/buraksezer/olric/pkg/storage"
-	"github.com/stretchr/testify/require"
 )
 
 type testFragment struct {

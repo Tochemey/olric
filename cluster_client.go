@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/hasher"
 	"github.com/buraksezer/olric/internal/bufpool"
@@ -39,7 +41,6 @@ import (
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/pkg/storage"
 	"github.com/buraksezer/olric/stats"
-	"github.com/redis/go-redis/v9"
 )
 
 var pool = bufpool.New()

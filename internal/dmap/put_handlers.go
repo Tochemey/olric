@@ -17,9 +17,10 @@ package dmap
 import (
 	"time"
 
+	"github.com/tidwall/redcon"
+
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/tidwall/redcon"
 )
 
 func (s *Service) putCommandHandler(conn redcon.Conn, cmd redcon.Command) {

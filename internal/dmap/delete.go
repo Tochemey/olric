@@ -18,11 +18,12 @@ import (
 	"context"
 	"errors"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/discovery"
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/internal/stats"
-	"golang.org/x/sync/errgroup"
 )
 
 var (

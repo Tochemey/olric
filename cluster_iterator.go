@@ -302,6 +302,9 @@ func (i *ClusterIterator) Close() {
 	default:
 	}
 
+	if err := i.clusterClient.Close(i.ctx); err != nil {
+		panic(err)
+	}
 	i.cancel()
 
 	// await for routing table updater

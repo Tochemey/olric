@@ -22,12 +22,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/resp"
-	"github.com/buraksezer/olric/internal/testcluster"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/buraksezer/olric/internal/resp"
+	"github.com/buraksezer/olric/internal/testcluster"
 )
 
 func TestDMap_loadCurrentAtomicInt(t *testing.T) {

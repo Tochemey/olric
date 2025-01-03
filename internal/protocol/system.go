@@ -19,9 +19,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/buraksezer/olric/internal/util"
 	"github.com/redis/go-redis/v9"
 	"github.com/tidwall/redcon"
+
+	"github.com/buraksezer/olric/internal/util"
 )
 
 type Ping struct {

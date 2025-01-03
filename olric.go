@@ -37,6 +37,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/logutils"
+	"github.com/pkg/errors"
+	"github.com/tidwall/redcon"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/buraksezer/olric/config"
 	"github.com/buraksezer/olric/hasher"
 	"github.com/buraksezer/olric/internal/checkpoint"
@@ -50,10 +55,6 @@ import (
 	"github.com/buraksezer/olric/internal/pubsub"
 	"github.com/buraksezer/olric/internal/server"
 	"github.com/buraksezer/olric/pkg/flog"
-	"github.com/hashicorp/logutils"
-	"github.com/pkg/errors"
-	"github.com/tidwall/redcon"
-	"golang.org/x/sync/errgroup"
 )
 
 // ReleaseVersion is the current stable version of Olric
@@ -335,40 +336,30 @@ func (db *Olric) Start() error {
 
 	// Balancer works periodically to balance partition data across the cluster.
 	if err := db.balancer.Start(); err != nil {
-		if err != nil {
-			db.log.V(2).Printf("[ERROR] Failed to run the balancer subsystem: %v", err)
-		}
+		db.log.V(2).Printf("[ERROR] Failed to run the balancer subsystem: %v", err)
 		return err
 	}
 
 	// First, we need to join the cluster. Then, the routing table has been started.
 	if err := db.rt.Join(); err != nil {
-		if err != nil {
-			db.log.V(2).Printf("[ERROR] Failed to join the Olric cluster: %v", err)
-		}
+		db.log.V(2).Printf("[ERROR] Failed to join the Olric cluster: %v", err)
 		return err
 	}
 	// Start routing table service and member discovery subsystem.
 	if err := db.rt.Start(); err != nil {
-		if err != nil {
-			db.log.V(2).Printf("[ERROR] Failed to run the routing table subsystem: %v", err)
-		}
+		db.log.V(2).Printf("[ERROR] Failed to run the routing table subsystem: %v", err)
 		return err
 	}
 
 	// Start publish-subscribe service
 	if err := db.pubsub.Start(); err != nil {
-		if err != nil {
-			db.log.V(2).Printf("[ERROR] Failed to run the Publish-Subscribe service: %v", err)
-		}
+		db.log.V(2).Printf("[ERROR] Failed to run the Publish-Subscribe service: %v", err)
 		return err
 	}
 
 	// Start distributed map service
 	if err := db.dmap.Start(); err != nil {
-		if err != nil {
-			db.log.V(2).Printf("[ERROR] Failed to run the Distributed Map service: %v", err)
-		}
+		db.log.V(2).Printf("[ERROR] Failed to run the Distributed Map service: %v", err)
 		return err
 	}
 

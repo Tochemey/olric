@@ -18,10 +18,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/internal/testcluster"
 	"github.com/buraksezer/olric/internal/testutil"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDMap_Destroy_Standalone(t *testing.T) {

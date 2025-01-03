@@ -21,12 +21,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vmihailenco/msgpack/v5"
+
 	"github.com/buraksezer/olric/events"
 	"github.com/buraksezer/olric/internal/cluster/partitions"
 	"github.com/buraksezer/olric/internal/discovery"
 	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/buraksezer/olric/pkg/storage"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type fragment struct {

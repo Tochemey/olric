@@ -17,8 +17,9 @@ package dmap
 import (
 	"strconv"
 
-	"github.com/buraksezer/olric/internal/protocol"
 	"github.com/tidwall/redcon"
+
+	"github.com/buraksezer/olric/internal/protocol"
 )
 
 func (s *Service) incrDecrCommon(cmd, dmap, key string, delta int) (int, error) {

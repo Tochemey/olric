@@ -22,9 +22,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/buraksezer/olric"
 	"github.com/buraksezer/olric/config"
-	"golang.org/x/sync/errgroup"
 )
 
 // Olricd represents a new Olricd instance.
