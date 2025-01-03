@@ -141,7 +141,7 @@ func TestIntegration_DMap_Cache_Eviction_LRU_MaxKeys(t *testing.T) {
 	var total int
 	for i := 0; i < maxKeys; i++ {
 		err = dm.Put(ctx, fmt.Sprintf("mykey-%d", i), "myvalue", NX())
-		if err == ErrKeyFound {
+		if errors.Is(err, ErrKeyFound) {
 			err = nil
 		} else {
 			total++
@@ -405,8 +405,8 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 
 	for i := 0; i < 100000; i++ {
 		_, err = dm.Get(ctx, fmt.Sprintf("mykey-%d", i))
-		if err == ErrKeyNotFound {
-			err = nil
+		if errors.Is(err, ErrKeyNotFound) {
+			continue
 		}
 		require.NoError(t, err)
 	}
@@ -421,10 +421,11 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 	<-time.After(time.Second)
 
 	for i := 0; i < 100000; i++ {
-		_, err = dm.Get(context.Background(), fmt.Sprintf("mykey-%d", i))
+		ctx := context.Background()
+		_, err = dm.Get(ctx, fmt.Sprintf("mykey-%d", i))
 		if errors.Is(err, ErrConnRefused) {
 			i--
-			fmt.Println(c.RefreshMetadata(context.Background()))
+			require.NoError(t, c.RefreshMetadata(ctx))
 			continue
 		}
 		require.NoError(t, err)

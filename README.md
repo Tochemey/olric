@@ -2,7 +2,7 @@
 
 ## Note
 
-This is forked version of the [main repository](https://github.com/buraksezer/olric) with few bug fixes.
+This is forked version of the [main repository](https://github.com/buraksezer/olric) with few bug fixes, refactoring.
 Please use the main repo for any bugs or related questions.
 
 ## Overview 

@@ -296,15 +296,16 @@ func (i *ClusterIterator) fetchRoutingTable() error {
 
 // Close stops the iteration and releases allocated resources.
 func (i *ClusterIterator) Close() {
+	if err := i.clusterClient.Close(i.ctx); err != nil {
+		panic(err)
+	}
+
 	select {
 	case <-i.ctx.Done():
 		return
 	default:
 	}
 
-	if err := i.clusterClient.Close(i.ctx); err != nil {
-		panic(err)
-	}
 	i.cancel()
 
 	// await for routing table updater
