@@ -1,12 +1,16 @@
-name: Unit & Integration tests
+name: ci
 
 on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - '**/README.md'
   push:
     branches:
       - main
+    paths-ignore:
+      - '**/README.md'
 
 jobs:
   test:
