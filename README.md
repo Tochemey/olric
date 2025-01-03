@@ -1,5 +1,8 @@
 # Olric
 
+[![build](https://img.shields.io/github/actions/workflow/status/Tochemey/olric/ci.yml?branch=main)](https://github.com/Tochemey/olric/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Tochemey/olric/branch/main/graph/badge.svg?token=C5Z0JE8SNj)](https://codecov.io/gh/Tochemey/olric)
+
 ## Note
 
 This is forked version of the [main repository](https://github.com/buraksezer/olric) with few bug fixes, refactoring.
