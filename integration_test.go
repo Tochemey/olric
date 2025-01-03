@@ -432,6 +432,56 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 	}
 }
 
+func TestIntegration_Network_Partitioning_Cluster_DM_SCAN(t *testing.T) {
+	keyGenerator := func(i int) string {
+		return fmt.Sprintf("mykey-%d", i)
+	}
+	result := scanIntegrationTestCommon(t, false, keyGenerator)
+	passOne, passTwo := result[0], result[1]
+	require.Empty(t, passOne)
+	require.Empty(t, passTwo)
+}
+
+func TestIntegration_Network_Partitioning_Cluster_DM_SCAN_Match(t *testing.T) {
+	var oddNumbers int
+	keyGenerator := func(i int) string {
+		if i%2 == 0 {
+			return fmt.Sprintf("even:%d", i)
+		}
+		oddNumbers++
+		return fmt.Sprintf("odd:%d", i)
+	}
+	result := scanIntegrationTestCommon(t, false, keyGenerator, Match("^even:"))
+	passOne, passTwo := result[0], result[1]
+	require.Len(t, passOne, oddNumbers)
+	require.Len(t, passTwo, oddNumbers)
+}
+
+func TestIntegration_Network_Partitioning_Embedded_DM_SCAN(t *testing.T) {
+	keyGenerator := func(i int) string {
+		return fmt.Sprintf("mykey-%d", i)
+	}
+	result := scanIntegrationTestCommon(t, true, keyGenerator)
+	passOne, passTwo := result[0], result[1]
+	require.Empty(t, passOne)
+	require.Empty(t, passTwo)
+}
+
+func TestIntegration_Network_Partitioning_Embedded_DM_SCAN_Match(t *testing.T) {
+	var oddNumbers int
+	keyGenerator := func(i int) string {
+		if i%2 == 0 {
+			return fmt.Sprintf("even:%d", i)
+		}
+		oddNumbers++
+		return fmt.Sprintf("odd:%d", i)
+	}
+	result := scanIntegrationTestCommon(t, true, keyGenerator, Match("^even:"))
+	passOne, passTwo := result[0], result[1]
+	require.Len(t, passOne, oddNumbers)
+	require.Len(t, passTwo, oddNumbers)
+}
+
 func scanIntegrationTestCommon(t *testing.T, embedded bool, keyFunc func(i int) string, options ...ScanOption) []map[string]struct{} {
 	newConfig := func() *config.Config {
 		c := config.New("local")
@@ -511,56 +561,7 @@ func scanIntegrationTestCommon(t *testing.T, embedded bool, keyFunc func(i int) 
 	for s.Next() {
 		delete(passTwo, s.Key())
 	}
+	s.Close()
 
 	return []map[string]struct{}{passOne, passTwo}
-}
-
-func TestIntegration_Network_Partitioning_Cluster_DM_SCAN(t *testing.T) {
-	keyGenerator := func(i int) string {
-		return fmt.Sprintf("mykey-%d", i)
-	}
-	result := scanIntegrationTestCommon(t, false, keyGenerator)
-	passOne, passTwo := result[0], result[1]
-	require.Empty(t, passOne)
-	require.Empty(t, passTwo)
-}
-
-func TestIntegration_Network_Partitioning_Cluster_DM_SCAN_Match(t *testing.T) {
-	var oddNumbers int
-	keyGenerator := func(i int) string {
-		if i%2 == 0 {
-			return fmt.Sprintf("even:%d", i)
-		}
-		oddNumbers++
-		return fmt.Sprintf("odd:%d", i)
-	}
-	result := scanIntegrationTestCommon(t, false, keyGenerator, Match("^even:"))
-	passOne, passTwo := result[0], result[1]
-	require.Len(t, passOne, oddNumbers)
-	require.Len(t, passTwo, oddNumbers)
-}
-
-func TestIntegration_Network_Partitioning_Embedded_DM_SCAN(t *testing.T) {
-	keyGenerator := func(i int) string {
-		return fmt.Sprintf("mykey-%d", i)
-	}
-	result := scanIntegrationTestCommon(t, true, keyGenerator)
-	passOne, passTwo := result[0], result[1]
-	require.Empty(t, passOne)
-	require.Empty(t, passTwo)
-}
-
-func TestIntegration_Network_Partitioning_Embedded_DM_SCAN_Match(t *testing.T) {
-	var oddNumbers int
-	keyGenerator := func(i int) string {
-		if i%2 == 0 {
-			return fmt.Sprintf("even:%d", i)
-		}
-		oddNumbers++
-		return fmt.Sprintf("odd:%d", i)
-	}
-	result := scanIntegrationTestCommon(t, true, keyGenerator, Match("^even:"))
-	passOne, passTwo := result[0], result[1]
-	require.Len(t, passOne, oddNumbers)
-	require.Len(t, passTwo, oddNumbers)
 }

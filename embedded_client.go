@@ -145,8 +145,9 @@ func (dm *EmbeddedDMap) Scan(ctx context.Context, options ...ScanOption) (Iterat
 	}
 
 	e := &EmbeddedIterator{
-		client: dm.client,
-		dm:     dm.dm,
+		client:        dm.client,
+		dm:            dm.dm,
+		clusterClient: cc,
 	}
 
 	clusterIterator := i.(*ClusterIterator)

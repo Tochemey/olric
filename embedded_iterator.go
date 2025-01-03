@@ -15,6 +15,7 @@
 package olric
 
 import (
+	"context"
 	"sync"
 
 	"github.com/buraksezer/olric/internal/dmap"
@@ -25,6 +26,8 @@ import (
 type EmbeddedIterator struct {
 	mtx sync.Mutex
 
+	// this is only used when performing scanning
+	clusterClient   *ClusterClient
 	client          *EmbeddedClient
 	dm              *dmap.DMap
 	clusterIterator *ClusterIterator
@@ -94,4 +97,7 @@ func (e *EmbeddedIterator) Key() string {
 // Close stops the iteration and releases allocated resources.
 func (e *EmbeddedIterator) Close() {
 	e.clusterIterator.Close()
+	if err := e.clusterClient.Close(context.Background()); err != nil {
+		panic(err)
+	}
 }
