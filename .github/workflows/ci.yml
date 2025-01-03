@@ -51,11 +51,11 @@ jobs:
 
     - name: Install dependencies
       run: |
-        go mod download && go install github.com/ory/go-acc@latest
+        go mod download
 
     - name: Run tests
       run: |
-        go-acc ./... -o coverage.out --ignore vendor,hasher,internal/bufpool,internal/flog,serializer,stats, -- -timeout 0 -v
+        ./cover.sh $HOME/build coverage.out
 
     - uses: codecov/codecov-action@v5
       with:
