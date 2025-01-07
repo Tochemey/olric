@@ -28,7 +28,6 @@ import (
 )
 
 func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
-	// TODO: https://github.com/buraksezer/olric/issues/227
 	t.Skip("TestIntegration_NodesJoinOrLeftDuringQuery: flaky test")
 
 	newConfig := func() *config.Config {
