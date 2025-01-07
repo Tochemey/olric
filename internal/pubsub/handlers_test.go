@@ -23,7 +23,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/internal/testcluster"
+	"github.com/tochemey/olric/internal/testcluster"
 )
 
 func TestPubSub_Handler_Subscribe(t *testing.T) {

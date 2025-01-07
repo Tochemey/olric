@@ -18,8 +18,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/buraksezer/olric/internal/resp"
-	"github.com/buraksezer/olric/pkg/storage"
+	"github.com/tochemey/olric/internal/resp"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 var ErrNilResponse = errors.New("storage entry is nil")

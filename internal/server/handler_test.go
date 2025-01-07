@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func respEcho(t *testing.T, s *Server) {

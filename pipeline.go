@@ -27,10 +27,10 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/dmap"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/resp"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/dmap"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/resp"
 )
 
 var (

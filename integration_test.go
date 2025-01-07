@@ -24,7 +24,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/config"
+	"github.com/tochemey/olric/config"
 )
 
 func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {

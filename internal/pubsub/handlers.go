@@ -17,7 +17,7 @@ package pubsub
 import (
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func (s *Service) subscribeCommandHandler(conn redcon.Conn, cmd redcon.Command) {

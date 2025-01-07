@@ -24,11 +24,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/events"
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/testcluster"
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/events"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/testcluster"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func TestDMap_Balance_Invalid_PartID(t *testing.T) {

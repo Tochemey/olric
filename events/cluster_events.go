@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/buraksezer/olric/internal/util"
+	"github.com/tochemey/olric/internal/util"
 )
 
 const (

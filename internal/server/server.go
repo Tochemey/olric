@@ -23,9 +23,9 @@ import (
 
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/checkpoint"
-	"github.com/buraksezer/olric/internal/stats"
-	"github.com/buraksezer/olric/pkg/flog"
+	"github.com/tochemey/olric/internal/checkpoint"
+	"github.com/tochemey/olric/internal/stats"
+	"github.com/tochemey/olric/pkg/flog"
 )
 
 var (

@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func TestEmbeddedClient_NewDMap(t *testing.T) {

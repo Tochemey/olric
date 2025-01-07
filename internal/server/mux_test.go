@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func TestMux_PubSub_Command(t *testing.T) {

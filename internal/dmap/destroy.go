@@ -21,8 +21,8 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
-	"github.com/buraksezer/olric/internal/discovery"
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func (dm *DMap) destroyOnCluster(ctx context.Context) error {

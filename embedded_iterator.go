@@ -18,8 +18,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/buraksezer/olric/internal/dmap"
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/dmap"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 // EmbeddedIterator implements distributed query on DMaps.

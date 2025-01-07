@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/pkg/flog"
+	"github.com/tochemey/olric/pkg/flog"
 )
 
 // getFreePort copied from testutil package to prevent cycle import.

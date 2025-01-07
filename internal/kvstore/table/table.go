@@ -24,8 +24,8 @@ import (
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/pkg/errors"
 
-	"github.com/buraksezer/olric/internal/kvstore/entry"
-	"github.com/buraksezer/olric/pkg/storage"
+	"github.com/tochemey/olric/internal/kvstore/entry"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 const (

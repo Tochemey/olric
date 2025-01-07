@@ -25,7 +25,7 @@ import (
 
 	"github.com/hashicorp/memberlist"
 
-	"github.com/buraksezer/olric/hasher"
+	"github.com/tochemey/olric/hasher"
 )
 
 // IConfig is an interface that has to be implemented by Config and its nested

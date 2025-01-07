@@ -19,8 +19,8 @@ import (
 
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/util"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/util"
 )
 
 type ServeMuxWrapper struct {

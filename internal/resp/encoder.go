@@ -33,7 +33,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/buraksezer/olric/internal/util"
+	"github.com/tochemey/olric/internal/util"
 )
 
 type encoder interface {

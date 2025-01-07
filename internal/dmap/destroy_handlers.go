@@ -19,9 +19,9 @@ import (
 
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func (dm *DMap) destroyFragmentOnPartition(part *partitions.Partition) error {

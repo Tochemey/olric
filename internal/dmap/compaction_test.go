@@ -20,14 +20,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/buraksezer/olric/internal/kvstore"
-	"github.com/buraksezer/olric/pkg/storage"
+	"github.com/tochemey/olric/internal/kvstore"
+	"github.com/tochemey/olric/pkg/storage"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/testcluster"
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/testcluster"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func TestDMap_Compaction(t *testing.T) {

@@ -23,10 +23,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/events"
-	"github.com/buraksezer/olric/internal/discovery"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/events"
+	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func TestRoutingTable_publishNodeJoinEvent(t *testing.T) {

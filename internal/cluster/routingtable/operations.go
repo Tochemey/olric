@@ -21,8 +21,8 @@ import (
 	"github.com/tidwall/redcon"
 	"github.com/vmihailenco/msgpack/v5"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func (r *RoutingTable) lengthOfPartCommandHandler(conn redcon.Conn, cmd redcon.Command) {

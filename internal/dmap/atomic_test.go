@@ -26,9 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/resp"
-	"github.com/buraksezer/olric/internal/testcluster"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/resp"
+	"github.com/tochemey/olric/internal/testcluster"
 )
 
 func TestDMap_loadCurrentAtomicInt(t *testing.T) {

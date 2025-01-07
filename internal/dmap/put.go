@@ -22,14 +22,14 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/bufpool"
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/discovery"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/resp"
-	"github.com/buraksezer/olric/internal/stats"
-	"github.com/buraksezer/olric/pkg/storage"
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/bufpool"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/resp"
+	"github.com/tochemey/olric/internal/stats"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 var pool = bufpool.New()

@@ -25,11 +25,11 @@ import (
 
 	"github.com/hashicorp/memberlist"
 
-	"github.com/buraksezer/olric/pkg/service_discovery"
+	"github.com/tochemey/olric/pkg/service_discovery"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 type testCluster struct {

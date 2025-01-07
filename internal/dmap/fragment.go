@@ -23,11 +23,11 @@ import (
 
 	"github.com/vmihailenco/msgpack/v5"
 
-	"github.com/buraksezer/olric/events"
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/discovery"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/pkg/storage"
+	"github.com/tochemey/olric/events"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 type fragment struct {

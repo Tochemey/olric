@@ -23,11 +23,11 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/internal/dmap"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/pubsub"
-	"github.com/buraksezer/olric/internal/testutil"
-	"github.com/buraksezer/olric/stats"
+	"github.com/tochemey/olric/internal/dmap"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/pubsub"
+	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/stats"
 )
 
 func resetPubSubStats() {

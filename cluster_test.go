@@ -20,7 +20,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func TestOlric_ClusterRoutingTable_clusterRoutingTableCommandHandler(t *testing.T) {

@@ -19,9 +19,9 @@ import (
 
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/pkg/storage"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 func (dm *DMap) scanOnFragment(f *fragment, cursor uint64, sc *ScanConfig) ([]string, uint64, error) {

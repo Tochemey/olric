@@ -28,10 +28,10 @@ import (
 
 	"github.com/hashicorp/memberlist"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/stats"
-	"github.com/buraksezer/olric/pkg/flog"
-	"github.com/buraksezer/olric/pkg/service_discovery"
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/stats"
+	"github.com/tochemey/olric/pkg/flog"
+	"github.com/tochemey/olric/pkg/service_discovery"
 )
 
 const eventChanCapacity = 256

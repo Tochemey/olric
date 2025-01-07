@@ -19,8 +19,8 @@ import (
 
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 func (s *Service) putCommandHandler(conn redcon.Conn, cmd redcon.Command) {

@@ -23,9 +23,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/internal/dmap"
-	"github.com/buraksezer/olric/internal/resp"
-	"github.com/buraksezer/olric/internal/testcluster"
+	"github.com/tochemey/olric/internal/dmap"
+	"github.com/tochemey/olric/internal/resp"
+	"github.com/tochemey/olric/internal/testcluster"
 )
 
 func TestDMap_Get_GetResponse(t *testing.T) {

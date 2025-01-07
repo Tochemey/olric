@@ -23,7 +23,7 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/cluster/partitions"
 )
 
 func (s *Service) callCompactionOnFragment(f *fragment) bool {

@@ -22,7 +22,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/internal/kvstore/entry"
+	"github.com/tochemey/olric/internal/kvstore/entry"
 )
 
 func bkey(i int) string {

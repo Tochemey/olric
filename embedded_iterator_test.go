@@ -21,7 +21,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func TestEmbeddedClient_ScanMatch(t *testing.T) {

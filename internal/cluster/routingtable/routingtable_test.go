@@ -26,12 +26,12 @@ import (
 	"github.com/hashicorp/memberlist"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/discovery"
-	"github.com/buraksezer/olric/internal/environment"
-	"github.com/buraksezer/olric/internal/server"
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/environment"
+	"github.com/tochemey/olric/internal/server"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func newRoutingTableForTest(c *config.Config, srv *server.Server) *RoutingTable {

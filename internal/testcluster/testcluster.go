@@ -23,15 +23,15 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/cluster/balancer"
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/cluster/routingtable"
-	"github.com/buraksezer/olric/internal/environment"
-	"github.com/buraksezer/olric/internal/locker"
-	"github.com/buraksezer/olric/internal/server"
-	"github.com/buraksezer/olric/internal/service"
-	"github.com/buraksezer/olric/internal/testutil"
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/cluster/balancer"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/cluster/routingtable"
+	"github.com/tochemey/olric/internal/environment"
+	"github.com/tochemey/olric/internal/locker"
+	"github.com/tochemey/olric/internal/server"
+	"github.com/tochemey/olric/internal/service"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 type TestCluster struct {

@@ -24,8 +24,8 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/pkg/storage"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 // isKeyIdleOnFragment is not a thread-safe function. It accesses underlying fragment for the given hkey.

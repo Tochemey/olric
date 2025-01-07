@@ -18,7 +18,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/buraksezer/olric/hasher"
+	"github.com/tochemey/olric/hasher"
 )
 
 var (

@@ -21,8 +21,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/buraksezer/olric/config"
-	"github.com/buraksezer/olric/internal/roundrobin"
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/roundrobin"
 )
 
 type Client struct {

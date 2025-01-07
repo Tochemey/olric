@@ -22,13 +22,13 @@ import (
 
 	"github.com/tidwall/redcon"
 
-	"github.com/buraksezer/olric/internal/cluster/partitions"
-	"github.com/buraksezer/olric/internal/discovery"
-	"github.com/buraksezer/olric/internal/dmap"
-	"github.com/buraksezer/olric/internal/protocol"
-	"github.com/buraksezer/olric/internal/pubsub"
-	"github.com/buraksezer/olric/internal/server"
-	"github.com/buraksezer/olric/stats"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/dmap"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/pubsub"
+	"github.com/tochemey/olric/internal/server"
+	"github.com/tochemey/olric/stats"
 )
 
 func toMember(member discovery.Member) stats.Member {
