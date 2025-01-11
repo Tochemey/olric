@@ -114,9 +114,9 @@ func SignCSR(t *testing.T, csr []byte, caKey crypto.Signer, caCert *x509.Certifi
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 }
 
-// GenerateKey generates a 1024-bit RSA private key
+// GenerateKey generates a 2048-bit RSA private key
 func GenerateKey(t *testing.T) (crypto.Signer, []byte) {
-	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
