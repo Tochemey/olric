@@ -34,9 +34,10 @@ See [Samples](#samples) sections to get started!
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
 * Renamed module name
-* Upgrade go version to 1.22.0
+* Upgrade **go version to 1.22.0**
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
+* **TLS Support**
 
 This is forked version of the [main repository](https://github.com/tochemey/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
 Please use the original repo for any bugs or related questions.

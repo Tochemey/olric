@@ -20,6 +20,8 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"net"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -30,7 +32,7 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 )
 
-func respEcho(t *testing.T, s *Server) {
+func respEcho(t *testing.T, s *Server, rdb *redis.Client) {
 	data := make([]byte, 8)
 	_, err := rand.Read(data)
 	require.NoError(t, err)
@@ -40,8 +42,6 @@ func respEcho(t *testing.T, s *Server) {
 	})
 
 	<-s.StartedCtx.Done()
-
-	rdb := redis.NewClient(defaultRedisOptions(s.config))
 
 	ctx := context.Background()
 	cmd := protocol.NewGet("mydmap", "mykey").Command(ctx)
@@ -64,7 +64,10 @@ func TestHandler_ServeRESP_PreCondition(t *testing.T) {
 		require.NoError(t, s.Shutdown(context.Background()))
 	}()
 
-	respEcho(t, s)
+	rdb := redis.NewClient(&redis.Options{
+		Addr: net.JoinHostPort(s.config.BindAddr, strconv.Itoa(s.config.BindPort)),
+	})
+	respEcho(t, s, rdb)
 	require.Equal(t, int32(1), atomic.LoadInt32(&precond))
 }
 
@@ -90,7 +93,9 @@ func TestHandler_ServeRESP_PreCondition_DontCheck(t *testing.T) {
 
 	<-s.StartedCtx.Done()
 
-	rdb := redis.NewClient(defaultRedisOptions(s.config))
+	rdb := redis.NewClient(&redis.Options{
+		Addr: net.JoinHostPort(s.config.BindAddr, strconv.Itoa(s.config.BindPort)),
+	})
 
 	ctx := context.Background()
 	cmd := protocol.NewUpdateRouting([]byte("dummy-data"), 1).Command(ctx)

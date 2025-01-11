@@ -27,7 +27,7 @@ import (
 )
 
 func TestOlric_ClusterRoutingTable_clusterRoutingTableCommandHandler(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	rtCmd := protocol.NewClusterRoutingTable().Command(db.ctx)
@@ -48,7 +48,7 @@ func TestOlric_ClusterRoutingTable_clusterRoutingTableCommandHandler(t *testing.
 }
 
 func TestOlric_RoutingTable_Standalone(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	rt, err := db.routingTable(context.Background())

@@ -30,6 +30,7 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/pubsub"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/testkit"
 	"github.com/tochemey/olric/stats"
 )
 
@@ -42,7 +43,7 @@ func resetPubSubStats() {
 }
 
 func TestOlric_Stats(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	c := db.NewEmbeddedClient()
@@ -95,7 +96,7 @@ func TestOlric_Stats(t *testing.T) {
 }
 
 func TestOlric_Stats_CollectRuntime(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -108,7 +109,7 @@ func TestOlric_Stats_CollectRuntime(t *testing.T) {
 }
 
 func TestOlric_Stats_Cluster(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 	db2 := cluster.addMember(t)
 
@@ -122,7 +123,7 @@ func TestOlric_Stats_Cluster(t *testing.T) {
 func TestStats_PubSub(t *testing.T) {
 	resetPubSubStats()
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	rc := redis.NewClient(&redis.Options{Addr: db.rt.This().String()})
@@ -201,10 +202,95 @@ func TestStats_PubSub(t *testing.T) {
 }
 
 func TestStats_DMap(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	rc := redis.NewClient(&redis.Options{Addr: db.rt.This().String()})
+	ctx := context.Background()
+
+	t.Run("DMap stats without eviction", func(t *testing.T) {
+		// EntriesTotal
+		for i := 0; i < 10; i++ {
+			cmd := protocol.NewPut("mydmap", fmt.Sprintf("mykey-%d", i), []byte("myvalue")).Command(ctx)
+			err := rc.Process(ctx, cmd)
+			require.NoError(t, err)
+			require.NoError(t, cmd.Err())
+		}
+
+		// GetHits
+		for i := 0; i < 10; i++ {
+			cmd := protocol.NewGet("mydmap", fmt.Sprintf("mykey-%d", i)).Command(ctx)
+			err := rc.Process(ctx, cmd)
+			require.NoError(t, err)
+			require.NoError(t, cmd.Err())
+		}
+
+		// DeleteHits
+		for i := 0; i < 10; i++ {
+			cmd := protocol.NewDel("mydmap", fmt.Sprintf("mykey-%d", i)).Command(ctx)
+			err := rc.Process(ctx, cmd)
+			require.NoError(t, err)
+			require.NoError(t, cmd.Err())
+		}
+
+		// GetMisses
+		for i := 0; i < 10; i++ {
+			cmd := protocol.NewGet("mydmap", fmt.Sprintf("mykey-%d", i)).Command(ctx)
+			err := rc.Process(ctx, cmd)
+			err = protocol.ConvertError(err)
+			require.ErrorIs(t, err, dmap.ErrKeyNotFound)
+		}
+
+		// DeleteMisses
+		for i := 0; i < 10; i++ {
+			cmd := protocol.NewDel("mydmap", fmt.Sprintf("mykey-%d", i)).Command(ctx)
+			err := rc.Process(ctx, cmd)
+			require.NoError(t, err)
+			require.NoError(t, cmd.Err())
+		}
+
+		require.GreaterOrEqual(t, dmap.EntriesTotal.Read(), int64(10))
+		require.GreaterOrEqual(t, dmap.GetMisses.Read(), int64(10))
+		require.GreaterOrEqual(t, dmap.GetHits.Read(), int64(10))
+		require.GreaterOrEqual(t, dmap.DeleteHits.Read(), int64(10))
+		require.GreaterOrEqual(t, dmap.DeleteMisses.Read(), int64(10))
+	})
+
+	t.Run("DMap eviction stats", func(t *testing.T) {
+		// EntriesTotal, EvictedTotal
+		for i := 0; i < 10; i++ {
+			cmd := protocol.
+				NewPut("mydmap", fmt.Sprintf("mykey-%d", i), []byte("myvalue")).
+				SetPX(time.Millisecond.Milliseconds()).
+				Command(ctx)
+			err := rc.Process(ctx, cmd)
+			require.NoError(t, err)
+			require.NoError(t, cmd.Err())
+		}
+		<-time.After(100 * time.Millisecond)
+
+		// GetMisses
+		for i := 0; i < 10; i++ {
+			cmd := protocol.NewGet("mydmap", "mykey").Command(ctx)
+			err := rc.Process(ctx, cmd)
+			err = protocol.ConvertError(err)
+			require.ErrorIs(t, err, dmap.ErrKeyNotFound)
+		}
+
+		require.Greater(t, dmap.DeleteHits.Read(), int64(0))
+		require.Greater(t, dmap.EvictedTotal.Read(), int64(0))
+		require.GreaterOrEqual(t, dmap.EntriesTotal.Read(), int64(10))
+	})
+}
+
+func TestStats_DMapWithTLS(t *testing.T) {
+	tlsServerConfig, tlsClientConfig := testkit.GetServerAndClientTLSConfig(t)
+	config := testutil.NewConfigWithTLS(t, tlsServerConfig, tlsClientConfig)
+
+	cluster := newTestCluster(t)
+	db := cluster.addMemberWithConfig(t, config)
+
+	rc := redis.NewClient(&redis.Options{Addr: db.rt.This().String(), TLSConfig: tlsClientConfig})
 	ctx := context.Background()
 
 	t.Run("DMap stats without eviction", func(t *testing.T) {

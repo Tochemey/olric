@@ -28,7 +28,7 @@ import (
 )
 
 func TestDMapPipeline_Put(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -70,7 +70,7 @@ func TestDMapPipeline_Put(t *testing.T) {
 }
 
 func TestDMapPipeline_Get(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -111,7 +111,7 @@ func TestDMapPipeline_Get(t *testing.T) {
 }
 
 func TestDMapPipeline_Delete(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -149,7 +149,7 @@ func TestDMapPipeline_Delete(t *testing.T) {
 }
 
 func TestDMapPipeline_Expire(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -193,7 +193,7 @@ func TestDMapPipeline_Expire(t *testing.T) {
 }
 
 func TestDMapPipeline_Incr(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -227,7 +227,7 @@ func TestDMapPipeline_Incr(t *testing.T) {
 }
 
 func TestDMapPipeline_Decr(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -261,7 +261,7 @@ func TestDMapPipeline_Decr(t *testing.T) {
 }
 
 func TestDMapPipeline_GetPut(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -294,7 +294,7 @@ func TestDMapPipeline_GetPut(t *testing.T) {
 }
 
 func TestDMapPipeline_IncrByFloat(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -327,7 +327,7 @@ func TestDMapPipeline_IncrByFloat(t *testing.T) {
 }
 
 func TestDMapPipeline_Discard(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -365,7 +365,7 @@ func TestDMapPipeline_Discard(t *testing.T) {
 }
 
 func TestDMapPipeline_Close(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -395,7 +395,7 @@ func TestDMapPipeline_Close(t *testing.T) {
 }
 
 func TestDMapPipeline_ErrNotReady(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -467,7 +467,7 @@ func TestDMapPipeline_ErrNotReady(t *testing.T) {
 }
 
 func TestDMapPipeline_EmbeddedClient(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -508,7 +508,7 @@ func TestDMapPipeline_EmbeddedClient(t *testing.T) {
 }
 
 func TestDMapPipeline_setOrGetClusterClient(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()

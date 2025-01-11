@@ -28,7 +28,7 @@ import (
 )
 
 func TestEmbeddedClient_ScanMatch(t *testing.T) {
-	cl := newTestOlricCluster(t)
+	cl := newTestCluster(t)
 	db := cl.addMember(t)
 	cl.addMember(t)
 
@@ -63,7 +63,7 @@ func TestEmbeddedClient_ScanMatch(t *testing.T) {
 }
 
 func TestEmbeddedClient_Scan(t *testing.T) {
-	cl := newTestOlricCluster(t)
+	cl := newTestCluster(t)
 	db := cl.addMember(t)
 	cl.addMember(t)
 

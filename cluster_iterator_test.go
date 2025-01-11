@@ -28,7 +28,7 @@ import (
 )
 
 func TestClusterClient_ScanMatch(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -66,7 +66,7 @@ func TestClusterClient_ScanMatch(t *testing.T) {
 }
 
 func TestClusterClient_Scan(t *testing.T) {
-	cl := newTestOlricCluster(t)
+	cl := newTestCluster(t)
 	db := cl.addMember(t)
 	cl.addMember(t)
 

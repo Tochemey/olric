@@ -25,7 +25,7 @@ import (
 )
 
 func TestOlric_Ping(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	result, err := db.ping(context.Background(), db.rt.This().String(), "")
@@ -34,7 +34,7 @@ func TestOlric_Ping(t *testing.T) {
 }
 
 func TestOlric_PingWithMessage(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	msg := "Olric rocks!"

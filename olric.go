@@ -193,51 +193,52 @@ func initializeServices(db *Olric) error {
 }
 
 // New creates a new Olric instance, otherwise returns an error.
-func New(c *config.Config) (*Olric, error) {
+func New(config *config.Config) (*Olric, error) {
 	var err error
-	c, err = prepareConfig(c)
+	config, err = prepareConfig(config)
 	if err != nil {
 		return nil, err
 	}
 
 	e := environment.New()
-	e.Set("config", c)
+	e.Set("config", config)
 
 	// Set the hash function. Olric distributes keys over partitions by hashing.
-	partitions.SetHashFunc(c.Hasher)
+	partitions.SetHashFunc(config.Hasher)
 
-	flogger := flog.New(c.Logger)
-	flogger.SetLevel(c.LogVerbosity)
-	if c.LogLevel == "DEBUG" {
+	flogger := flog.New(config.Logger)
+	flogger.SetLevel(config.LogVerbosity)
+	if config.LogLevel == "DEBUG" {
 		flogger.ShowLineNumber(1)
 	}
 	e.Set("logger", flogger)
 
-	client := server.NewClient(c.Client)
+	client := server.NewClient(config.Client)
 	e.Set("client", client)
-	e.Set("primary", partitions.New(c.PartitionCount, partitions.PRIMARY))
-	e.Set("backup", partitions.New(c.PartitionCount, partitions.BACKUP))
+	e.Set("primary", partitions.New(config.PartitionCount, partitions.PRIMARY))
+	e.Set("backup", partitions.New(config.PartitionCount, partitions.BACKUP))
 	e.Set("locker", locker.New())
 	ctx, cancel := context.WithCancel(context.Background())
 	db := &Olric{
-		name:     c.MemberlistConfig.Name,
+		name:     config.MemberlistConfig.Name,
 		env:      e,
 		log:      flogger,
-		config:   c,
-		hashFunc: c.Hasher,
+		config:   config,
+		hashFunc: config.Hasher,
 		client:   client,
 		primary:  e.Get("primary").(*partitions.Partitions),
 		backup:   e.Get("backup").(*partitions.Partitions),
-		started:  c.Started,
+		started:  config.Started,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
 
 	// Create a Redcon server instance
 	rc := &server.Config{
-		BindAddr:        c.BindAddr,
-		BindPort:        c.BindPort,
-		KeepAlivePeriod: c.KeepAlivePeriod,
+		BindAddr:        config.BindAddr,
+		BindPort:        config.BindPort,
+		KeepAlivePeriod: config.KeepAlivePeriod,
+		TLSConfig:       config.ServerTLS,
 	}
 	srv := server.New(rc, flogger)
 	srv.SetPreConditionFunc(db.preconditionFunc)

@@ -20,6 +20,8 @@ package server
 import (
 	"context"
 	"math/rand"
+	"net"
+	"strconv"
 	"testing"
 
 	"github.com/redis/go-redis/v9"
@@ -42,7 +44,9 @@ func TestMux_PubSub_Command(t *testing.T) {
 
 	<-s.StartedCtx.Done()
 
-	rdb := redis.NewClient(defaultRedisOptions(s.config))
+	rdb := redis.NewClient(&redis.Options{
+		Addr: net.JoinHostPort(s.config.BindAddr, strconv.Itoa(s.config.BindPort)),
+	})
 
 	ctx := context.Background()
 	var args []interface{}

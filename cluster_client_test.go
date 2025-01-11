@@ -34,24 +34,42 @@ import (
 )
 
 func TestClusterClient_Ping(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	cluster.addMember(t)
-	db := cluster.addMember(t)
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		cluster.addMember(t)
+		db := cluster.addMember(t)
 
-	ctx := context.Background()
-	c, err := NewClusterClient([]string{db.name})
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, c.Close(ctx))
-	}()
+		ctx := context.Background()
+		c, err := NewClusterClient([]string{db.name})
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, c.Close(ctx))
+		}()
 
-	response, err := c.Ping(ctx, db.rt.This().String(), "")
-	require.NoError(t, err)
-	require.Equal(t, DefaultPingResponse, response)
+		response, err := c.Ping(ctx, db.rt.This().String(), "")
+		require.NoError(t, err)
+		require.Equal(t, DefaultPingResponse, response)
+	})
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		config := testutil.NewConfigWithTLS(t, nil, nil)
+		db := cluster.addMemberWithConfig(t, config)
+
+		ctx := context.Background()
+		c, err := NewClusterClient([]string{db.name}, WithConfig(config.Client))
+		require.NoError(t, err)
+		defer func() {
+			require.NoError(t, c.Close(ctx))
+		}()
+
+		response, err := c.Ping(ctx, db.rt.This().String(), "")
+		require.NoError(t, err)
+		require.Equal(t, DefaultPingResponse, response)
+	})
 }
 
 func TestClusterClient_Ping_WithMessage(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	cluster.addMember(t)
 	db := cluster.addMember(t)
 
@@ -69,7 +87,7 @@ func TestClusterClient_Ping_WithMessage(t *testing.T) {
 }
 
 func TestClusterClient_RoutingTable(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -86,7 +104,7 @@ func TestClusterClient_RoutingTable(t *testing.T) {
 }
 
 func TestClusterClient_RoutingTable_Cluster(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	cluster.addMember(t) // Cluster coordinator
 	<-time.After(250 * time.Millisecond)
 
@@ -106,7 +124,7 @@ func TestClusterClient_RoutingTable_Cluster(t *testing.T) {
 }
 
 func TestClusterClient_Put(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -124,7 +142,7 @@ func TestClusterClient_Put(t *testing.T) {
 }
 
 func TestClusterClient_Get(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -150,7 +168,7 @@ func TestClusterClient_Get(t *testing.T) {
 }
 
 func TestClusterClient_Delete(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -175,7 +193,7 @@ func TestClusterClient_Delete(t *testing.T) {
 }
 
 func TestClusterClient_Delete_Many_Keys(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -202,7 +220,7 @@ func TestClusterClient_Delete_Many_Keys(t *testing.T) {
 }
 
 func TestClusterClient_Destroy(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -226,7 +244,7 @@ func TestClusterClient_Destroy(t *testing.T) {
 }
 
 func TestClusterClient_Incr(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -255,7 +273,7 @@ func TestClusterClient_Incr(t *testing.T) {
 }
 
 func TestClusterClient_IncrByFloat(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -284,7 +302,7 @@ func TestClusterClient_IncrByFloat(t *testing.T) {
 }
 
 func TestClusterClient_Decr(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -316,7 +334,7 @@ func TestClusterClient_Decr(t *testing.T) {
 }
 
 func TestClusterClient_GetPut(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -342,7 +360,7 @@ func TestClusterClient_GetPut(t *testing.T) {
 }
 
 func TestClusterClient_Expire(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -368,7 +386,7 @@ func TestClusterClient_Expire(t *testing.T) {
 }
 
 func TestClusterClient_Lock_Unlock(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -389,7 +407,7 @@ func TestClusterClient_Lock_Unlock(t *testing.T) {
 }
 
 func TestClusterClient_Lock_Lease(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -415,7 +433,7 @@ func TestClusterClient_Lock_Lease(t *testing.T) {
 }
 
 func TestClusterClient_Lock_ErrLockNotAcquired(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -436,7 +454,7 @@ func TestClusterClient_Lock_ErrLockNotAcquired(t *testing.T) {
 }
 
 func TestClusterClient_LockWithTimeout(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -457,7 +475,7 @@ func TestClusterClient_LockWithTimeout(t *testing.T) {
 }
 
 func TestClusterClient_LockWithTimeout_ErrNoSuchLock(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -480,7 +498,7 @@ func TestClusterClient_LockWithTimeout_ErrNoSuchLock(t *testing.T) {
 }
 
 func TestClusterClient_LockWithTimeout_Then_Lease(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -507,7 +525,7 @@ func TestClusterClient_LockWithTimeout_Then_Lease(t *testing.T) {
 }
 
 func TestClusterClient_LockWithTimeout_ErrLockNotAcquired(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -528,7 +546,7 @@ func TestClusterClient_LockWithTimeout_ErrLockNotAcquired(t *testing.T) {
 }
 
 func TestClusterClient_Put_Ex(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -551,7 +569,7 @@ func TestClusterClient_Put_Ex(t *testing.T) {
 }
 
 func TestClusterClient_Put_PX(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -574,7 +592,7 @@ func TestClusterClient_Put_PX(t *testing.T) {
 }
 
 func TestClusterClient_Put_EXAT(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -597,7 +615,7 @@ func TestClusterClient_Put_EXAT(t *testing.T) {
 }
 
 func TestClusterClient_Put_PXAT(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -620,7 +638,7 @@ func TestClusterClient_Put_PXAT(t *testing.T) {
 }
 
 func TestClusterClient_Put_NX(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -648,7 +666,7 @@ func TestClusterClient_Put_NX(t *testing.T) {
 }
 
 func TestClusterClient_Put_XX(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -666,7 +684,7 @@ func TestClusterClient_Put_XX(t *testing.T) {
 }
 
 func TestClusterClient_Stats(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -684,7 +702,7 @@ func TestClusterClient_Stats(t *testing.T) {
 }
 
 func TestClusterClient_Stats_Cluster(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 	db2 := cluster.addMember(t)
 
@@ -706,7 +724,7 @@ func TestClusterClient_Stats_Cluster(t *testing.T) {
 }
 
 func TestClusterClient_Stats_CollectRuntime(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -724,7 +742,7 @@ func TestClusterClient_Stats_CollectRuntime(t *testing.T) {
 }
 
 func TestClusterClient_Set_Options(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -742,7 +760,7 @@ func TestClusterClient_Set_Options(t *testing.T) {
 }
 
 func TestClusterClient_Members(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	cluster.addMember(t)
 	db := cluster.addMember(t)
 
@@ -771,7 +789,7 @@ func TestClusterClient_Members(t *testing.T) {
 }
 
 func TestClusterClient_smartPick(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db1 := cluster.addMember(t)
 	db2 := cluster.addMember(t)
 	db3 := cluster.addMember(t)

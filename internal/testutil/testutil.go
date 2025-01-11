@@ -18,6 +18,7 @@
 package testutil
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -83,6 +84,31 @@ func NewConfig() *config.Config {
 	c.LeaveTimeout = 500 * time.Millisecond
 	if err := c.Sanitize(); err != nil {
 		panic(fmt.Sprintf("failed to sanitize default config: %v", err))
+	}
+	return c
+}
+
+func NewConfigWithTLS(t *testing.T, serverTLS, clientTLS *tls.Config) *config.Config {
+	c := config.New("local")
+	c.ClientTLS = clientTLS
+	c.ServerTLS = serverTLS
+
+	c.PartitionCount = 7
+	mc := memberlist.DefaultLocalConfig()
+	mc.BindAddr = "127.0.0.1"
+	mc.BindPort = 0
+	c.MemberlistConfig = mc
+
+	port, err := GetFreePort()
+	if err != nil {
+		t.Fatalf("GetFreePort returned an error: %v", err)
+	}
+	c.BindAddr = "127.0.0.1"
+	c.BindPort = port
+	c.MemberlistConfig.Name = net.JoinHostPort(c.BindAddr, strconv.Itoa(c.BindPort))
+	c.LeaveTimeout = 500 * time.Millisecond
+	if err := c.Sanitize(); err != nil {
+		t.Fatalf("failed to sanitize default config: %v", err)
 	}
 	return c
 }
