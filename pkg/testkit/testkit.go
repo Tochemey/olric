@@ -129,8 +129,8 @@ func GenerateKey(t *testing.T) (crypto.Signer, []byte) {
 	return key, keyPEM
 }
 
-// GetServerAndClientTLSConfig returns both server and client TLS configs useful for unit tests
-func GetServerAndClientTLSConfig(t *testing.T) (serverConfig *tls.Config, clientConfig *tls.Config) {
+// GetTLSServerAndClientConfigs returns both server and client TLS configs useful for unit tests
+func GetTLSServerAndClientConfigs(t *testing.T) (serverConfig *tls.Config, clientConfig *tls.Config) {
 	caKey, _ := GenerateKey(t)
 	caCert, _ := GenerateRootCert(t, caKey)
 

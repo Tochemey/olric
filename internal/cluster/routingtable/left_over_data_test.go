@@ -26,53 +26,104 @@ import (
 
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
+	"github.com/tochemey/olric/pkg/testkit"
 )
 
 func TestRoutingTable_LeftOverData(t *testing.T) {
-	cluster := newTestCluster()
-	defer cluster.cancel()
+	t.Run("With TLS", func(t *testing.T) {
+		tlsSrv, tlsClient := testkit.GetTLSServerAndClientConfigs(t)
 
-	c1 := testutil.NewConfig()
-	rt1, err := cluster.addNode(c1)
-	require.NoError(t, err)
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	if !rt1.IsBootstrapped() {
-		t.Fatalf("The coordinator node cannot be bootstrapped")
-	}
+		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt1, err := cluster.addNode(c1)
+		require.NoError(t, err)
 
-	for partID := uint64(0); partID < c1.PartitionCount; partID++ {
-		part := rt1.primary.PartitionByID(partID)
-		ts := mockfragment.New()
-		ts.Fill()
-		part.Map().Store("test-data", ts)
-	}
-
-	c2 := testutil.NewConfig()
-	rt2, err := cluster.addNode(c2)
-	require.NoError(t, err)
-
-	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !rt2.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
 		}
-		return nil
+
+		for partID := uint64(0); partID < c1.PartitionCount; partID++ {
+			part := rt1.primary.PartitionByID(partID)
+			ts := mockfragment.New()
+			ts.Fill()
+			part.Map().Store("test-data", ts)
+		}
+
+		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt2, err := cluster.addNode(c2)
+		require.NoError(t, err)
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		for partID := uint64(0); partID < c2.PartitionCount; partID++ {
+			part := rt2.primary.PartitionByID(partID)
+			ts := mockfragment.New()
+			ts.Fill()
+			part.Map().Store("test-data", ts)
+		}
+
+		rt1.UpdateEagerly()
+
+		for partID := uint64(0); partID < c1.PartitionCount; partID++ {
+			part := rt1.primary.PartitionByID(partID)
+			if len(part.Owners()) != 2 {
+				t.Fatalf("Expected partition owners count: 2. Got: %d, PartID: %d", part.OwnerCount(), partID)
+			}
+		}
 	})
-	require.NoError(t, err)
+	t.Run("With no TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	for partID := uint64(0); partID < c2.PartitionCount; partID++ {
-		part := rt2.primary.PartitionByID(partID)
-		ts := mockfragment.New()
-		ts.Fill()
-		part.Map().Store("test-data", ts)
-	}
+		c1 := testutil.NewConfig()
+		rt1, err := cluster.addNode(c1)
+		require.NoError(t, err)
 
-	rt1.UpdateEagerly()
-
-	for partID := uint64(0); partID < c1.PartitionCount; partID++ {
-		part := rt1.primary.PartitionByID(partID)
-		if len(part.Owners()) != 2 {
-			t.Fatalf("Expected partition owners count: 2. Got: %d, PartID: %d", part.OwnerCount(), partID)
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
 		}
-	}
 
+		for partID := uint64(0); partID < c1.PartitionCount; partID++ {
+			part := rt1.primary.PartitionByID(partID)
+			ts := mockfragment.New()
+			ts.Fill()
+			part.Map().Store("test-data", ts)
+		}
+
+		c2 := testutil.NewConfig()
+		rt2, err := cluster.addNode(c2)
+		require.NoError(t, err)
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		for partID := uint64(0); partID < c2.PartitionCount; partID++ {
+			part := rt2.primary.PartitionByID(partID)
+			ts := mockfragment.New()
+			ts.Fill()
+			part.Map().Store("test-data", ts)
+		}
+
+		rt1.UpdateEagerly()
+
+		for partID := uint64(0); partID < c1.PartitionCount; partID++ {
+			part := rt1.primary.PartitionByID(partID)
+			if len(part.Owners()) != 2 {
+				t.Fatalf("Expected partition owners count: 2. Got: %d, PartID: %d", part.OwnerCount(), partID)
+			}
+		}
+	})
 }

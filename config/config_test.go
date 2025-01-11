@@ -21,10 +21,23 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/tochemey/olric/pkg/testkit"
 )
 
 func TestConfig_Initialize(t *testing.T) {
-	c := &Config{}
-	require.NoError(t, c.Sanitize())
-	require.NoError(t, c.Validate())
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
+		c := &Config{
+			ServerTLSConfig: serverConfig,
+			ClientTLSConfig: clientConfig,
+		}
+		require.NoError(t, c.Sanitize())
+		require.NoError(t, c.Validate())
+	})
+	t.Run("With no TLS", func(t *testing.T) {
+		c := &Config{}
+		require.NoError(t, c.Sanitize())
+		require.NoError(t, c.Validate())
+	})
 }

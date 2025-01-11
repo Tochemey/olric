@@ -102,7 +102,7 @@ func newTLSServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Con
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
 
-	srvConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+	srvConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 
 	l := log.New(os.Stdout, "server-test: ", log.LstdFlags)
 	fl := flog.New(l)

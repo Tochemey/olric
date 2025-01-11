@@ -41,7 +41,7 @@ func TestEmbeddedClient_NewDMap(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -70,7 +70,7 @@ func TestEmbeddedClient_DMap_Put(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_EX(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -110,7 +110,7 @@ func TestEmbeddedClient_DMap_Put_EX(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_PX(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -150,7 +150,7 @@ func TestEmbeddedClient_DMap_Put_PX(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_EXAT(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -190,7 +190,7 @@ func TestEmbeddedClient_DMap_Put_EXAT(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_PXAT(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -230,7 +230,7 @@ func TestEmbeddedClient_DMap_Put_PXAT(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_NX(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -584,7 +584,7 @@ func TestEmbeddedClient_DMap_LockWithTimeout_Timeout(t *testing.T) {
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrLockNotAcquired(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -625,7 +625,7 @@ func TestEmbeddedClient_DMap_LockWithTimeout_ErrLockNotAcquired(t *testing.T) {
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -671,7 +671,7 @@ func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock(t *testing.T) {
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock_Timeout(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -715,7 +715,7 @@ func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock_Timeout(t *testing.T)
 
 func TestEmbeddedClient_DMap_LockWithTimeout_Then_Lease(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -767,7 +767,7 @@ func TestEmbeddedClient_DMap_LockWithTimeout_Then_Lease(t *testing.T) {
 
 func TestEmbeddedClient_RoutingTable_Standalone(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
 		cluster := newTestCluster(t)
@@ -801,7 +801,7 @@ func TestEmbeddedClient_RoutingTable_Standalone(t *testing.T) {
 
 func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 
 		cluster := newTestCluster(t)
 		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig)) // Cluster coordinator
@@ -849,7 +849,7 @@ func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
 func TestEmbeddedClient_Member(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster(t)
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 
@@ -895,7 +895,7 @@ func TestEmbeddedClient_Member(t *testing.T) {
 func TestEmbeddedClient_Ping(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster(t)
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 
 		e := db.NewEmbeddedClient()
@@ -919,7 +919,7 @@ func TestEmbeddedClient_Ping(t *testing.T) {
 func TestEmbeddedClient_Ping_WithMessage(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster(t)
-		serverConfig, clientConfig := testkit.GetServerAndClientTLSConfig(t)
+		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
 		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 
 		e := db.NewEmbeddedClient()

@@ -284,7 +284,7 @@ func TestStats_DMap(t *testing.T) {
 }
 
 func TestStats_DMapWithTLS(t *testing.T) {
-	tlsServerConfig, tlsClientConfig := testkit.GetServerAndClientTLSConfig(t)
+	tlsServerConfig, tlsClientConfig := testkit.GetTLSServerAndClientConfigs(t)
 	config := testutil.NewConfigWithTLS(t, tlsServerConfig, tlsClientConfig)
 
 	cluster := newTestCluster(t)
