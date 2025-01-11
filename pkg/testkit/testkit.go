@@ -165,7 +165,7 @@ func GetServerAndClientTLSConfig(t *testing.T) (serverConfig *tls.Config, client
 }
 
 func generateKeyAndCSR(t *testing.T) ([]byte, []byte) {
-	rsaKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
