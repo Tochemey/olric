@@ -40,8 +40,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 	"github.com/tochemey/olric/pkg/flog"
-	"github.com/tochemey/olric/pkg/testkit"
 )
 
 func getFreePort() (int, error) {
@@ -102,7 +102,7 @@ func newTLSServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Con
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
 
-	srvConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
+	srvConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
 
 	l := log.New(os.Stdout, "server-test: ", log.LstdFlags)
 	fl := flog.New(l)

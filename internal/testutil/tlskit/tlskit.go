@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package testkit
+package tlskit
 
 import (
 	"crypto"
@@ -33,17 +33,47 @@ import (
 	"time"
 )
 
-// GenerateRootCert generates a root certificate for unit tests
-func GenerateRootCert(t *testing.T, key crypto.Signer) (*x509.Certificate, []byte) {
+// GetTLSServerAndClientConfigs returns both server and client TLS configs useful for unit tests
+func GetTLSServerAndClientConfigs(t *testing.T) (serverConfig *tls.Config, clientConfig *tls.Config) {
+	caKey, _ := generateKey(t)
+	caCert, _ := generateRootCert(t, caKey)
+
+	clientKeyPEM, deviceCsrPEM := generateKeyAndCSR(t)
+	clientCertPEM := signCSR(t, deviceCsrPEM, caKey, caCert)
+	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serverKeyPEM, serverCsrPEM := generateKeyAndCSR(t)
+	serverCertPEM := signCSR(t, serverCsrPEM, caKey, caCert)
+	serverCert, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientPool := x509.NewCertPool()
+	clientPool.AddCert(caCert)
+
+	serverPool := x509.NewCertPool()
+	serverPool.AddCert(caCert)
+
+	return &tls.Config{
+			Certificates: []tls.Certificate{serverCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    clientPool,
+		}, &tls.Config{
+			Certificates: []tls.Certificate{clientCert},
+			RootCAs:      serverPool,
+		}
+}
+
+// generateRootCert generates a root certificate for unit tests
+func generateRootCert(t *testing.T, key crypto.Signer) (*x509.Certificate, []byte) {
 	subjectKeyIdentifier := calculateSubjectKeyIdentifier(t, key.Public())
 
 	template := &x509.Certificate{
-		SerialNumber: generateSerial(t),
-		Subject: pkix.Name{
-			Organization: []string{"Awesomeness, Inc."},
-			Country:      []string{"US"},
-			Locality:     []string{"San Francisco"},
-		},
+		SerialNumber:          generateSerial(t),
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().AddDate(10, 0, 0),
 		SubjectKeyId:          subjectKeyIdentifier,
@@ -73,8 +103,8 @@ func GenerateRootCert(t *testing.T, key crypto.Signer) (*x509.Certificate, []byt
 	return rootCert, rootCertPEM
 }
 
-// SignCSR signs a certificate signing request with the given CA certificate and private key
-func SignCSR(t *testing.T, csr []byte, caKey crypto.Signer, caCert *x509.Certificate) []byte {
+// signCSR signs a certificate signing request with the given CA certificate and private key
+func signCSR(t *testing.T, csr []byte, caKey crypto.Signer, caCert *x509.Certificate) []byte {
 	block, _ := pem.Decode(csr)
 	if block == nil {
 		t.Fatal("failed to decode csr")
@@ -114,8 +144,8 @@ func SignCSR(t *testing.T, csr []byte, caKey crypto.Signer, caCert *x509.Certifi
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 }
 
-// GenerateKey generates a 2048-bit RSA private key
-func GenerateKey(t *testing.T) (crypto.Signer, []byte) {
+// generateKey generates a 2048-bit RSA private key
+func generateKey(t *testing.T) (crypto.Signer, []byte) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -127,41 +157,6 @@ func GenerateKey(t *testing.T) (crypto.Signer, []byte) {
 	})
 
 	return key, keyPEM
-}
-
-// GetTLSServerAndClientConfigs returns both server and client TLS configs useful for unit tests
-func GetTLSServerAndClientConfigs(t *testing.T) (serverConfig *tls.Config, clientConfig *tls.Config) {
-	caKey, _ := GenerateKey(t)
-	caCert, _ := GenerateRootCert(t, caKey)
-
-	clientKeyPEM, deviceCsrPEM := generateKeyAndCSR(t)
-	clientCertPEM := SignCSR(t, deviceCsrPEM, caKey, caCert)
-	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	serverKeyPEM, serverCsrPEM := generateKeyAndCSR(t)
-	serverCertPEM := SignCSR(t, serverCsrPEM, caKey, caCert)
-	serverCert, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	clientPool := x509.NewCertPool()
-	clientPool.AddCert(caCert)
-
-	serverPool := x509.NewCertPool()
-	serverPool.AddCert(caCert)
-
-	return &tls.Config{
-			Certificates: []tls.Certificate{serverCert},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    clientPool,
-		}, &tls.Config{
-			Certificates: []tls.Certificate{clientCert},
-			RootCAs:      serverPool,
-		}
 }
 
 func generateKeyAndCSR(t *testing.T) ([]byte, []byte) {
@@ -176,12 +171,6 @@ func generateKeyAndCSR(t *testing.T) ([]byte, []byte) {
 	})
 
 	template := &x509.CertificateRequest{
-		Subject: pkix.Name{
-			Country:      []string{"US"},
-			Locality:     []string{"San Francisco"},
-			Organization: []string{"Awesomeness, Inc."},
-			Province:     []string{"California"},
-		},
 		SignatureAlgorithm: x509.SHA256WithRSA,
 		IPAddresses:        []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 	}

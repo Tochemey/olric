@@ -38,7 +38,7 @@ import (
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
-	"github.com/tochemey/olric/pkg/testkit"
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 )
 
 func TestBalance_Primary_Move(t *testing.T) {
@@ -46,7 +46,7 @@ func TestBalance_Primary_Move(t *testing.T) {
 		cluster := newMockCluster(t)
 		defer cluster.shutdown()
 
-		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 		e1 := newTestEnvironment(c1)
 		cluster.addNode(e1)
@@ -142,7 +142,7 @@ func TestBalance_Empty_Backup_Move(t *testing.T) {
 		cluster := newMockCluster(t)
 		defer cluster.shutdown()
 
-		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 		c1.ReplicaCount = 2
 		e1 := newTestEnvironment(c1)
@@ -207,7 +207,7 @@ func TestBalance_Empty_Backup_Move(t *testing.T) {
 
 func TestBalance_Backup_Move(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		cluster := newMockCluster(t)
 		defer cluster.shutdown()
 

@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/internal/testutil"
-	"github.com/tochemey/olric/pkg/testkit"
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 )
 
 func pubsubTestRunner(t *testing.T, ps *PubSub, kind, channel string) {
@@ -87,7 +87,7 @@ L:
 
 func TestPubSub_Publish_Subscribe(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		srvConfig, clConfig := testkit.GetTLSServerAndClientConfigs(t)
+		srvConfig, clConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, srvConfig, clConfig)
 
 		cluster := newTestCluster(t)
@@ -125,7 +125,7 @@ func TestPubSub_Publish_Subscribe(t *testing.T) {
 
 func TestPubSub_Publish_PSubscribe(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		srvConfig, clConfig := testkit.GetTLSServerAndClientConfigs(t)
+		srvConfig, clConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, srvConfig, clConfig)
 
 		cluster := newTestCluster(t)
@@ -161,7 +161,7 @@ func TestPubSub_Publish_PSubscribe(t *testing.T) {
 
 func TestPubSub_PubSubChannels(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		srvConfig, clConfig := testkit.GetTLSServerAndClientConfigs(t)
+		srvConfig, clConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, srvConfig, clConfig)
 
 		cluster := newTestCluster(t)
@@ -225,7 +225,7 @@ func TestPubSub_PubSubChannels(t *testing.T) {
 
 func TestPubSub_PubSubNumSub(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		srvConfig, clConfig := testkit.GetTLSServerAndClientConfigs(t)
+		srvConfig, clConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, srvConfig, clConfig)
 
 		cluster := newTestCluster(t)
@@ -297,7 +297,7 @@ func TestPubSub_PubSubNumSub(t *testing.T) {
 
 func TestPubSub_PubSubNumPat(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		srvConfig, clConfig := testkit.GetTLSServerAndClientConfigs(t)
+		srvConfig, clConfig := tlskit.GetTLSServerAndClientConfigs(t)
 		config := testutil.NewConfigWithTLS(t, srvConfig, clConfig)
 
 		cluster := newTestCluster(t)
@@ -359,7 +359,7 @@ func TestPubSub_PubSubNumPat(t *testing.T) {
 
 func TestPubSub_Cluster(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		tlsServerConfig, tlsClientConfig := testkit.GetTLSServerAndClientConfigs(t)
+		tlsServerConfig, tlsClientConfig := tlskit.GetTLSServerAndClientConfigs(t)
 
 		cluster := newTestCluster(t)
 		db1 := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, tlsServerConfig, tlsClientConfig))

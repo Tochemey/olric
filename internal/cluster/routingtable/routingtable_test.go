@@ -35,7 +35,7 @@ import (
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
-	"github.com/tochemey/olric/pkg/testkit"
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 )
 
 func newRoutingTableForTest(c *config.Config, srv *server.Server) *RoutingTable {
@@ -125,7 +125,7 @@ func TestRoutingTable_SingleNode(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		tlsSrv, tlsClient := testkit.GetTLSServerAndClientConfigs(t)
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 		c := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
 		rt, err := cluster.addNode(c)
 		if err != nil {
@@ -195,7 +195,7 @@ func TestRoutingTable_Cluster(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		tlsSrv, tlsClient := testkit.GetTLSServerAndClientConfigs(t)
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 
 		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
 		rt1, err := cluster.addNode(c1)
@@ -313,7 +313,7 @@ func TestRoutingTable_Cluster(t *testing.T) {
 
 func TestRoutingTable_CheckPartitionOwnership(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		tlsSrv, tlsClient := testkit.GetTLSServerAndClientConfigs(t)
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 
 		cluster := newTestCluster()
 		defer cluster.cancel()
@@ -407,7 +407,7 @@ func TestRoutingTable_NodeLeave(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		tlsSrv, tlsClient := testkit.GetTLSServerAndClientConfigs(t)
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
 		rt1, err := cluster.addNode(c1)
 		if err != nil {
@@ -533,7 +533,7 @@ func TestRoutingTable_NodeUpdate(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		tlsSrv, tlsClient := testkit.GetTLSServerAndClientConfigs(t)
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 
 		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
 		rt1, err := cluster.addNode(c1)

@@ -30,7 +30,7 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/pubsub"
 	"github.com/tochemey/olric/internal/testutil"
-	"github.com/tochemey/olric/pkg/testkit"
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 	"github.com/tochemey/olric/stats"
 )
 
@@ -284,7 +284,7 @@ func TestStats_DMap(t *testing.T) {
 }
 
 func TestStats_DMapWithTLS(t *testing.T) {
-	tlsServerConfig, tlsClientConfig := testkit.GetTLSServerAndClientConfigs(t)
+	tlsServerConfig, tlsClientConfig := tlskit.GetTLSServerAndClientConfigs(t)
 	config := testutil.NewConfigWithTLS(t, tlsServerConfig, tlsClientConfig)
 
 	cluster := newTestCluster(t)
