@@ -325,16 +325,11 @@ type Config struct {
 	// Then, you may need to modify it to tune for your environment.
 	MemberlistConfig *memberlist.Config
 
-	// ServerTLSConfig used to configure a TLS server.
+	// TlsConfig used to configure a TLS server.
 	// After one has been passed to a TLS function it must not be
 	// modified. A Config may be reused; the tls package will also not
 	// modify it.
-	ServerTLSConfig *tls.Config
-	// ClientTLSConfig is used to configure a TLS client.
-	// After one has been passed to a TLS function it must not be
-	// modified. A Config may be reused; the tls package will also not
-	// modify it.
-	ClientTLSConfig *tls.Config
+	TlsConfig *tls.Config
 }
 
 // Validate finds errors in the current configuration.
@@ -493,10 +488,6 @@ func (c *Config) Sanitize() error {
 
 	if c.Client == nil {
 		c.Client = NewClient()
-	}
-
-	if c.ClientTLSConfig != nil {
-		c.Client.TLSConfig = c.ClientTLSConfig
 	}
 
 	if c.DMaps == nil {

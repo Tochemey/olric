@@ -90,8 +90,8 @@ func NewConfig() *config.Config {
 
 func NewConfigWithTLS(t *testing.T, serverTLS, clientTLS *tls.Config) *config.Config {
 	c := config.New("local")
-	c.ClientTLSConfig = clientTLS
-	c.ServerTLSConfig = serverTLS
+	c.Client.TLSConfig = clientTLS
+	c.TlsConfig = serverTLS
 
 	c.PartitionCount = 7
 	mc := memberlist.DefaultLocalConfig()
@@ -118,7 +118,7 @@ func NewServer(c *config.Config) *server.Server {
 		BindAddr:        c.BindAddr,
 		BindPort:        c.BindPort,
 		KeepAlivePeriod: time.Second,
-		TLSConfig:       c.ServerTLSConfig,
+		TLSConfig:       c.TlsConfig,
 	}
 	l := NewFlogger(c)
 	return server.New(sc, l)

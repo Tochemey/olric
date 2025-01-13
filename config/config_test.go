@@ -27,10 +27,9 @@ import (
 
 func TestConfig_Initialize(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := testkit.GetTLSServerAndClientConfigs(t)
+		serverConfig, _ := testkit.GetTLSServerAndClientConfigs(t)
 		c := &Config{
-			ServerTLSConfig: serverConfig,
-			ClientTLSConfig: clientConfig,
+			TlsConfig: serverConfig,
 		}
 		require.NoError(t, c.Sanitize())
 		require.NoError(t, c.Validate())
