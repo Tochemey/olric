@@ -1,21 +1,25 @@
-// Copyright 2018-2024 Burak Sezer
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018-2024 Burak Sezer
+ * Copyright 2025 Arsene Tochemey Gandote
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package server
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"strconv"
 	"sync"
@@ -45,12 +49,19 @@ var (
 	ReadBytesTotal = stats.NewInt64Counter()
 )
 
+type ConServer interface {
+	Serve(listener net.Listener) error
+	SetIdleClose(duration time.Duration)
+	Close() error
+}
+
 // Config is a composite type to bundle configuration parameters.
 type Config struct {
 	BindAddr        string
 	BindPort        int
 	KeepAlivePeriod time.Duration
 	IdleClose       time.Duration
+	TLSConfig       *tls.Config
 }
 
 type ConnWrapper struct {
@@ -104,7 +115,7 @@ type Server struct {
 	config     *Config
 	mux        *ServeMux
 	wmux       *ServeMuxWrapper
-	server     *redcon.Server
+	server     ConServer
 	log        *flog.Logger
 	listener   *ListenerWrapper
 	StartedCtx context.Context
@@ -117,16 +128,16 @@ type Server struct {
 }
 
 // New creates and returns a new Server.
-func New(c *Config, l *flog.Logger) *Server {
+func New(config *Config, logger *flog.Logger) *Server {
 	// The server has to be started properly before accepting connections.
 	checkpoint.Add()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	startedCtx, started := context.WithCancel(context.Background())
 	s := &Server{
-		config:     c,
+		config:     config,
 		mux:        NewServeMux(),
-		log:        l,
+		log:        logger,
 		started:    started,
 		StartedCtx: startedCtx,
 		stopped:    make(chan struct{}),
@@ -154,35 +165,20 @@ func (s *Server) ServeMux() *ServeMuxWrapper {
 // ListenAndServe listens on the TCP network address addr.
 func (s *Server) ListenAndServe() error {
 	addr := net.JoinHostPort(s.config.BindAddr, strconv.Itoa(s.config.BindPort))
-	listener, err := net.Listen("tcp", addr)
+	lw, err := s.listenerWrapper(addr)
 	if err != nil {
 		return err
-	}
-
-	lw := &ListenerWrapper{
-		Listener:        listener,
-		keepAlivePeriod: s.config.KeepAlivePeriod,
 	}
 
 	defer close(s.stopped)
 	s.listener = lw
 
-	srv := redcon.NewServer(addr,
-		s.mux.ServeRESP,
-		func(conn redcon.Conn) bool {
-			ConnectionsTotal.Increase(1)
-			CurrentConnections.Increase(1)
-			return true
-		},
-		func(conn redcon.Conn, err error) {
-			CurrentConnections.Increase(-1)
-		},
-	)
-
+	server := s.getServer(addr)
 	if s.config.IdleClose != 0 {
-		srv.SetIdleClose(s.config.IdleClose)
+		server.SetIdleClose(s.config.IdleClose)
 	}
-	s.server = srv
+
+	s.server = server
 
 	// The TCP server has been started
 	s.started()
@@ -238,4 +234,44 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	return latestError
+}
+
+// getServer makes a redCon server based upon the configuration
+func (s *Server) getServer(addr string) ConServer {
+	handler := s.mux.ServeRESP
+	acceptFn := func(conn redcon.Conn) bool {
+		ConnectionsTotal.Increase(1)
+		CurrentConnections.Increase(1)
+		return true
+	}
+	closeFn := func(conn redcon.Conn, err error) {
+		CurrentConnections.Increase(-1)
+	}
+	if s.config.TLSConfig != nil {
+		return redcon.NewServerTLS(addr, handler, acceptFn, closeFn, s.config.TLSConfig)
+	}
+	return redcon.NewServer(addr, handler, acceptFn, closeFn)
+}
+
+// listenerWrapper create an instance of ListenerWrapper based upon the configuration
+func (s *Server) listenerWrapper(addr string) (*ListenerWrapper, error) {
+	var (
+		listener net.Listener
+		err      error
+	)
+
+	if s.config.TLSConfig != nil {
+		listener, err = tls.Listen("tcp", addr, s.config.TLSConfig)
+	} else {
+		listener, err = net.Listen("tcp", addr)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &ListenerWrapper{
+		Listener:        listener,
+		keepAlivePeriod: s.config.KeepAlivePeriod,
+	}, nil
 }

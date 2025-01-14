@@ -1,16 +1,19 @@
-// Copyright 2018-2024 Burak Sezer
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018-2024 Burak Sezer
+ * Copyright 2025 Arsene Tochemey Gandote
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package olric
 
@@ -43,7 +46,7 @@ func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 	db2 := cluster.addMemberWithConfig(t, newConfig())
@@ -118,7 +121,7 @@ func TestIntegration_DMap_Cache_Eviction_LRU_MaxKeys(t *testing.T) {
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 
@@ -166,7 +169,7 @@ func TestIntegration_DMap_Cache_Eviction_MaxKeys(t *testing.T) {
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 
@@ -222,7 +225,7 @@ func TestIntegration_DMap_Cache_Eviction_MaxIdleDuration(t *testing.T) {
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 
@@ -271,7 +274,7 @@ func TestIntegration_DMap_Cache_Eviction_TTLDuration(t *testing.T) {
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 
@@ -321,7 +324,7 @@ func TestIntegration_DMap_Cache_Eviction_LRU_MaxInuse(t *testing.T) {
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 
@@ -369,7 +372,7 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 
@@ -496,7 +499,7 @@ func scanIntegrationTestCommon(t *testing.T, embedded bool, keyFunc func(i int) 
 		return c
 	}
 
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 	db2 := cluster.addMemberWithConfig(t, newConfig())

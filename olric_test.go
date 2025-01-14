@@ -1,16 +1,19 @@
-// Copyright 2018-2024 Burak Sezer
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018-2024 Burak Sezer
+ * Copyright 2025 Arsene Tochemey Gandote
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package olric
 
@@ -32,7 +35,7 @@ import (
 // newTestOlricWithConfig creates a new Olric instance with the given configuration.
 // This function is intended for internal use. Please use testOlricCluster and its
 // methods to form a cluster in tests.
-func newTestOlricWithConfig(t *testing.T, c *config.Config) *Olric {
+func newTestWithConfig(t *testing.T, c *config.Config) *Olric {
 	port, err := testutil.GetFreePort()
 	require.NoError(t, err)
 
@@ -74,13 +77,13 @@ func newTestOlricWithConfig(t *testing.T, c *config.Config) *Olric {
 	return db
 }
 
-type testOlricCluster struct {
+type testCluster struct {
 	mtx     sync.Mutex
 	members map[string]*Olric
 }
 
-func newTestOlricCluster(t *testing.T) *testOlricCluster {
-	cl := &testOlricCluster{members: make(map[string]*Olric)}
+func newTestCluster(t *testing.T) *testCluster {
+	cl := &testCluster{members: make(map[string]*Olric)}
 	t.Cleanup(func() {
 		cl.mtx.Lock()
 		defer cl.mtx.Unlock()
@@ -94,7 +97,7 @@ func newTestOlricCluster(t *testing.T) *testOlricCluster {
 	return cl
 }
 
-func (cl *testOlricCluster) addMemberWithConfig(t *testing.T, c *config.Config) *Olric {
+func (cl *testCluster) addMemberWithConfig(t *testing.T, c *config.Config) *Olric {
 	cl.mtx.Lock()
 	defer cl.mtx.Unlock()
 
@@ -106,26 +109,26 @@ func (cl *testOlricCluster) addMemberWithConfig(t *testing.T, c *config.Config) 
 		c.Peers = append(c.Peers, member.rt.Discovery().LocalNode().Address())
 	}
 
-	db := newTestOlricWithConfig(t, c)
+	db := newTestWithConfig(t, c)
 	cl.members[db.rt.This().String()] = db
 	t.Logf("A new cluster member has been created: %s", db.rt.This())
 	return db
 }
 
-func (cl *testOlricCluster) addMember(t *testing.T) *Olric {
+func (cl *testCluster) addMember(t *testing.T) *Olric {
 	return cl.addMemberWithConfig(t, nil)
 }
 
-func TestOlric_StartAndShutdown(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+func TestStartAndShutdown(t *testing.T) {
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	err := db.Shutdown(context.Background())
 	require.NoError(t, err)
 }
 
-func TestOlricCluster_StartAndShutdown(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+func TestClusterStartAndShutdown(t *testing.T) {
+	cluster := newTestCluster(t)
 	cluster.addMember(t)
 	db := cluster.addMember(t)
 	require.Len(t, cluster.members, 2)

@@ -1,16 +1,19 @@
-// Copyright 2018-2024 Burak Sezer
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018-2024 Burak Sezer
+ * Copyright 2025 Arsene Tochemey Gandote
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package balancer
 
@@ -35,7 +38,284 @@ import (
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 )
+
+func TestBalance_Primary_Move(t *testing.T) {
+	t.Run("With TSL", func(t *testing.T) {
+		cluster := newMockCluster(t)
+		defer cluster.shutdown()
+
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		e1 := newTestEnvironment(c1)
+		cluster.addNode(e1)
+
+		fragments := make(map[uint64]*mockfragment.MockFragment)
+
+		// Create a MockFragment and insert some fake data
+		c := e1.Get("config").(*config.Config)
+		part := e1.Get(strings.ToLower(partitions.PRIMARY.String())).(*partitions.Partitions)
+		for partID := uint64(0); partID < c.PartitionCount; partID++ {
+			part := part.PartitionByID(partID)
+			s := mockfragment.New()
+			s.Fill()
+			part.Map().Store("dmap.test-data", s)
+			fragments[partID] = s
+		}
+
+		c2 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		e2 := newTestEnvironment(c2)
+		b2 := cluster.addNode(e2)
+
+		err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !b2.rt.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		for partID, f := range fragments {
+			result := f.Result()
+			if len(result) == 0 {
+				continue
+			}
+
+			require.Len(t, result, 1)
+			require.NotNil(t, result[partitions.PRIMARY])
+			r := result[partitions.PRIMARY]
+			require.NotNil(t, r[partID])
+			require.Equal(t, "test-data", r[partID].Name)
+			require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
+		}
+	})
+	t.Run("Without TSL", func(t *testing.T) {
+		cluster := newMockCluster(t)
+		defer cluster.shutdown()
+
+		e1 := newTestEnvironment(nil)
+		cluster.addNode(e1)
+
+		fragments := make(map[uint64]*mockfragment.MockFragment)
+
+		// Create a MockFragment and insert some fake data
+		c := e1.Get("config").(*config.Config)
+		part := e1.Get(strings.ToLower(partitions.PRIMARY.String())).(*partitions.Partitions)
+		for partID := uint64(0); partID < c.PartitionCount; partID++ {
+			part := part.PartitionByID(partID)
+			s := mockfragment.New()
+			s.Fill()
+			part.Map().Store("dmap.test-data", s)
+			fragments[partID] = s
+		}
+
+		e2 := newTestEnvironment(nil)
+		b2 := cluster.addNode(e2)
+
+		err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !b2.rt.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		for partID, f := range fragments {
+			result := f.Result()
+			if len(result) == 0 {
+				continue
+			}
+
+			require.Len(t, result, 1)
+			require.NotNil(t, result[partitions.PRIMARY])
+			r := result[partitions.PRIMARY]
+			require.NotNil(t, r[partID])
+			require.Equal(t, "test-data", r[partID].Name)
+			require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
+		}
+	})
+}
+
+func TestBalance_Empty_Backup_Move(t *testing.T) {
+	t.Run("With TSL", func(t *testing.T) {
+		cluster := newMockCluster(t)
+		defer cluster.shutdown()
+
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c1.ReplicaCount = 2
+		e1 := newTestEnvironment(c1)
+		b1 := cluster.addNode(e1)
+
+		b1.rt.UpdateEagerly()
+
+		err := checkBackupOwnership(e1)
+		require.NoError(t, err)
+
+		c2 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c2.ReplicaCount = 2
+		e2 := newTestEnvironment(c2)
+		b2 := cluster.addNode(e2)
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !b2.rt.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		b1.rt.UpdateEagerly()
+
+		err = checkBackupOwnership(e2)
+		require.NoError(t, err)
+	})
+	t.Run("Without TSL", func(t *testing.T) {
+		cluster := newMockCluster(t)
+		defer cluster.shutdown()
+
+		c1 := testutil.NewConfig()
+		c1.ReplicaCount = 2
+		e1 := newTestEnvironment(c1)
+		b1 := cluster.addNode(e1)
+
+		b1.rt.UpdateEagerly()
+
+		err := checkBackupOwnership(e1)
+		require.NoError(t, err)
+
+		c2 := testutil.NewConfig()
+		c2.ReplicaCount = 2
+		e2 := newTestEnvironment(c2)
+		b2 := cluster.addNode(e2)
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !b2.rt.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		b1.rt.UpdateEagerly()
+
+		err = checkBackupOwnership(e2)
+		require.NoError(t, err)
+	})
+}
+
+func TestBalance_Backup_Move(t *testing.T) {
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		cluster := newMockCluster(t)
+		defer cluster.shutdown()
+
+		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c1.ReplicaCount = 2
+		e1 := newTestEnvironment(c1)
+		b1 := cluster.addNode(e1)
+
+		fragments := make(map[uint64]*mockfragment.MockFragment)
+
+		c := e1.Get("config").(*config.Config)
+		part := e1.Get(strings.ToLower(partitions.BACKUP.String())).(*partitions.Partitions)
+		for partID := uint64(0); partID < c.PartitionCount; partID++ {
+			part := part.PartitionByID(partID)
+			s := mockfragment.New()
+			s.Fill()
+			part.Map().Store("dmap.test-data", s)
+			fragments[partID] = s
+		}
+
+		c2 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c2.ReplicaCount = 2
+		e2 := newTestEnvironment(c2)
+		b2 := cluster.addNode(e2)
+
+		err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !b2.rt.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		for i := 0; i < 5; i++ {
+			b1.rt.UpdateEagerly()
+			err = checkBackupOwnership(e2)
+			require.NoError(t, err)
+		}
+
+		for partID, f := range fragments {
+			result := f.Result()
+			if len(result) == 0 {
+				continue
+			}
+
+			require.Len(t, result, 1)
+			require.NotNil(t, result[partitions.BACKUP])
+			r := result[partitions.BACKUP]
+			require.NotNil(t, r[partID])
+			require.Equal(t, "test-data", r[partID].Name)
+			require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
+		}
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newMockCluster(t)
+		defer cluster.shutdown()
+
+		c1 := testutil.NewConfig()
+		c1.ReplicaCount = 2
+		e1 := newTestEnvironment(c1)
+		b1 := cluster.addNode(e1)
+
+		fragments := make(map[uint64]*mockfragment.MockFragment)
+
+		c := e1.Get("config").(*config.Config)
+		part := e1.Get(strings.ToLower(partitions.BACKUP.String())).(*partitions.Partitions)
+		for partID := uint64(0); partID < c.PartitionCount; partID++ {
+			part := part.PartitionByID(partID)
+			s := mockfragment.New()
+			s.Fill()
+			part.Map().Store("dmap.test-data", s)
+			fragments[partID] = s
+		}
+
+		c2 := testutil.NewConfig()
+		c2.ReplicaCount = 2
+		e2 := newTestEnvironment(c2)
+		b2 := cluster.addNode(e2)
+
+		err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !b2.rt.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+
+		for i := 0; i < 5; i++ {
+			b1.rt.UpdateEagerly()
+			err = checkBackupOwnership(e2)
+			require.NoError(t, err)
+		}
+
+		for partID, f := range fragments {
+			result := f.Result()
+			if len(result) == 0 {
+				continue
+			}
+
+			require.Len(t, result, 1)
+			require.NotNil(t, result[partitions.BACKUP])
+			r := result[partitions.BACKUP]
+			require.NotNil(t, r[partID])
+			require.Equal(t, "test-data", r[partID].Name)
+			require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
+		}
+	})
+}
 
 func newTestEnvironment(c *config.Config) *environment.Environment {
 	if c == nil {
@@ -145,52 +425,6 @@ func (mc *mockCluster) shutdown() {
 	require.NoError(mc.t, mc.errGr.Wait())
 }
 
-func TestBalance_Primary_Move(t *testing.T) {
-	cluster := newMockCluster(t)
-	defer cluster.shutdown()
-
-	e1 := newTestEnvironment(nil)
-	cluster.addNode(e1)
-
-	fragments := make(map[uint64]*mockfragment.MockFragment)
-
-	// Create a MockFragment and insert some fake data
-	c := e1.Get("config").(*config.Config)
-	part := e1.Get(strings.ToLower(partitions.PRIMARY.String())).(*partitions.Partitions)
-	for partID := uint64(0); partID < c.PartitionCount; partID++ {
-		part := part.PartitionByID(partID)
-		s := mockfragment.New()
-		s.Fill()
-		part.Map().Store("dmap.test-data", s)
-		fragments[partID] = s
-	}
-
-	e2 := newTestEnvironment(nil)
-	b2 := cluster.addNode(e2)
-
-	err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !b2.rt.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
-		}
-		return nil
-	})
-	require.NoError(t, err)
-
-	for partID, f := range fragments {
-		result := f.Result()
-		if len(result) == 0 {
-			continue
-		}
-
-		require.Len(t, result, 1)
-		require.NotNil(t, result[partitions.PRIMARY])
-		r := result[partitions.PRIMARY]
-		require.NotNil(t, r[partID])
-		require.Equal(t, "test-data", r[partID].Name)
-		require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
-	}
-}
-
 func checkBackupOwnership(e *environment.Environment) error {
 	c := e.Get("config").(*config.Config)
 	primary := e.Get(strings.ToLower(partitions.PRIMARY.String())).(*partitions.Partitions)
@@ -207,92 +441,4 @@ func checkBackupOwnership(e *environment.Environment) error {
 	}
 
 	return nil
-}
-
-func TestBalance_Empty_Backup_Move(t *testing.T) {
-	cluster := newMockCluster(t)
-	defer cluster.shutdown()
-
-	c1 := testutil.NewConfig()
-	c1.ReplicaCount = 2
-	e1 := newTestEnvironment(c1)
-	b1 := cluster.addNode(e1)
-
-	b1.rt.UpdateEagerly()
-
-	err := checkBackupOwnership(e1)
-	require.NoError(t, err)
-
-	c2 := testutil.NewConfig()
-	c2.ReplicaCount = 2
-	e2 := newTestEnvironment(c2)
-	b2 := cluster.addNode(e2)
-
-	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !b2.rt.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
-		}
-		return nil
-	})
-	require.NoError(t, err)
-
-	b1.rt.UpdateEagerly()
-
-	err = checkBackupOwnership(e2)
-	require.NoError(t, err)
-}
-
-func TestBalance_Backup_Move(t *testing.T) {
-	cluster := newMockCluster(t)
-	defer cluster.shutdown()
-
-	c1 := testutil.NewConfig()
-	c1.ReplicaCount = 2
-	e1 := newTestEnvironment(c1)
-	b1 := cluster.addNode(e1)
-
-	fragments := make(map[uint64]*mockfragment.MockFragment)
-
-	c := e1.Get("config").(*config.Config)
-	part := e1.Get(strings.ToLower(partitions.BACKUP.String())).(*partitions.Partitions)
-	for partID := uint64(0); partID < c.PartitionCount; partID++ {
-		part := part.PartitionByID(partID)
-		s := mockfragment.New()
-		s.Fill()
-		part.Map().Store("dmap.test-data", s)
-		fragments[partID] = s
-	}
-
-	c2 := testutil.NewConfig()
-	c2.ReplicaCount = 2
-	e2 := newTestEnvironment(c2)
-	b2 := cluster.addNode(e2)
-
-	err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !b2.rt.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
-		}
-		return nil
-	})
-	require.NoError(t, err)
-
-	for i := 0; i < 5; i++ {
-		b1.rt.UpdateEagerly()
-		err = checkBackupOwnership(e2)
-		require.NoError(t, err)
-	}
-
-	for partID, f := range fragments {
-		result := f.Result()
-		if len(result) == 0 {
-			continue
-		}
-
-		require.Len(t, result, 1)
-		require.NotNil(t, result[partitions.BACKUP])
-		r := result[partitions.BACKUP]
-		require.NotNil(t, r[partID])
-		require.Equal(t, "test-data", r[partID].Name)
-		require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
-	}
 }

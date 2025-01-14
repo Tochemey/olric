@@ -1,20 +1,24 @@
-// Copyright 2018-2024 Burak Sezer
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018-2024 Burak Sezer
+ * Copyright 2025 Arsene Tochemey Gandote
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package testutil
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -84,11 +88,37 @@ func NewConfig() *config.Config {
 	return c
 }
 
+func NewConfigWithTLS(t *testing.T, serverTLS, clientTLS *tls.Config) *config.Config {
+	c := config.New("local")
+	c.Client.TLSConfig = clientTLS
+	c.TlsConfig = serverTLS
+
+	c.PartitionCount = 7
+	mc := memberlist.DefaultLocalConfig()
+	mc.BindAddr = "127.0.0.1"
+	mc.BindPort = 0
+	c.MemberlistConfig = mc
+
+	port, err := GetFreePort()
+	if err != nil {
+		t.Fatalf("GetFreePort returned an error: %v", err)
+	}
+	c.BindAddr = "127.0.0.1"
+	c.BindPort = port
+	c.MemberlistConfig.Name = net.JoinHostPort(c.BindAddr, strconv.Itoa(c.BindPort))
+	c.LeaveTimeout = 500 * time.Millisecond
+	if err := c.Sanitize(); err != nil {
+		t.Fatalf("failed to sanitize default config: %v", err)
+	}
+	return c
+}
+
 func NewServer(c *config.Config) *server.Server {
 	sc := &server.Config{
 		BindAddr:        c.BindAddr,
 		BindPort:        c.BindPort,
 		KeepAlivePeriod: time.Second,
+		TLSConfig:       c.TlsConfig,
 	}
 	l := NewFlogger(c)
 	return server.New(sc, l)

@@ -1,16 +1,19 @@
-// Copyright 2018-2024 Burak Sezer
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018-2024 Burak Sezer
+ * Copyright 2025 Arsene Tochemey Gandote
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package routingtable
 
@@ -32,6 +35,7 @@ import (
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 )
 
 func newRoutingTableForTest(c *config.Config, srv *server.Server) *RoutingTable {
@@ -117,257 +121,526 @@ func (t *testCluster) shutdown() error {
 }
 
 func TestRoutingTable_SingleNode(t *testing.T) {
-	cluster := newTestCluster()
-	defer cluster.cancel()
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	c := testutil.NewConfig()
-	rt, err := cluster.addNode(c)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
-	if !rt.This().CompareByID(rt.Discovery().GetCoordinator()) {
-		t.Fatalf("Coordinator is different")
-	}
-
-	if !rt.IsBootstrapped() {
-		t.Fatalf("The coordinator node cannot be bootstrapped")
-	}
-
-	for partID := uint64(0); partID < c.PartitionCount; partID++ {
-		part := rt.primary.PartitionByID(partID)
-		if !part.Owner().CompareByID(rt.This()) {
-			t.Fatalf("PartID: %d has a different owner", partID)
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
+		c := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt, err := cluster.addNode(c)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
 		}
-	}
 
-	if rt.Signature() == 0 {
-		t.Fatalf("routingTable.signature is zero")
-	}
+		if !rt.This().CompareByID(rt.Discovery().GetCoordinator()) {
+			t.Fatalf("Coordinator is different")
+		}
 
-	if rt.OwnedPartitionCount() != c.PartitionCount {
-		t.Fatalf("Expected owned partition count: %d. Got: %d", rt.OwnedPartitionCount(), c.PartitionCount)
-	}
+		if !rt.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		for partID := uint64(0); partID < c.PartitionCount; partID++ {
+			part := rt.primary.PartitionByID(partID)
+			if !part.Owner().CompareByID(rt.This()) {
+				t.Fatalf("PartID: %d has a different owner", partID)
+			}
+		}
+
+		if rt.Signature() == 0 {
+			t.Fatalf("routingTable.signature is zero")
+		}
+
+		if rt.OwnedPartitionCount() != c.PartitionCount {
+			t.Fatalf("Expected owned partition count: %d. Got: %d", rt.OwnedPartitionCount(), c.PartitionCount)
+		}
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
+
+		c := testutil.NewConfig()
+		rt, err := cluster.addNode(c)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		if !rt.This().CompareByID(rt.Discovery().GetCoordinator()) {
+			t.Fatalf("Coordinator is different")
+		}
+
+		if !rt.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		for partID := uint64(0); partID < c.PartitionCount; partID++ {
+			part := rt.primary.PartitionByID(partID)
+			if !part.Owner().CompareByID(rt.This()) {
+				t.Fatalf("PartID: %d has a different owner", partID)
+			}
+		}
+
+		if rt.Signature() == 0 {
+			t.Fatalf("routingTable.signature is zero")
+		}
+
+		if rt.OwnedPartitionCount() != c.PartitionCount {
+			t.Fatalf("Expected owned partition count: %d. Got: %d", rt.OwnedPartitionCount(), c.PartitionCount)
+		}
+	})
 }
 
 func TestRoutingTable_Cluster(t *testing.T) {
-	cluster := newTestCluster()
-	defer cluster.cancel()
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	c1 := testutil.NewConfig()
-	rt1, err := cluster.addNode(c1)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 
-	if !rt1.IsBootstrapped() {
-		t.Fatalf("The coordinator node cannot be bootstrapped")
-	}
-
-	firstSignature := rt1.Signature()
-
-	c2 := testutil.NewConfig()
-	rt2, err := cluster.addNode(c2)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
-	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !rt2.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
+		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
 		}
-		return nil
+
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		firstSignature := rt1.Signature()
+
+		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		if !rt2.Discovery().GetCoordinator().CompareByID(rt1.Discovery().GetCoordinator()) {
+			t.Fatalf("Coordinator is different")
+		}
+
+		if firstSignature == rt2.Signature() {
+			t.Fatalf("routingTable signature did not changed after node join")
+		}
+
+		if rt1.OwnedPartitionCount() == c1.PartitionCount {
+			t.Fatalf("rt1 has all the partitions")
+		}
+
+		if rt2.OwnedPartitionCount() == c2.PartitionCount {
+			t.Fatalf("rt2 has all the partitions")
+		}
+
+		totalPartitionCount := rt1.OwnedPartitionCount() + rt2.OwnedPartitionCount()
+		if totalPartitionCount != c1.PartitionCount {
+			t.Fatalf("Total partition count is wrong: %d", totalPartitionCount)
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+	t.Run("With no TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	if !rt2.Discovery().GetCoordinator().CompareByID(rt1.Discovery().GetCoordinator()) {
-		t.Fatalf("Coordinator is different")
-	}
+		c1 := testutil.NewConfig()
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
 
-	if firstSignature == rt2.Signature() {
-		t.Fatalf("routingTable signature did not changed after node join")
-	}
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
 
-	if rt1.OwnedPartitionCount() == c1.PartitionCount {
-		t.Fatalf("rt1 has all the partitions")
-	}
+		firstSignature := rt1.Signature()
 
-	if rt2.OwnedPartitionCount() == c2.PartitionCount {
-		t.Fatalf("rt2 has all the partitions")
-	}
+		c2 := testutil.NewConfig()
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
 
-	totalPartitionCount := rt1.OwnedPartitionCount() + rt2.OwnedPartitionCount()
-	if totalPartitionCount != c1.PartitionCount {
-		t.Fatalf("Total partition count is wrong: %d", totalPartitionCount)
-	}
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
 
-	err = cluster.shutdown()
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+		if !rt2.Discovery().GetCoordinator().CompareByID(rt1.Discovery().GetCoordinator()) {
+			t.Fatalf("Coordinator is different")
+		}
+
+		if firstSignature == rt2.Signature() {
+			t.Fatalf("routingTable signature did not changed after node join")
+		}
+
+		if rt1.OwnedPartitionCount() == c1.PartitionCount {
+			t.Fatalf("rt1 has all the partitions")
+		}
+
+		if rt2.OwnedPartitionCount() == c2.PartitionCount {
+			t.Fatalf("rt2 has all the partitions")
+		}
+
+		totalPartitionCount := rt1.OwnedPartitionCount() + rt2.OwnedPartitionCount()
+		if totalPartitionCount != c1.PartitionCount {
+			t.Fatalf("Total partition count is wrong: %d", totalPartitionCount)
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+	})
 }
 
 func TestRoutingTable_CheckPartitionOwnership(t *testing.T) {
-	cluster := newTestCluster()
-	defer cluster.cancel()
+	t.Run("With TLS", func(t *testing.T) {
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 
-	c1 := testutil.NewConfig()
-	rt1, err := cluster.addNode(c1)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	if !rt1.IsBootstrapped() {
-		t.Fatalf("The coordinator node cannot be bootstrapped")
-	}
-
-	c2 := testutil.NewConfig()
-	rt2, err := cluster.addNode(c2)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
-	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !rt2.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
+		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
 		}
-		return nil
+
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		for partID := uint64(0); partID < c1.PartitionCount; partID++ {
+			ownerOne := rt1.primary.PartitionByID(partID).Owner()
+			ownerTwo := rt2.primary.PartitionByID(partID).Owner()
+			if !ownerOne.CompareByID(ownerTwo) {
+				t.Fatalf("Different partition: %d owner: %s != %s", partID, ownerOne, ownerTwo)
+			}
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+	t.Run("With no TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	for partID := uint64(0); partID < c1.PartitionCount; partID++ {
-		ownerOne := rt1.primary.PartitionByID(partID).Owner()
-		ownerTwo := rt2.primary.PartitionByID(partID).Owner()
-		if !ownerOne.CompareByID(ownerTwo) {
-			t.Fatalf("Different partition: %d owner: %s != %s", partID, ownerOne, ownerTwo)
+		c1 := testutil.NewConfig()
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
 		}
-	}
 
-	err = cluster.shutdown()
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		c2 := testutil.NewConfig()
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		for partID := uint64(0); partID < c1.PartitionCount; partID++ {
+			ownerOne := rt1.primary.PartitionByID(partID).Owner()
+			ownerTwo := rt2.primary.PartitionByID(partID).Owner()
+			if !ownerOne.CompareByID(ownerTwo) {
+				t.Fatalf("Different partition: %d owner: %s != %s", partID, ownerOne, ownerTwo)
+			}
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+	})
 }
 
 func TestRoutingTable_NodeLeave(t *testing.T) {
-	cluster := newTestCluster()
-	defer cluster.cancel()
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	c1 := testutil.NewConfig()
-	rt1, err := cluster.addNode(c1)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
-	if !rt1.IsBootstrapped() {
-		t.Fatalf("The coordinator node cannot be bootstrapped")
-	}
-
-	c2 := testutil.NewConfig()
-	rt2, err := cluster.addNode(c2)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
-	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !rt2.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
+		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
 		}
-		return nil
+
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		signatureWithTwoNode := rt1.Signature()
+		err = rt1.Shutdown(context.Background())
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+		err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+			if rt2.Signature() == signatureWithTwoNode {
+				return errors.New("still has the same signature")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		if !rt2.Discovery().GetCoordinator().CompareByID(rt2.This()) {
+			t.Fatalf("Coordinator is different")
+		}
+
+		for partID := uint64(0); partID < c2.PartitionCount; partID++ {
+			part := rt2.primary.PartitionByID(partID)
+			if !part.Owner().CompareByID(rt2.This()) {
+				t.Fatalf("PartID: %d has a different owner", partID)
+			}
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+	t.Run("With no TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	signatureWithTwoNode := rt1.Signature()
-	err = rt1.Shutdown(context.Background())
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-	err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
-		if rt2.Signature() == signatureWithTwoNode {
-			return errors.New("still has the same signature")
+		c1 := testutil.NewConfig()
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
 		}
-		return nil
+
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		c2 := testutil.NewConfig()
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		signatureWithTwoNode := rt1.Signature()
+		err = rt1.Shutdown(context.Background())
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+		err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+			if rt2.Signature() == signatureWithTwoNode {
+				return errors.New("still has the same signature")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		if !rt2.Discovery().GetCoordinator().CompareByID(rt2.This()) {
+			t.Fatalf("Coordinator is different")
+		}
+
+		for partID := uint64(0); partID < c2.PartitionCount; partID++ {
+			part := rt2.primary.PartitionByID(partID)
+			if !part.Owner().CompareByID(rt2.This()) {
+				t.Fatalf("PartID: %d has a different owner", partID)
+			}
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
-	if !rt2.Discovery().GetCoordinator().CompareByID(rt2.This()) {
-		t.Fatalf("Coordinator is different")
-	}
-
-	for partID := uint64(0); partID < c2.PartitionCount; partID++ {
-		part := rt2.primary.PartitionByID(partID)
-		if !part.Owner().CompareByID(rt2.This()) {
-			t.Fatalf("PartID: %d has a different owner", partID)
-		}
-	}
-
-	err = cluster.shutdown()
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
 }
 
 func TestRoutingTable_NodeUpdate(t *testing.T) {
-	cluster := newTestCluster()
-	defer cluster.cancel()
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
 
-	c1 := testutil.NewConfig()
-	rt1, err := cluster.addNode(c1)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
 
-	if !rt1.IsBootstrapped() {
-		t.Fatalf("The coordinator node cannot be bootstrapped")
-	}
-
-	c2 := testutil.NewConfig()
-	rt2, err := cluster.addNode(c2)
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
-	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		if !rt2.IsBootstrapped() {
-			return errors.New("the second node cannot be bootstrapped")
+		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
 
-	n := rt2.Discovery().LocalNode()
-	meta, err := discovery.NewMember(c2).Encode()
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-	n.Meta = meta
-	event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: n}
-	rt2.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
-
-	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
-		_, err = rt1.Members().Get(rt2.This().ID)
-		if err == nil {
-			// node id is updated.
-			return errors.New("rt2 could not be updated")
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
 
-	err = cluster.shutdown()
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
+		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		n := rt2.Discovery().LocalNode()
+		meta, err := discovery.NewMember(c2).Encode()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+		n.Meta = meta
+		event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: n}
+		rt2.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			_, err = rt1.Members().Get(rt2.This().ID)
+			if err == nil {
+				// node id is updated.
+				return errors.New("rt2 could not be updated")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+	})
+	t.Run("With no TLS", func(t *testing.T) {
+		cluster := newTestCluster()
+		defer cluster.cancel()
+
+		c1 := testutil.NewConfig()
+		rt1, err := cluster.addNode(c1)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		if !rt1.IsBootstrapped() {
+			t.Fatalf("The coordinator node cannot be bootstrapped")
+		}
+
+		c2 := testutil.NewConfig()
+		rt2, err := cluster.addNode(c2)
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			if !rt2.IsBootstrapped() {
+				return errors.New("the second node cannot be bootstrapped")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		n := rt2.Discovery().LocalNode()
+		meta, err := discovery.NewMember(c2).Encode()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+		n.Meta = meta
+		event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: n}
+		rt2.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
+
+		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			_, err = rt1.Members().Get(rt2.This().ID)
+			if err == nil {
+				// node id is updated.
+				return errors.New("rt2 could not be updated")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+
+		err = cluster.shutdown()
+		if err != nil {
+			t.Fatalf("Expected nil. Got: %v", err)
+		}
+	})
 }

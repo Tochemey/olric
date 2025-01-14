@@ -1,16 +1,19 @@
-// Copyright 2018-2024 Burak Sezer
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+ * Copyright 2018-2024 Burak Sezer
+ * Copyright 2025 Arsene Tochemey Gandote
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package olric
 
@@ -24,10 +27,11 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/internal/testutil/tlskit"
 )
 
 func TestEmbeddedClient_NewDMap(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -36,109 +40,236 @@ func TestEmbeddedClient_NewDMap(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Put(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	err = dm.Put(context.Background(), "mykey", "myvalue")
-	require.NoError(t, err)
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		err = dm.Put(context.Background(), "mykey", "myvalue")
+		require.NoError(t, err)
+	})
+
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		err = dm.Put(context.Background(), "mykey", "myvalue")
+		require.NoError(t, err)
+	})
 }
 
 func TestEmbeddedClient_DMap_Put_EX(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	ctx := context.Background()
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	err = dm.Put(ctx, "mykey", "myvalue", EX(time.Second))
-	require.NoError(t, err)
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	<-time.After(time.Second)
+		err = dm.Put(ctx, "mykey", "myvalue", EX(time.Second))
+		require.NoError(t, err)
 
-	_, err = dm.Get(ctx, "mykey")
-	require.ErrorIs(t, err, ErrKeyNotFound)
+		<-time.After(time.Second)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		err = dm.Put(ctx, "mykey", "myvalue", EX(time.Second))
+		require.NoError(t, err)
+
+		<-time.After(time.Second)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
 }
 
 func TestEmbeddedClient_DMap_Put_PX(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	ctx := context.Background()
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	err = dm.Put(ctx, "mykey", "myvalue", PX(time.Millisecond))
-	require.NoError(t, err)
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	<-time.After(time.Millisecond)
+		err = dm.Put(ctx, "mykey", "myvalue", PX(time.Millisecond))
+		require.NoError(t, err)
 
-	_, err = dm.Get(ctx, "mykey")
-	require.ErrorIs(t, err, ErrKeyNotFound)
+		<-time.After(time.Millisecond)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		err = dm.Put(ctx, "mykey", "myvalue", PX(time.Millisecond))
+		require.NoError(t, err)
+
+		<-time.After(time.Millisecond)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
 }
 
 func TestEmbeddedClient_DMap_Put_EXAT(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	ctx := context.Background()
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	err = dm.Put(ctx, "mykey", "myvalue", EXAT(time.Duration(time.Now().Add(time.Second).UnixNano())))
-	require.NoError(t, err)
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	<-time.After(time.Second)
+		err = dm.Put(ctx, "mykey", "myvalue", EXAT(time.Duration(time.Now().Add(time.Second).UnixNano())))
+		require.NoError(t, err)
 
-	_, err = dm.Get(ctx, "mykey")
-	require.ErrorIs(t, err, ErrKeyNotFound)
+		<-time.After(time.Second)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		err = dm.Put(ctx, "mykey", "myvalue", EXAT(time.Duration(time.Now().Add(time.Second).UnixNano())))
+		require.NoError(t, err)
+
+		<-time.After(time.Second)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
 }
 
 func TestEmbeddedClient_DMap_Put_PXAT(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	ctx := context.Background()
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	err = dm.Put(ctx, "mykey", "myvalue", PXAT(time.Duration(time.Now().Add(time.Millisecond).UnixNano())))
-	require.NoError(t, err)
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	<-time.After(time.Millisecond)
+		err = dm.Put(ctx, "mykey", "myvalue", PXAT(time.Duration(time.Now().Add(time.Millisecond).UnixNano())))
+		require.NoError(t, err)
 
-	_, err = dm.Get(ctx, "mykey")
-	require.ErrorIs(t, err, ErrKeyNotFound)
+		<-time.After(time.Millisecond)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		err = dm.Put(ctx, "mykey", "myvalue", PXAT(time.Duration(time.Now().Add(time.Millisecond).UnixNano())))
+		require.NoError(t, err)
+
+		<-time.After(time.Millisecond)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	})
 }
 
 func TestEmbeddedClient_DMap_Put_NX(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	ctx := context.Background()
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	err = dm.Put(ctx, "mykey", "myvalue", NX())
-	require.NoError(t, err)
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	<-time.After(time.Millisecond)
+		err = dm.Put(ctx, "mykey", "myvalue", NX())
+		require.NoError(t, err)
 
-	_, err = dm.Get(ctx, "mykey")
-	require.NoError(t, err)
+		<-time.After(time.Millisecond)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.NoError(t, err)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		ctx := context.Background()
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		err = dm.Put(ctx, "mykey", "myvalue", NX())
+		require.NoError(t, err)
+
+		<-time.After(time.Millisecond)
+
+		_, err = dm.Get(ctx, "mykey")
+		require.NoError(t, err)
+	})
 }
 
 func TestEmbeddedClient_DMap_Put_XX(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	ctx := context.Background()
@@ -151,7 +282,7 @@ func TestEmbeddedClient_DMap_Put_XX(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Get(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -170,7 +301,7 @@ func TestEmbeddedClient_DMap_Get(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Delete(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -189,7 +320,7 @@ func TestEmbeddedClient_DMap_Delete(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Delete_Many_Keys(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -210,7 +341,7 @@ func TestEmbeddedClient_DMap_Delete_Many_Keys(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Atomic_Incr(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -234,7 +365,7 @@ func TestEmbeddedClient_DMap_Atomic_Incr(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Atomic_Decr(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -261,7 +392,7 @@ func TestEmbeddedClient_DMap_Atomic_Decr(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_GetPut(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -283,7 +414,7 @@ func TestEmbeddedClient_DMap_GetPut(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Atomic_IncrByFloat(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -307,7 +438,7 @@ func TestEmbeddedClient_DMap_Atomic_IncrByFloat(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Expire(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -328,7 +459,7 @@ func TestEmbeddedClient_DMap_Expire(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Destroy(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -357,7 +488,7 @@ func TestEmbeddedClient_DMap_Destroy(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Lock(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -375,7 +506,7 @@ func TestEmbeddedClient_DMap_Lock(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Lock_ErrLockNotAcquired(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -393,7 +524,7 @@ func TestEmbeddedClient_DMap_Lock_ErrLockNotAcquired(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_Lock_ErrNoSuchLock(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -414,7 +545,7 @@ func TestEmbeddedClient_DMap_Lock_ErrNoSuchLock(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_LockWithTimeout(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -432,7 +563,7 @@ func TestEmbeddedClient_DMap_LockWithTimeout(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_LockWithTimeout_Timeout(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
 	e := db.NewEmbeddedClient()
@@ -452,166 +583,361 @@ func TestEmbeddedClient_DMap_LockWithTimeout_Timeout(t *testing.T) {
 }
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrLockNotAcquired(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	ctx := context.Background()
-	key := "lock.key.test"
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	_, err = dm.LockWithTimeout(ctx, key, 10*time.Second, time.Second)
-	require.NoError(t, err)
+		ctx := context.Background()
+		key := "lock.key.test"
 
-	_, err = dm.LockWithTimeout(ctx, key, 10*time.Second, time.Millisecond)
-	require.ErrorIs(t, err, ErrLockNotAcquired)
+		_, err = dm.LockWithTimeout(ctx, key, 10*time.Second, time.Second)
+		require.NoError(t, err)
+
+		_, err = dm.LockWithTimeout(ctx, key, 10*time.Second, time.Millisecond)
+		require.ErrorIs(t, err, ErrLockNotAcquired)
+	})
+
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		key := "lock.key.test"
+
+		_, err = dm.LockWithTimeout(ctx, key, 10*time.Second, time.Second)
+		require.NoError(t, err)
+
+		_, err = dm.LockWithTimeout(ctx, key, 10*time.Second, time.Millisecond)
+		require.ErrorIs(t, err, ErrLockNotAcquired)
+	})
 }
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	ctx := context.Background()
-	key := "lock.key.test"
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	lx, err := dm.LockWithTimeout(ctx, key, time.Second, time.Second)
-	require.NoError(t, err)
+		ctx := context.Background()
+		key := "lock.key.test"
 
-	err = lx.Unlock(ctx)
-	require.NoError(t, err)
+		lx, err := dm.LockWithTimeout(ctx, key, time.Second, time.Second)
+		require.NoError(t, err)
 
-	err = lx.Unlock(ctx)
-	require.ErrorIs(t, err, ErrNoSuchLock)
+		err = lx.Unlock(ctx)
+		require.NoError(t, err)
+
+		err = lx.Unlock(ctx)
+		require.ErrorIs(t, err, ErrNoSuchLock)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		key := "lock.key.test"
+
+		lx, err := dm.LockWithTimeout(ctx, key, time.Second, time.Second)
+		require.NoError(t, err)
+
+		err = lx.Unlock(ctx)
+		require.NoError(t, err)
+
+		err = lx.Unlock(ctx)
+		require.ErrorIs(t, err, ErrNoSuchLock)
+	})
 }
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock_Timeout(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	ctx := context.Background()
-	key := "lock.key.test"
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	lx, err := dm.LockWithTimeout(ctx, key, time.Millisecond, time.Second)
-	require.NoError(t, err)
+		ctx := context.Background()
+		key := "lock.key.test"
 
-	<-time.After(time.Millisecond)
+		lx, err := dm.LockWithTimeout(ctx, key, time.Millisecond, time.Second)
+		require.NoError(t, err)
 
-	err = lx.Unlock(ctx)
-	require.ErrorIs(t, err, ErrNoSuchLock)
+		<-time.After(time.Millisecond)
+
+		err = lx.Unlock(ctx)
+		require.ErrorIs(t, err, ErrNoSuchLock)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		key := "lock.key.test"
+
+		lx, err := dm.LockWithTimeout(ctx, key, time.Millisecond, time.Second)
+		require.NoError(t, err)
+
+		<-time.After(time.Millisecond)
+
+		err = lx.Unlock(ctx)
+		require.ErrorIs(t, err, ErrNoSuchLock)
+	})
 }
 
 func TestEmbeddedClient_DMap_LockWithTimeout_Then_Lease(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	e := db.NewEmbeddedClient()
-	dm, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
 
-	ctx := context.Background()
-	key := "lock.key.test"
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
 
-	lx, err := dm.LockWithTimeout(ctx, key, 50*time.Millisecond, time.Second)
-	require.NoError(t, err)
+		ctx := context.Background()
+		key := "lock.key.test"
 
-	// Expand its timeout value
-	err = lx.Lease(ctx, time.Hour)
-	require.NoError(t, err)
+		lx, err := dm.LockWithTimeout(ctx, key, 50*time.Millisecond, time.Second)
+		require.NoError(t, err)
 
-	<-time.After(100 * time.Millisecond)
+		// Expand its timeout value
+		err = lx.Lease(ctx, time.Hour)
+		require.NoError(t, err)
 
-	_, err = dm.Lock(ctx, key, time.Millisecond)
-	require.ErrorIs(t, err, ErrLockNotAcquired)
+		<-time.After(100 * time.Millisecond)
+
+		_, err = dm.Lock(ctx, key, time.Millisecond)
+		require.ErrorIs(t, err, ErrLockNotAcquired)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		key := "lock.key.test"
+
+		lx, err := dm.LockWithTimeout(ctx, key, 50*time.Millisecond, time.Second)
+		require.NoError(t, err)
+
+		// Expand its timeout value
+		err = lx.Lease(ctx, time.Hour)
+		require.NoError(t, err)
+
+		<-time.After(100 * time.Millisecond)
+
+		_, err = dm.Lock(ctx, key, time.Millisecond)
+		require.ErrorIs(t, err, ErrLockNotAcquired)
+	})
 }
 
 func TestEmbeddedClient_RoutingTable_Standalone(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
 
-	e := db.NewEmbeddedClient()
-	rt, err := e.RoutingTable(context.Background())
-	require.NoError(t, err)
-	require.Len(t, rt, int(db.config.PartitionCount))
-	for _, route := range rt {
-		require.Len(t, route.PrimaryOwners, 1)
-		require.Equal(t, db.rt.This().String(), route.PrimaryOwners[0])
-		require.Len(t, route.ReplicaOwners, 0)
-	}
+		cluster := newTestCluster(t)
+		db := cluster.addMemberWithConfig(t, config)
+
+		e := db.NewEmbeddedClient()
+		rt, err := e.RoutingTable(context.Background())
+		require.NoError(t, err)
+		require.Len(t, rt, int(db.config.PartitionCount))
+		for _, route := range rt {
+			require.Len(t, route.PrimaryOwners, 1)
+			require.Equal(t, db.rt.This().String(), route.PrimaryOwners[0])
+			require.Len(t, route.ReplicaOwners, 0)
+		}
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		rt, err := e.RoutingTable(context.Background())
+		require.NoError(t, err)
+		require.Len(t, rt, int(db.config.PartitionCount))
+		for _, route := range rt {
+			require.Len(t, route.PrimaryOwners, 1)
+			require.Equal(t, db.rt.This().String(), route.PrimaryOwners[0])
+			require.Len(t, route.ReplicaOwners, 0)
+		}
+	})
 }
 
 func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
-	cluster := newTestOlricCluster(t)
+	t.Run("With TLS", func(t *testing.T) {
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
 
-	cluster.addMember(t) // Cluster coordinator
-	<-time.After(250 * time.Millisecond)
+		cluster := newTestCluster(t)
+		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig)) // Cluster coordinator
+		<-time.After(250 * time.Millisecond)
 
-	cluster.addMember(t)
-	db2 := cluster.addMember(t)
+		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 
-	e := db2.NewEmbeddedClient()
-	rt, err := e.RoutingTable(context.Background())
-	require.NoError(t, err)
-	require.Len(t, rt, int(db2.config.PartitionCount))
-	owners := make(map[string]struct{})
-	for _, route := range rt {
-		for _, owner := range route.PrimaryOwners {
-			owners[owner] = struct{}{}
+		db2 := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
+		e := db2.NewEmbeddedClient()
+
+		rt, err := e.RoutingTable(context.Background())
+		require.NoError(t, err)
+		require.Len(t, rt, int(db2.config.PartitionCount))
+		owners := make(map[string]struct{})
+		for _, route := range rt {
+			for _, owner := range route.PrimaryOwners {
+				owners[owner] = struct{}{}
+			}
 		}
-	}
-	require.Len(t, owners, 3)
+		require.Len(t, owners, 3)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+
+		cluster.addMember(t) // Cluster coordinator
+		<-time.After(250 * time.Millisecond)
+
+		cluster.addMember(t)
+		db2 := cluster.addMember(t)
+
+		e := db2.NewEmbeddedClient()
+		rt, err := e.RoutingTable(context.Background())
+		require.NoError(t, err)
+		require.Len(t, rt, int(db2.config.PartitionCount))
+		owners := make(map[string]struct{})
+		for _, route := range rt {
+			for _, owner := range route.PrimaryOwners {
+				owners[owner] = struct{}{}
+			}
+		}
+		require.Len(t, owners, 3)
+	})
 }
 
 func TestEmbeddedClient_Member(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
-	cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
+		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 
-	e := db.NewEmbeddedClient()
-	members, err := e.Members(context.Background())
-	require.NoError(t, err)
-	require.Len(t, members, 2)
-	coordinator := db.rt.Discovery().GetCoordinator()
-	for _, member := range members {
-		require.NotEqual(t, "", member.Name)
-		require.NotEqual(t, 0, member.ID)
-		require.NotEqual(t, 0, member.Birthdate)
-		if coordinator.ID == member.ID {
-			require.True(t, member.Coordinator)
-		} else {
-			require.False(t, member.Coordinator)
+		e := db.NewEmbeddedClient()
+		members, err := e.Members(context.Background())
+		require.NoError(t, err)
+		require.Len(t, members, 2)
+		coordinator := db.rt.Discovery().GetCoordinator()
+		for _, member := range members {
+			require.NotEqual(t, "", member.Name)
+			require.NotEqual(t, 0, member.ID)
+			require.NotEqual(t, 0, member.Birthdate)
+			if coordinator.ID == member.ID {
+				require.True(t, member.Coordinator)
+			} else {
+				require.False(t, member.Coordinator)
+			}
 		}
-	}
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+		cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		members, err := e.Members(context.Background())
+		require.NoError(t, err)
+		require.Len(t, members, 2)
+		coordinator := db.rt.Discovery().GetCoordinator()
+		for _, member := range members {
+			require.NotEqual(t, "", member.Name)
+			require.NotEqual(t, 0, member.ID)
+			require.NotEqual(t, 0, member.Birthdate)
+			if coordinator.ID == member.ID {
+				require.True(t, member.Coordinator)
+			} else {
+				require.False(t, member.Coordinator)
+			}
+		}
+	})
 }
 
 func TestEmbeddedClient_Ping(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 
-	e := db.NewEmbeddedClient()
-	ctx := context.Background()
-	response, err := e.Ping(ctx, db.rt.This().String(), "")
-	require.NoError(t, err)
-	require.Equal(t, DefaultPingResponse, response)
+		e := db.NewEmbeddedClient()
+		ctx := context.Background()
+		response, err := e.Ping(ctx, db.rt.This().String(), "")
+		require.NoError(t, err)
+		require.Equal(t, DefaultPingResponse, response)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		ctx := context.Background()
+		response, err := e.Ping(ctx, db.rt.This().String(), "")
+		require.NoError(t, err)
+		require.Equal(t, DefaultPingResponse, response)
+	})
 }
 
 func TestEmbeddedClient_Ping_WithMessage(t *testing.T) {
-	cluster := newTestOlricCluster(t)
-	db := cluster.addMember(t)
+	t.Run("With TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		serverConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
 
-	e := db.NewEmbeddedClient()
-	ctx := context.Background()
-	message := "Olric is the best"
-	response, err := e.Ping(ctx, db.rt.This().String(), message)
-	require.NoError(t, err)
-	require.Equal(t, message, response)
+		e := db.NewEmbeddedClient()
+		ctx := context.Background()
+		message := "Olric is the best"
+		response, err := e.Ping(ctx, db.rt.This().String(), message)
+		require.NoError(t, err)
+		require.Equal(t, message, response)
+	})
+	t.Run("Without TLS", func(t *testing.T) {
+		cluster := newTestCluster(t)
+		db := cluster.addMember(t)
+
+		e := db.NewEmbeddedClient()
+		ctx := context.Background()
+		message := "Olric is the best"
+		response, err := e.Ping(ctx, db.rt.This().String(), message)
+		require.NoError(t, err)
+		require.Equal(t, message, response)
+	})
 }
