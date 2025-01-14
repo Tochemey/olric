@@ -3,6 +3,20 @@
 [![build](https://img.shields.io/github/actions/workflow/status/Tochemey/olric/ci.yml?branch=main)](https://github.com/Tochemey/olric/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/Tochemey/olric/branch/main/graph/badge.svg?token=C5Z0JE8SNj)](https://codecov.io/gh/Tochemey/olric)
 
+
+This is forked version of the [main repository](https://github.com/tochemey/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
+Please use the original repo for any bugs or related questions.
+
+## Modifications from original library
+
+* Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
+* Remove Client/Server mode
+* Renamed module name
+* Upgrade **go version to 1.22.0**
+* Refactor the readme to suit the behavior of this fork
+* Fix some go routines leaks bugs
+* **TLS Support**
+
 ## Overview 
 
 Olric is a distributed, in-memory key/value store and cache. It's designed from the ground up to be distributed, and it
@@ -28,19 +42,6 @@ another
 process to add more capacity, data and backups are automatically and evenly balanced.
 
 See [Samples](#samples) sections to get started!
-
-## Modifications from original library
-
-* Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
-* Remove Client/Server mode
-* Renamed module name
-* Upgrade **go version to 1.22.0**
-* Refactor the readme to suit the behavior of this fork
-* Fix some go routines leaks bugs
-* **TLS Support**
-
-This is forked version of the [main repository](https://github.com/tochemey/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
-Please use the original repo for any bugs or related questions.
 
 ## At a glance
 
