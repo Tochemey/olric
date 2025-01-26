@@ -26,12 +26,12 @@ import (
 
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
-	"github.com/tochemey/olric/internal/testutil/tlskit"
+	"github.com/tochemey/olric/internal/testutil/sslkit"
 )
 
 func TestRoutingTable_LeftOverData(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		tlsSrv, tlsClient := tlskit.GetTLSServerAndClientConfigs(t)
+		tlsSrv, tlsClient := sslkit.GetConfigs(t)
 
 		cluster := newTestCluster()
 		defer cluster.cancel()

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package tlskit
+package sslkit
 
 import (
 	"crypto"
@@ -33,8 +33,8 @@ import (
 	"time"
 )
 
-// GetTLSServerAndClientConfigs returns both server and client TLS configs useful for unit tests
-func GetTLSServerAndClientConfigs(t *testing.T) (serverConfig *tls.Config, clientConfig *tls.Config) {
+// GetConfigs returns both server and client TLS configs useful for unit tests
+func GetConfigs(t *testing.T) (serverConfig *tls.Config, clientConfig *tls.Config) {
 	caKey, _ := generateKey(t)
 	caCert, _ := generateRootCert(t, caKey)
 

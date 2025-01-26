@@ -22,12 +22,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/tochemey/olric/internal/testutil/tlskit"
+	"github.com/tochemey/olric/internal/testutil/sslkit"
 )
 
 func TestConfig_Initialize(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, _ := tlskit.GetTLSServerAndClientConfigs(t)
+		serverConfig, _ := sslkit.GetConfigs(t)
 		c := &Config{
 			TlsConfig: serverConfig,
 		}

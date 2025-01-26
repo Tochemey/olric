@@ -40,7 +40,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
-	"github.com/tochemey/olric/internal/testutil/tlskit"
+	"github.com/tochemey/olric/internal/testutil/sslkit"
 	"github.com/tochemey/olric/pkg/flog"
 )
 
@@ -102,7 +102,7 @@ func newTLSServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Con
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
 
-	srvConfig, clientConfig := tlskit.GetTLSServerAndClientConfigs(t)
+	srvConfig, clientConfig := sslkit.GetConfigs(t)
 
 	l := log.New(os.Stdout, "server-test: ", log.LstdFlags)
 	fl := flog.New(l)
