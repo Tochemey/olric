@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapetan-io/tackle/autotls"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
@@ -38,7 +39,6 @@ import (
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
-	"github.com/tochemey/olric/internal/testutil/sslkit"
 )
 
 func TestBalance_Primary_Move(t *testing.T) {
@@ -46,8 +46,10 @@ func TestBalance_Primary_Move(t *testing.T) {
 		cluster := newMockCluster(t)
 		defer cluster.shutdown()
 
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		e1 := newTestEnvironment(c1)
 		cluster.addNode(e1)
 
@@ -64,7 +66,7 @@ func TestBalance_Primary_Move(t *testing.T) {
 			fragments[partID] = s
 		}
 
-		c2 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		e2 := newTestEnvironment(c2)
 		b2 := cluster.addNode(e2)
 
@@ -142,8 +144,10 @@ func TestBalance_Empty_Backup_Move(t *testing.T) {
 		cluster := newMockCluster(t)
 		defer cluster.shutdown()
 
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		c1.ReplicaCount = 2
 		e1 := newTestEnvironment(c1)
 		b1 := cluster.addNode(e1)
@@ -153,7 +157,7 @@ func TestBalance_Empty_Backup_Move(t *testing.T) {
 		err := checkBackupOwnership(e1)
 		require.NoError(t, err)
 
-		c2 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		c2.ReplicaCount = 2
 		e2 := newTestEnvironment(c2)
 		b2 := cluster.addNode(e2)
@@ -207,11 +211,12 @@ func TestBalance_Empty_Backup_Move(t *testing.T) {
 
 func TestBalance_Backup_Move(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
 		cluster := newMockCluster(t)
 		defer cluster.shutdown()
 
-		c1 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		c1.ReplicaCount = 2
 		e1 := newTestEnvironment(c1)
 		b1 := cluster.addNode(e1)
@@ -228,7 +233,7 @@ func TestBalance_Backup_Move(t *testing.T) {
 			fragments[partID] = s
 		}
 
-		c2 := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		c2.ReplicaCount = 2
 		e2 := newTestEnvironment(c2)
 		b2 := cluster.addNode(e2)

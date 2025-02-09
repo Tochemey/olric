@@ -22,21 +22,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapetan-io/tackle/autotls"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
-	"github.com/tochemey/olric/internal/testutil/sslkit"
 )
 
 func TestRoutingTable_LeftOverData(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		tlsSrv, tlsClient := sslkit.GetConfigs(t)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
 
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt1, err := cluster.addNode(c1)
 		require.NoError(t, err)
 
@@ -51,7 +52,7 @@ func TestRoutingTable_LeftOverData(t *testing.T) {
 			part.Map().Store("test-data", ts)
 		}
 
-		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt2, err := cluster.addNode(c2)
 		require.NoError(t, err)
 

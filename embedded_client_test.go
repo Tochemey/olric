@@ -23,11 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapetan-io/tackle/autotls"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/internal/testutil"
-	"github.com/tochemey/olric/internal/testutil/sslkit"
 )
 
 func TestEmbeddedClient_NewDMap(t *testing.T) {
@@ -41,8 +41,9 @@ func TestEmbeddedClient_NewDMap(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -70,8 +71,9 @@ func TestEmbeddedClient_DMap_Put(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_EX(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -110,8 +112,9 @@ func TestEmbeddedClient_DMap_Put_EX(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_PX(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -150,8 +153,9 @@ func TestEmbeddedClient_DMap_Put_PX(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_EXAT(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -190,8 +194,9 @@ func TestEmbeddedClient_DMap_Put_EXAT(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_PXAT(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -230,8 +235,9 @@ func TestEmbeddedClient_DMap_Put_PXAT(t *testing.T) {
 
 func TestEmbeddedClient_DMap_Put_NX(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -584,8 +590,9 @@ func TestEmbeddedClient_DMap_LockWithTimeout_Timeout(t *testing.T) {
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrLockNotAcquired(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -625,8 +632,9 @@ func TestEmbeddedClient_DMap_LockWithTimeout_ErrLockNotAcquired(t *testing.T) {
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -671,8 +679,9 @@ func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock(t *testing.T) {
 
 func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock_Timeout(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -715,8 +724,9 @@ func TestEmbeddedClient_DMap_LockWithTimeout_ErrNoSuchLock_Timeout(t *testing.T)
 
 func TestEmbeddedClient_DMap_LockWithTimeout_Then_Lease(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -767,8 +777,9 @@ func TestEmbeddedClient_DMap_LockWithTimeout_Then_Lease(t *testing.T) {
 
 func TestEmbeddedClient_RoutingTable_Standalone(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		config := testutil.NewConfigWithTLS(t, serverConfig, clientConfig)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 		cluster := newTestCluster(t)
 		db := cluster.addMemberWithConfig(t, config)
@@ -801,15 +812,16 @@ func TestEmbeddedClient_RoutingTable_Standalone(t *testing.T) {
 
 func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
 
 		cluster := newTestCluster(t)
-		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig)) // Cluster coordinator
+		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)) // Cluster coordinator
 		<-time.After(250 * time.Millisecond)
 
-		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
+		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS))
 
-		db2 := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
+		db2 := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS))
 		e := db2.NewEmbeddedClient()
 
 		rt, err := e.RoutingTable(context.Background())
@@ -849,9 +861,11 @@ func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
 func TestEmbeddedClient_Member(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster(t)
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
-		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+
+		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS))
+		cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS))
 
 		e := db.NewEmbeddedClient()
 		members, err := e.Members(context.Background())
@@ -895,8 +909,10 @@ func TestEmbeddedClient_Member(t *testing.T) {
 func TestEmbeddedClient_Ping(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster(t)
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+
+		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS))
 
 		e := db.NewEmbeddedClient()
 		ctx := context.Background()
@@ -919,8 +935,10 @@ func TestEmbeddedClient_Ping(t *testing.T) {
 func TestEmbeddedClient_Ping_WithMessage(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster(t)
-		serverConfig, clientConfig := sslkit.GetConfigs(t)
-		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, serverConfig, clientConfig))
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+
+		db := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS))
 
 		e := db.NewEmbeddedClient()
 		ctx := context.Background()

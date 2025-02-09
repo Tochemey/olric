@@ -16,3 +16,20 @@
  */
 
 package config
+
+import "crypto/tls"
+
+// TLSInfo holds the TLS configuration for both client and server components.
+// It provides separate configurations to securely establish encrypted communication
+// in different roles, ensuring proper TLS settings are used where needed.
+type TLSInfo struct {
+	// ClientTLS contains the TLS configuration for a client connection.
+	// This is used when making secure outbound connections to a remote server.
+	// It typically includes certificates, root CAs, and other security settings.
+	ClientTLS *tls.Config
+
+	// ServerTLS contains the TLS configuration for a server listener.
+	// This is used when accepting incoming secure connections from clients.
+	// It includes server certificates, private keys, and CA verification settings.
+	ServerTLS *tls.Config
+}

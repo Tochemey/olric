@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kapetan-io/tackle/autotls"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
@@ -30,7 +31,6 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/pubsub"
 	"github.com/tochemey/olric/internal/testutil"
-	"github.com/tochemey/olric/internal/testutil/sslkit"
 	"github.com/tochemey/olric/stats"
 )
 
@@ -284,13 +284,14 @@ func TestStats_DMap(t *testing.T) {
 }
 
 func TestStats_DMapWithTLS(t *testing.T) {
-	tlsServerConfig, tlsClientConfig := sslkit.GetConfigs(t)
-	config := testutil.NewConfigWithTLS(t, tlsServerConfig, tlsClientConfig)
+	conf := autotls.Config{AutoTLS: true}
+	require.NoError(t, autotls.Setup(&conf))
+	config := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 
 	cluster := newTestCluster(t)
 	db := cluster.addMemberWithConfig(t, config)
 
-	rc := redis.NewClient(&redis.Options{Addr: db.rt.This().String(), TLSConfig: tlsClientConfig})
+	rc := redis.NewClient(&redis.Options{Addr: db.rt.This().String(), TLSConfig: conf.ClientTLS})
 	ctx := context.Background()
 
 	t.Run("DMap stats without eviction", func(t *testing.T) {

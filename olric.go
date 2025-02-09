@@ -238,8 +238,12 @@ func New(config *config.Config) (*Olric, error) {
 		BindAddr:        config.BindAddr,
 		BindPort:        config.BindPort,
 		KeepAlivePeriod: config.KeepAlivePeriod,
-		TLSConfig:       config.TlsConfig,
 	}
+
+	if config.TLSInfo != nil {
+		rc.TLSConfig = config.TLSInfo.ServerTLS
+	}
+
 	srv := server.New(rc, flogger)
 	srv.SetPreConditionFunc(db.preconditionFunc)
 

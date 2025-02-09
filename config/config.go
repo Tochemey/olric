@@ -18,7 +18,6 @@
 package config
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -325,11 +324,11 @@ type Config struct {
 	// Then, you may need to modify it to tune for your environment.
 	MemberlistConfig *memberlist.Config
 
-	// TlsConfig used to configure a TLS server.
-	// After one has been passed to a TLS function it must not be
-	// modified. A Config may be reused; the tls package will also not
-	// modify it.
-	TlsConfig *tls.Config
+	// TLSInfo is used to configure both the TLS Server and Client
+	// Ensure that both the Server and Client are configured with the same
+	// root Certificate Authority (CA) to enable successful handshake and
+	// mutual authentication.
+	TLSInfo *TLSInfo
 }
 
 // Validate finds errors in the current configuration.

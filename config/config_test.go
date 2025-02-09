@@ -22,14 +22,21 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/tochemey/olric/internal/testutil/sslkit"
+	"github.com/kapetan-io/tackle/autotls"
 )
 
 func TestConfig_Initialize(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		serverConfig, _ := sslkit.GetConfigs(t)
+		// AutoGenerate TLS certs
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		tlsInfo := &TLSInfo{
+			ClientTLS: conf.ClientTLS,
+			ServerTLS: conf.ServerTLS,
+		}
+
 		c := &Config{
-			TlsConfig: serverConfig,
+			TLSInfo: tlsInfo,
 		}
 		require.NoError(t, c.Sanitize())
 		require.NoError(t, c.Validate())

@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/memberlist"
+	"github.com/kapetan-io/tackle/autotls"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/config"
@@ -35,7 +37,6 @@ import (
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
-	"github.com/tochemey/olric/internal/testutil/sslkit"
 )
 
 func newRoutingTableForTest(c *config.Config, srv *server.Server) *RoutingTable {
@@ -125,8 +126,9 @@ func TestRoutingTable_SingleNode(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		tlsSrv, tlsClient := sslkit.GetConfigs(t)
-		c := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		c := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt, err := cluster.addNode(c)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -195,9 +197,10 @@ func TestRoutingTable_Cluster(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		tlsSrv, tlsClient := sslkit.GetConfigs(t)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
 
-		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt1, err := cluster.addNode(c1)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -209,7 +212,7 @@ func TestRoutingTable_Cluster(t *testing.T) {
 
 		firstSignature := rt1.Signature()
 
-		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt2, err := cluster.addNode(c2)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -313,12 +316,13 @@ func TestRoutingTable_Cluster(t *testing.T) {
 
 func TestRoutingTable_CheckPartitionOwnership(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
-		tlsSrv, tlsClient := sslkit.GetConfigs(t)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
 
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt1, err := cluster.addNode(c1)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -328,7 +332,7 @@ func TestRoutingTable_CheckPartitionOwnership(t *testing.T) {
 			t.Fatalf("The coordinator node cannot be bootstrapped")
 		}
 
-		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt2, err := cluster.addNode(c2)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -406,9 +410,9 @@ func TestRoutingTable_NodeLeave(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
-
-		tlsSrv, tlsClient := sslkit.GetConfigs(t)
-		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt1, err := cluster.addNode(c1)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -418,7 +422,7 @@ func TestRoutingTable_NodeLeave(t *testing.T) {
 			t.Fatalf("The coordinator node cannot be bootstrapped")
 		}
 
-		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt2, err := cluster.addNode(c2)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -533,9 +537,10 @@ func TestRoutingTable_NodeUpdate(t *testing.T) {
 		cluster := newTestCluster()
 		defer cluster.cancel()
 
-		tlsSrv, tlsClient := sslkit.GetConfigs(t)
+		conf := autotls.Config{AutoTLS: true}
+		require.NoError(t, autotls.Setup(&conf))
 
-		c1 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c1 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt1, err := cluster.addNode(c1)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
@@ -545,7 +550,7 @@ func TestRoutingTable_NodeUpdate(t *testing.T) {
 			t.Fatalf("The coordinator node cannot be bootstrapped")
 		}
 
-		c2 := testutil.NewConfigWithTLS(t, tlsSrv, tlsClient)
+		c2 := testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS)
 		rt2, err := cluster.addNode(c2)
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
