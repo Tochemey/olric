@@ -329,6 +329,11 @@ type Config struct {
 	// root Certificate Authority (CA) to enable successful handshake and
 	// mutual authentication.
 	TLSInfo *TLSInfo
+
+	// MemberMeta is a string that is used to store metadata about the member.
+	// The metadata is not used internally by Olric, but is available to the
+	// user to store information about the member.
+	MemberMeta string
 }
 
 // Validate finds errors in the current configuration.

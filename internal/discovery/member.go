@@ -33,6 +33,7 @@ type Member struct {
 	NameHash  uint64
 	ID        uint64
 	Birthdate int64
+	Meta      string
 }
 
 // CompareByID returns true if two members denote the same member in the cluster.
@@ -77,5 +78,6 @@ func NewMember(c *config.Config) Member {
 		NameHash:  nameHash,
 		ID:        MemberID(c.MemberlistConfig.Name, birthdate),
 		Birthdate: birthdate,
+		Meta:      c.MemberMeta,
 	}
 }
