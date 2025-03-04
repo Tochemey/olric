@@ -39,6 +39,7 @@ func toMember(member discovery.Member) stats.Member {
 		Name:      member.Name,
 		ID:        member.ID,
 		Birthdate: member.Birthdate,
+		Meta:      member.Meta,
 	}
 }
 

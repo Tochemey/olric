@@ -52,7 +52,7 @@ func NewClusterMembers() *ClusterMembers {
 }
 
 func (c *ClusterMembers) Command(ctx context.Context) *redis.Cmd {
-	var args []interface{}
+	var args []any
 	args = append(args, Cluster.Members)
 	return redis.NewCmd(ctx, args...)
 }

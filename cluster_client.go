@@ -602,9 +602,10 @@ func (cl *ClusterClient) Members(ctx context.Context) ([]Member, error) {
 	var members []Member
 	for _, rawItem := range items {
 		m := Member{}
-		item := rawItem.([]interface{})
+		item := rawItem.([]any)
 		m.Name = item[0].(string)
 		m.Birthdate = item[1].(int64)
+		m.Meta = item[3].(string)
 
 		// go-redis/redis package cannot handle uint64 type. At the time of this writing,
 		// there is no solution for this, and I don't want to use a soft fork to repair it.

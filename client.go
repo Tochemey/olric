@@ -42,6 +42,9 @@ type Member struct {
 	// Role of the member in the cluster. There is only one coordinator member
 	// in a healthy cluster.
 	Coordinator bool
+
+	// Meta is a user-defined metadata for the member.
+	Meta string
 }
 
 // Iterator defines an interface to implement iterators on the distributed maps.

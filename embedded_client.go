@@ -388,6 +388,7 @@ func (e *EmbeddedClient) Members(_ context.Context) ([]Member, error) {
 			Name:      member.Name,
 			ID:        member.ID,
 			Birthdate: member.Birthdate,
+			Meta:      member.Meta,
 		}
 		if coordinator.ID == member.ID {
 			m.Coordinator = true

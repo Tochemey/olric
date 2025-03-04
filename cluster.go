@@ -175,7 +175,7 @@ func (db *Olric) clusterMembersCommandHandler(conn redcon.Conn, cmd redcon.Comma
 	members := db.rt.Discovery().GetMembers()
 	conn.WriteArray(len(members))
 	for _, member := range members {
-		conn.WriteArray(3)
+		conn.WriteArray(4)
 		conn.WriteBulkString(member.Name)
 		// go-redis/redis package cannot handle uint64. At the time of this writing,
 		// there is no solution for this, and I don't want to use a soft fork to repair it.
@@ -186,5 +186,6 @@ func (db *Olric) clusterMembersCommandHandler(conn redcon.Conn, cmd redcon.Comma
 		} else {
 			conn.WriteBulkString("false")
 		}
+		conn.WriteBulkString(member.Meta)
 	}
 }

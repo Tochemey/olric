@@ -99,6 +99,9 @@ type Member struct {
 
 	// Birthdate is UNIX time in nanoseconds.
 	Birthdate int64 `json:"birthdate"`
+
+	// Meta is a string that can be used to store metadata about the member.
+	Meta string `json:"meta"`
 }
 
 // String returns the member name.
