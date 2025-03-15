@@ -90,10 +90,10 @@ func NewConfig() *config.Config {
 
 func NewConfigWithTLS(t *testing.T, serverTLS, clientTLS *tls.Config) *config.Config {
 	c := config.New("local")
-	c.Client.TLSConfig = clientTLS
-	c.TLSInfo = &config.TLSInfo{
-		ClientTLS: serverTLS,
-		ServerTLS: clientTLS,
+	c.Client.TLS = clientTLS
+	c.TLS = &config.TLS{
+		Client: serverTLS,
+		Server: clientTLS,
 	}
 
 	c.PartitionCount = 7
@@ -123,8 +123,8 @@ func NewServer(c *config.Config) *server.Server {
 		KeepAlivePeriod: time.Second,
 	}
 
-	if c.TLSInfo != nil {
-		sc.TLSConfig = c.TLSInfo.ServerTLS
+	if c.TLS != nil {
+		sc.TLS = c.TLS.Server
 	}
 
 	l := NewFlogger(c)

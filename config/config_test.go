@@ -30,13 +30,13 @@ func TestConfig_Initialize(t *testing.T) {
 		// AutoGenerate TLS certs
 		conf := autotls.Config{AutoTLS: true}
 		require.NoError(t, autotls.Setup(&conf))
-		tlsInfo := &TLSInfo{
-			ClientTLS: conf.ClientTLS,
-			ServerTLS: conf.ServerTLS,
+		tlsInfo := &TLS{
+			Client: conf.ClientTLS,
+			Server: conf.ServerTLS,
 		}
 
 		c := &Config{
-			TLSInfo: tlsInfo,
+			TLS: tlsInfo,
 		}
 		require.NoError(t, c.Sanitize())
 		require.NoError(t, c.Validate())

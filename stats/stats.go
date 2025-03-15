@@ -171,9 +171,6 @@ type Stats struct {
 	// Cmdline holds the command-line arguments, starting with the program name.
 	Cmdline []string `json:"cmdline"`
 
-	// ReleaseVersion is the current Olric version
-	ReleaseVersion string `json:"release_version"`
-
 	// UptimeSeconds is number of seconds since the server started.
 	UptimeSeconds int64 `json:"uptime_seconds"`
 

@@ -12,7 +12,7 @@ Please use the original repo for any bugs or related questions.
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
 * Renamed module name
-* Upgrade **go version to 1.22.9**
+* Upgrade **go version to 1.23.0**
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
 * **TLS Support**

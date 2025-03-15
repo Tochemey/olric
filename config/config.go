@@ -324,11 +324,11 @@ type Config struct {
 	// Then, you may need to modify it to tune for your environment.
 	MemberlistConfig *memberlist.Config
 
-	// TLSInfo is used to configure both the TLS Server and Client
+	// TLS is used to configure both the TLS Server and Client
 	// Ensure that both the Server and Client are configured with the same
 	// root Certificate Authority (CA) to enable successful handshake and
 	// mutual authentication.
-	TLSInfo *TLSInfo
+	TLS *TLS
 
 	// MemberMeta is a string that is used to store metadata about the member.
 	// The metadata is not used internally by Olric, but is available to the

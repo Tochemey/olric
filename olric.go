@@ -60,9 +60,6 @@ import (
 	"github.com/tochemey/olric/pkg/flog"
 )
 
-// ReleaseVersion is the current stable version of Olric
-const ReleaseVersion string = "0.2.0-alpha"
-
 var (
 	// ErrOperationTimeout is returned when an operation times out.
 	ErrOperationTimeout = errors.New("operation timeout")
@@ -240,8 +237,8 @@ func New(config *config.Config) (*Olric, error) {
 		KeepAlivePeriod: config.KeepAlivePeriod,
 	}
 
-	if config.TLSInfo != nil {
-		rc.TLSConfig = config.TLSInfo.ServerTLS
+	if config.TLS != nil {
+		rc.TLS = config.TLS.Server
 	}
 
 	srv := server.New(rc, flogger)
@@ -325,7 +322,7 @@ func (db *Olric) isOperable() error {
 // Start starts background servers and joins the cluster. You still must call Shutdown
 // method if Start function returns an early error.
 func (db *Olric) Start() error {
-	db.log.V(1).Printf("[INFO] Olric %s on %s/%s %s", ReleaseVersion, runtime.GOOS, runtime.GOARCH, runtime.Version())
+	db.log.V(1).Printf("[INFO] Starting Olric on %s/%s %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
 
 	// This error group is responsible to run the TCP server at background and report errors.
 	errGr, ctx := errgroup.WithContext(context.Background())

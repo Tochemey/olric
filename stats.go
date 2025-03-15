@@ -91,7 +91,6 @@ func (db *Olric) checkPartitionOwnership(part *partitions.Partition) bool {
 func (db *Olric) stats(cfg statsConfig) stats.Stats {
 	s := stats.Stats{
 		Cmdline:            os.Args,
-		ReleaseVersion:     ReleaseVersion,
 		UptimeSeconds:      discovery.UptimeSeconds.Read(),
 		ClusterCoordinator: toMember(db.rt.Discovery().GetCoordinator()),
 		Member:             toMember(db.rt.This()),

@@ -101,7 +101,7 @@ type Client struct {
 	IdleTimeout time.Duration
 
 	// TLS Config to use. When set TLS will be negotiated.
-	TLSConfig *tls.Config
+	TLS *tls.Config
 
 	// Limiter interface used to implemented circuit breaker or rate limiter.
 	Limiter redis.Limiter
@@ -128,10 +128,10 @@ func (c *Client) Sanitize() error {
 				Timeout:   c.DialTimeout,
 				KeepAlive: DefaultKeepalive,
 			}
-			if c.TLSConfig == nil {
+			if c.TLS == nil {
 				return netDialer.DialContext(ctx, network, addr)
 			}
-			return tls.DialWithDialer(netDialer, network, addr, c.TLSConfig)
+			return tls.DialWithDialer(netDialer, network, addr, c.TLS)
 		}
 	}
 	if c.PoolSize == 0 {
@@ -199,7 +199,7 @@ func (c *Client) RedisOptions() *redis.Options {
 		ConnMaxLifetime: c.MaxConnAge,
 		PoolTimeout:     c.PoolTimeout,
 		ConnMaxIdleTime: c.IdleTimeout,
-		TLSConfig:       c.TLSConfig,
+		TLSConfig:       c.TLS,
 		Limiter:         c.Limiter,
 	}
 }

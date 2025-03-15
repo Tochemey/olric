@@ -103,7 +103,7 @@ func newTLSServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Con
 		BindAddr:        "127.0.0.1",
 		BindPort:        bindPort,
 		KeepAlivePeriod: time.Second,
-		TLSConfig:       conf.ServerTLS,
+		TLS:             conf.ServerTLS,
 	}
 	s := New(c, fl)
 	s.SetPreConditionFunc(preCond)

@@ -61,7 +61,7 @@ type Config struct {
 	BindPort        int
 	KeepAlivePeriod time.Duration
 	IdleClose       time.Duration
-	TLSConfig       *tls.Config
+	TLS             *tls.Config
 }
 
 type ConnWrapper struct {
@@ -247,8 +247,8 @@ func (s *Server) getServer(addr string) ConServer {
 	closeFn := func(conn redcon.Conn, err error) {
 		CurrentConnections.Increase(-1)
 	}
-	if s.config.TLSConfig != nil {
-		return redcon.NewServerTLS(addr, handler, acceptFn, closeFn, s.config.TLSConfig)
+	if s.config.TLS != nil {
+		return redcon.NewServerTLS(addr, handler, acceptFn, closeFn, s.config.TLS)
 	}
 	return redcon.NewServer(addr, handler, acceptFn, closeFn)
 }
@@ -260,9 +260,10 @@ func (s *Server) listenerWrapper(addr string) (*ListenerWrapper, error) {
 		err      error
 	)
 
-	if s.config.TLSConfig != nil {
-		listener, err = tls.Listen("tcp", addr, s.config.TLSConfig)
-	} else {
+	switch {
+	case s.config.TLS != nil:
+		listener, err = tls.Listen("tcp", addr, s.config.TLS)
+	default:
 		listener, err = net.Listen("tcp", addr)
 	}
 
