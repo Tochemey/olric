@@ -15,6 +15,7 @@ Please use the original repo for any bugs or related questions.
 * Upgrade **go version to 1.23.0**
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
+* Meta information can be pass to the cluster member
 * **TLS Support**
 
 ## Overview 
