@@ -270,8 +270,7 @@ When you read a key, the primary owner tries to find the key on itself, first. T
 backups, respectively.
 The delete operation works the same way.
 
-The data(distributed map objects) in the fragmented partition is moved slowly to the primary owner by the **rebalancer
-**. Until the move is done,
+The data(distributed map objects) in the fragmented partition is moved slowly to the primary owner by the **rebalancer**. Until the move is done,
 the data remains available on the previous owners. The DMap methods use this list to query data on the cluster.
 
 *Please note that, 'multiple partition owners' is an undesirable situation and the **rebalancer** component is designed
