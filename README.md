@@ -7,7 +7,7 @@
 This is forked version of the [main repository](https://github.com/tochemey/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
 Please use the original repo for any bugs or related questions.
 
-## Modifications from original library
+## Modifications from the original library
 
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
@@ -15,7 +15,7 @@ Please use the original repo for any bugs or related questions.
 * Upgrade **go version to 1.23.0**
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
-* Meta information can be pass to the cluster member
+* Meta-information can be passed to the cluster member
 * **TLS Support**
 
 ## Overview 
@@ -186,15 +186,6 @@ you can set `BindAddr` as `0.0.0.0`. Olric will very likely to find an IP addres
 ### Service Discovery
 
 Olric provides a service discovery interface which can be used to implement plugins.
-
-We currently have a bunch of service discovery plugins for automatic peer discovery on cloud environments:
-
-* [buraksezer/olric-consul-plugin](https://github.com/tochemey/olric-consul-plugin) provides a plugin using Consul.
-* [buraksezer/olric-cloud-plugin](https://github.com/tochemey/olric-cloud-plugin) provides a plugin for well-known
-  cloud providers. Including Kubernetes.
-* [justinfx/olric-nats-plugin](https://github.com/justinfx/olric-nats-plugin) provides a plugin using nats.io
-
-In order to get more info about installation and configuration of the plugins, see their GitHub page.
 
 ### Timeouts
 
@@ -448,32 +439,7 @@ is occured.
 
 #### Configuration of eviction mechanisms
 
-Here is a simple configuration block for `olricd.yaml`:
-
-```
-cache:
-  numEvictionWorkers: 1
-  maxIdleDuration: ""
-  ttlDuration: "100s"
-  maxKeys: 100000
-  maxInuse: 1000000 # in bytes
-  lRUSamples: 10
-  evictionPolicy: "LRU" # NONE/LRU
-```
-
-You can also set cache configuration per DMap. Here is a simple configuration for a DMap named `foobar`:
-
-```
-dmaps:
-  foobar:
-    maxIdleDuration: "60s"
-    ttlDuration: "300s"
-    maxKeys: 500000 # in-bytes
-    lRUSamples: 20
-    evictionPolicy: "NONE" # NONE/LRU
-```
-
-If you prefer embedded-member deployment scenario, please take a look
+For embedded-member deployment scenario, please take a look
 at [config#CacheConfig](https://godoc.org/github.com/tochemey/olric/config#CacheConfig)
 and [config#DMapCacheConfig](https://godoc.org/github.com/tochemey/olric/config#DMapCacheConfig) for the
 configuration.
