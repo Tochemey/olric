@@ -164,7 +164,7 @@ type DMap interface {
 	// Put sets the value for the given key. It overwrites any previous value for
 	// that key, and it's thread-safe. The key has to be a string. value type is arbitrary.
 	// It is safe to modify the contents of the arguments after Put returns but not before.
-	Put(ctx context.Context, key string, value interface{}, options ...PutOption) error
+	Put(ctx context.Context, key string, value any, options ...PutOption) error
 
 	// Get gets the value for the given key. It returns ErrKeyNotFound if the DB
 	// does not contain the key. It's thread-safe. It is safe to modify the contents
@@ -186,7 +186,7 @@ type DMap interface {
 
 	// GetPut atomically sets the key to value and returns the old value stored at key. It returns nil if there is no
 	// previous value.
-	GetPut(ctx context.Context, key string, value interface{}) (*GetResponse, error)
+	GetPut(ctx context.Context, key string, value any) (*GetResponse, error)
 
 	// IncrByFloat atomically increments the key by delta. The return value is the new value
 	// after being incremented or an error.

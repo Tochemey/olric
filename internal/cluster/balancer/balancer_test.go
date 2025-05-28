@@ -32,13 +32,14 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/config"
-	"github.com/tochemey/olric/internal/cluster/partitions"
-	"github.com/tochemey/olric/internal/cluster/routingtable"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
+
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/cluster/routingtable"
 )
 
 func TestBalance_Primary_Move(t *testing.T) {
@@ -300,7 +301,7 @@ func TestBalance_Backup_Move(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			b1.rt.UpdateEagerly()
 			err = checkBackupOwnership(e2)
 			require.NoError(t, err)

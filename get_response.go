@@ -31,7 +31,7 @@ type GetResponse struct {
 	entry storage.Entry
 }
 
-func (g *GetResponse) Scan(v interface{}) error {
+func (g *GetResponse) Scan(v any) error {
 	if g.entry == nil {
 		return ErrNilResponse
 	}

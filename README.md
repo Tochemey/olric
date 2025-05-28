@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/Tochemey/olric/branch/main/graph/badge.svg?token=C5Z0JE8SNj)](https://codecov.io/gh/Tochemey/olric)
 
 
-This is forked version of the [main repository](https://github.com/tochemey/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
+This is a forked version of the [main repository](https://github.com/tochemey/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
 Please use the original repo for any bugs or related questions.
 
 ## Modifications from the original library
@@ -15,7 +15,7 @@ Please use the original repo for any bugs or related questions.
 * Upgrade **go version to 1.23.0**
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
-* Meta-information can be passed to the cluster member
+* **Meta-information** can be passed to the cluster member
 * **TLS Support**
 
 ## Overview 
@@ -877,7 +877,7 @@ func main() {
 
 ## Contributions
 
-Please don't hesitate to fork the project and send a pull request or just e-mail me to ask questions and share ideas.
+Please don't hesitate to fork the project and send a pull request.
 
 ## License
 

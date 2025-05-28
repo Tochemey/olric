@@ -30,9 +30,10 @@ import (
 	"sort"
 	"time"
 
+	"github.com/tochemey/olric/pkg/storage"
+
 	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/kvstore/table"
-	"github.com/tochemey/olric/pkg/storage"
 )
 
 const (
@@ -127,7 +128,7 @@ func requiredSizeForAnEntry(e storage.Entry) uint64 {
 	return uint64(len(e.Key()) + len(e.Value()) + table.MetadataLength)
 }
 
-func prepareTableSize(raw interface{}) (size uint64, err error) {
+func prepareTableSize(raw any) (size uint64, err error) {
 	switch raw.(type) {
 	case uint:
 		size = uint64(raw.(uint))

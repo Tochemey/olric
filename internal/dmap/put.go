@@ -402,7 +402,7 @@ type PutConfig struct {
 // for that key, and it's thread-safe. The key has to be a string. value type
 // is arbitrary. It is safe to modify the contents of the arguments after
 // Put returns but not before.
-func (dm *DMap) Put(ctx context.Context, key string, value interface{}, cfg *PutConfig) error {
+func (dm *DMap) Put(ctx context.Context, key string, value any, cfg *PutConfig) error {
 	valueBuf := pool.Get()
 	defer pool.Put(valueBuf)
 

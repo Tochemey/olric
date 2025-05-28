@@ -24,12 +24,13 @@ import (
 	"time"
 
 	"github.com/tochemey/olric/config"
-	"github.com/tochemey/olric/internal/cluster/partitions"
-	"github.com/tochemey/olric/internal/cluster/routingtable"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/service"
 	"github.com/tochemey/olric/pkg/flog"
+
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/cluster/routingtable"
 )
 
 type Balancer struct {
@@ -70,7 +71,7 @@ func (b *Balancer) isAlive() bool {
 	return true
 }
 
-func (b *Balancer) scanPartition(sign uint64, part *partitions.Partition, owners ...discovery.Member) {
+func (b *Balancer) movePartition(sign uint64, part *partitions.Partition, owners ...discovery.Member) {
 	ownersStr := func() string {
 		var names []string
 		for _, owner := range owners {
@@ -79,7 +80,7 @@ func (b *Balancer) scanPartition(sign uint64, part *partitions.Partition, owners
 		return strings.Join(names, ",")
 	}()
 
-	part.Map().Range(func(rawName, rawFragment interface{}) bool {
+	part.Map().Range(func(rawName, rawFragment any) bool {
 		f := rawFragment.(partitions.Fragment)
 		if f.Stats().Length == 0 {
 			return false
@@ -124,7 +125,7 @@ func (b *Balancer) primaryCopies() {
 		}
 
 		// This is a previous owner. Move the keys.
-		b.scanPartition(sign, part, owner)
+		b.movePartition(sign, part, owner)
 	}
 }
 
@@ -183,7 +184,7 @@ LOOP:
 			continue LOOP
 		}
 
-		b.scanPartition(sign, part, currentOwners...)
+		b.movePartition(sign, part, currentOwners...)
 	}
 }
 
@@ -198,6 +199,8 @@ func (b *Balancer) triggerBalancer() {
 
 	b.primaryCopies()
 
+	// TODO(arsene): using the default values will never perform a backup
+	// TODO(arsene): revisit this logic
 	if b.config.ReplicaCount > config.MinimumReplicaCount {
 		b.backupCopies()
 	}

@@ -20,10 +20,14 @@ package dmap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/collection"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/stats"
@@ -150,26 +154,30 @@ func (dm *DMap) lookupOnOwners(hkey uint64, key string) []*version {
 		panic("partition owners list cannot be empty")
 	}
 
-	var versions []*version
-	versions = append(versions, dm.lookupOnThisNode(hkey, key))
+	versions := collection.NewArrayList[*version]()
+	versions.Append(dm.lookupOnThisNode(hkey, key))
 
-	// Run a query on the previous owners.
-	// Traverse in reverse order. Except from the latest host, this one.
+	eg := new(errgroup.Group)
+
 	for i := len(owners) - 2; i >= 0; i-- {
 		owner := owners[i]
-		v, err := dm.lookupOnPreviousOwner(&owner, key)
-		if err != nil {
-			if dm.s.log.V(6).Ok() {
-				dm.s.log.V(6).Printf("[ERROR] Failed to call get on a previous "+
-					"primary owner: %s: %v", owner, err)
+		eg.Go(func() error {
+			version, err := dm.lookupOnPreviousOwner(&owner, key)
+			if err != nil {
+				return fmt.Errorf("[ERROR] Failed to call get on a previous primary owner: %s: %v", owner, err)
 			}
-			continue
-		}
-		// Ignore failed owners. The data on those hosts will be wiped out
-		// by the balancer.
-		versions = append(versions, v)
+			versions.Append(version)
+			return nil
+		})
 	}
-	return versions
+
+	if err := eg.Wait(); err != nil {
+		if dm.s.log.V(6).Ok() {
+			dm.s.log.V(6).Println(err.Error())
+		}
+	}
+
+	return versions.Items()
 }
 
 func (dm *DMap) sortVersions(versions []*version) []*version {
@@ -197,82 +205,104 @@ func (dm *DMap) sanitizeAndSortVersions(versions []*version) []*version {
 }
 
 func (dm *DMap) lookupOnReplicas(hkey uint64, key string) []*version {
-	// Check backup.
+	// Check backups.
 	backups := dm.s.backup.PartitionOwnersByHKey(hkey)
-	versions := make([]*version, 0, len(backups))
+	versions := collection.NewArrayList[*version]()
+
+	errGroup := new(errgroup.Group)
+	errGroup.SetLimit(len(backups))
+
 	for _, replica := range backups {
-		host := replica
-		cmd := protocol.NewGetEntry(dm.name, key).SetReplica().Command(dm.s.ctx)
-		rc := dm.s.client.Get(host.String())
-		err := rc.Process(dm.s.ctx, cmd)
-		err = protocol.ConvertError(err)
-		if err != nil {
-			if dm.s.log.V(6).Ok() {
-				dm.s.log.V(6).Printf("[DEBUG] Failed to call get on"+
-					" a replica owner: %s: %v", host, err)
+		replica := replica
+		errGroup.Go(func() error {
+			cmd := protocol.NewGetEntry(dm.name, key).SetReplica().Command(dm.s.ctx)
+			rc := dm.s.client.Get(replica.String())
+			err := rc.Process(dm.s.ctx, cmd)
+			err = protocol.ConvertError(err)
+			if err != nil {
+				err = fmt.Errorf("[DEBUG] Failed to call get on a replica owner: %s: %v", replica, err)
+				return err
 			}
-			continue
-		}
 
-		value, err := cmd.Bytes()
-		err = protocol.ConvertError(err)
-		if err != nil {
-			if dm.s.log.V(6).Ok() {
-				dm.s.log.V(6).Printf("[DEBUG] Failed to call get on"+
-					" a replica owner: %s: %v", host, err)
+			value, err := cmd.Bytes()
+			err = protocol.ConvertError(err)
+			if err != nil {
+				err = fmt.Errorf("[DEBUG] Failed to call get on a replica owner: %s: %v", replica, err)
+				return err
 			}
-		}
 
-		v := &version{host: &host}
-		e := dm.engine.NewEntry()
-		e.Decode(value)
-		v.entry = e
-		versions = append(versions, v)
+			version := &version{host: &replica}
+			e := dm.engine.NewEntry()
+			e.Decode(value)
+			version.entry = e
+			versions.Append(version)
+			return nil
+		})
 	}
-	return versions
+
+	if err := errGroup.Wait(); err != nil {
+		if dm.s.log.V(6).Ok() {
+			dm.s.log.V(6).Println(err.Error())
+		}
+	}
+
+	return versions.Items()
 }
 
 func (dm *DMap) readRepair(winner *version, versions []*version) {
+	errGroup := new(errgroup.Group)
+	errGroup.SetLimit(len(versions))
+
 	for _, version := range versions {
+		version := version
 		if version.entry != nil && winner.entry.Timestamp() == version.entry.Timestamp() {
 			continue
 		}
 
-		// Sync
-		tmp := *version.host
-		if tmp.CompareByID(dm.s.rt.This()) {
-			hkey := partitions.HKey(dm.name, winner.entry.Key())
-			part := dm.getPartitionByHKey(hkey, partitions.PRIMARY)
-			f, err := dm.loadOrCreateFragment(part)
-			if err != nil {
-				dm.s.log.V(3).Printf("[ERROR] Failed to get or create the fragment for: %s on %s: %v",
-					winner.entry.Key(), dm.name, err)
-				return
+		errGroup.Go(func() error {
+			// Sync
+			tmp := *version.host
+			if tmp.CompareByID(dm.s.rt.This()) {
+				hkey := partitions.HKey(dm.name, winner.entry.Key())
+				part := dm.getPartitionByHKey(hkey, partitions.PRIMARY)
+				f, err := dm.loadOrCreateFragment(part)
+				if err != nil {
+					return fmt.Errorf("[ERROR] Failed to get or create the fragment for: %s on %s: %v",
+						winner.entry.Key(), dm.name, err)
+				}
+
+				f.Lock()
+				e := newEnv(context.Background())
+				e.hkey = hkey
+				e.fragment = f
+
+				if err := dm.putEntryOnFragment(e, winner.entry); err != nil {
+					f.Unlock()
+					return fmt.Errorf("[ERROR] Failed to synchronize with replica: %v", err)
+				}
+
+				f.Unlock()
+				return nil
 			}
 
-			f.Lock()
-			e := newEnv(context.Background())
-			e.hkey = hkey
-			e.fragment = f
-			err = dm.putEntryOnFragment(e, winner.entry)
-			if err != nil {
-				dm.s.log.V(3).Printf("[ERROR] Failed to synchronize with replica: %v", err)
-			}
-			f.Unlock()
-		} else {
 			// If readRepair is enabled, this function is called by every GET request.
 			cmd := protocol.NewPutEntry(dm.name, winner.entry.Key(), winner.entry.Encode()).Command(dm.s.ctx)
 			rc := dm.s.client.Get(version.host.String())
-			err := rc.Process(dm.s.ctx, cmd)
-			if err != nil {
-				dm.s.log.V(3).Printf("[ERROR] Failed to synchronize replica %s: %v", version.host, err)
-				continue
+
+			if err := rc.Process(dm.s.ctx, cmd); err != nil {
+				return fmt.Errorf("[ERROR] Failed to synchronize replica %s: %v", version.host, err)
 			}
-			err = cmd.Err()
-			if err != nil {
-				dm.s.log.V(3).Printf("[ERROR] Failed to synchronize replica %s: %v", version.host, err)
+
+			if err := cmd.Err(); err != nil {
+				return fmt.Errorf("[ERROR] Failed to synchronize replica %s: %v", version.host, err)
 			}
-		}
+
+			return nil
+		})
+	}
+
+	if err := errGroup.Wait(); err != nil {
+		dm.s.log.V(3).Println(err.Error())
 	}
 }
 
