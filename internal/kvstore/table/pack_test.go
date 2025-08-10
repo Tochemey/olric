@@ -41,7 +41,7 @@ func TestTable_Pack_EncodeDecode(t *testing.T) {
 	tb := New(size)
 
 	timestamp := time.Now().UnixNano()
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		e := entry.New()
 		e.SetKey(bkey(i))
 		e.SetTTL(int64(i))
@@ -58,7 +58,7 @@ func TestTable_Pack_EncodeDecode(t *testing.T) {
 	newTable, err := Decode(encoded)
 	require.NoError(t, err)
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		hkey := xxhash.Sum64([]byte(bkey(i)))
 		e, err := newTable.Get(hkey)
 		require.NoError(t, err)
@@ -67,5 +67,4 @@ func TestTable_Pack_EncodeDecode(t *testing.T) {
 		require.Equal(t, e.TTL(), int64(i))
 		require.NotEqual(t, timestamp, e.LastAccess())
 	}
-
 }
