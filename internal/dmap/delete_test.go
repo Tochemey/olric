@@ -24,17 +24,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tochemey/olric/internal/kvstore"
-	"github.com/tochemey/olric/pkg/storage"
-
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/kvstore"
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 func checkEmptyStorageEngine(t *testing.T, s *Service) {
@@ -97,7 +96,7 @@ func TestDMap_Delete_Cluster(t *testing.T) {
 		_, err = dm2.Delete(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 
-		_, err = dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm2.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 }
@@ -126,7 +125,7 @@ func TestDMap_Delete_Lookup(t *testing.T) {
 		_, err = dm2.Delete(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 
-		_, err = dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm2.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 }
@@ -168,7 +167,7 @@ func TestDMap_Delete_StaleFragments(t *testing.T) {
 			t.Fatalf("Expected nil. Got: %v", err)
 		}
 
-		_, err = dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm2.Get(ctx, testutil.ToKey(i))
 		if !errors.Is(err, ErrKeyNotFound) {
 			t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 		}
@@ -220,7 +219,7 @@ func TestDMap_Delete_PreviousOwner(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cmd.Err())
 
-	_, err = dm.Get(context.Background(), "mykey")
+	_, _, err = dm.Get(context.Background(), "mykey")
 	require.ErrorIs(t, err, ErrKeyNotFound)
 }
 
@@ -300,7 +299,7 @@ func TestDMap_Delete_Backup(t *testing.T) {
 			t.Fatalf("Expected nil. Got: %v", err)
 		}
 
-		_, err = dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm2.Get(ctx, testutil.ToKey(i))
 		if err != ErrKeyNotFound {
 			t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 		}
@@ -342,7 +341,7 @@ func TestDMap_Delete_Compaction(t *testing.T) {
 		_, err = dm.Delete(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 	checkEmptyStorageEngine(t, s)

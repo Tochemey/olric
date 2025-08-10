@@ -51,7 +51,7 @@ func (dm *DMap) unlockKey(ctx context.Context, key string, token []byte) error {
 	}()
 
 	// get the key to check its value
-	entry, err := dm.Get(ctx, key)
+	entry, _, err := dm.Get(ctx, key)
 	if errors.Is(err, ErrKeyNotFound) {
 		return ErrNoSuchLock
 	}
@@ -178,7 +178,7 @@ func (dm *DMap) leaseKey(ctx context.Context, key string, token []byte, timeout 
 	}()
 
 	// get the key to check its value
-	e, err := dm.Get(ctx, key)
+	e, _, err := dm.Get(ctx, key)
 	if errors.Is(err, ErrKeyNotFound) {
 		return ErrNoSuchLock
 	}

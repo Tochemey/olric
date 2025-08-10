@@ -30,7 +30,7 @@ import (
 )
 
 func (dm *DMap) loadCurrentAtomicInt(e *env) (int, int64, error) {
-	entry, err := dm.Get(e.ctx, e.key)
+	entry, _, err := dm.Get(e.ctx, e.key)
 	if errors.Is(err, ErrKeyNotFound) {
 		return 0, 0, nil
 	}
@@ -122,7 +122,7 @@ func (dm *DMap) getPut(e *env) (storage.Entry, error) {
 		}
 	}()
 
-	entry, err := dm.Get(e.ctx, e.key)
+	entry, _, err := dm.Get(e.ctx, e.key)
 	if errors.Is(err, ErrKeyNotFound) {
 		err = nil
 	}
@@ -141,7 +141,7 @@ func (dm *DMap) getPut(e *env) (storage.Entry, error) {
 }
 
 // GetPut atomically sets key to value and returns the old value stored at key.
-func (dm *DMap) GetPut(ctx context.Context, key string, value interface{}) (storage.Entry, error) {
+func (dm *DMap) GetPut(ctx context.Context, key string, value any) (storage.Entry, error) {
 	if value == nil {
 		value = struct{}{}
 	}
@@ -182,7 +182,7 @@ func (dm *DMap) atomicIncrByFloat(e *env, delta float64) (float64, error) {
 	}()
 
 	var current float64
-	entry, err := dm.Get(e.ctx, e.key)
+	entry, _, err := dm.Get(e.ctx, e.key)
 	if errors.Is(err, ErrKeyNotFound) {
 		err = nil
 	}

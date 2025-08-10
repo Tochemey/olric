@@ -96,7 +96,7 @@ func TestDMap_Atomic_Incr(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	gr, err := dm.Get(ctx, key)
+	gr, _, err := dm.Get(ctx, key)
 	require.NoError(t, err)
 
 	var res int
@@ -138,7 +138,7 @@ func TestDMap_Atomic_Decr(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	res, err := dm.Get(context.Background(), key)
+	res, _, err := dm.Get(context.Background(), key)
 	require.NoError(t, err)
 
 	var value int
@@ -186,7 +186,7 @@ func TestDMap_Atomic_GetPut(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	gr, err := dm.Get(context.Background(), key)
+	gr, _, err := dm.Get(context.Background(), key)
 	require.NoError(t, err)
 
 	var last int
@@ -229,7 +229,7 @@ func TestDMap_Atomic_IncrByFloat(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	gr, err := dm.Get(ctx, key)
+	gr, _, err := dm.Get(ctx, key)
 	require.NoError(t, err)
 
 	var res float64
@@ -393,7 +393,7 @@ func TestDMap_exGetPutOperation(t *testing.T) {
 	dm, err := s.NewDMap("mydmap")
 	require.NoError(t, err)
 
-	gr, err := dm.Get(context.Background(), "mykey")
+	gr, _, err := dm.Get(context.Background(), "mykey")
 	require.NoError(t, err)
 
 	var last int

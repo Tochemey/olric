@@ -47,7 +47,7 @@ func TestDMap_Stats(t *testing.T) {
 
 	//GetHits
 	for i := 0; i < 10; i++ {
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 	}
 
@@ -59,7 +59,7 @@ func TestDMap_Stats(t *testing.T) {
 
 	// GetMisses
 	for i := 0; i < 10; i++ {
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 
@@ -83,7 +83,7 @@ func TestDMap_Stats(t *testing.T) {
 
 	// GetMisses
 	for i := 0; i < 10; i++ {
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 

@@ -24,10 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tochemey/olric/internal/protocol"
-
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/testcluster"
 )
 
@@ -100,7 +99,7 @@ func TestDMap_LockLease_Standalone(t *testing.T) {
 	err = dm.Lease(ctx, key, token, 2*time.Second)
 	require.NoError(t, err)
 
-	e, err := dm.Get(ctx, key)
+	e, _, err := dm.Get(ctx, key)
 	require.NoError(t, err)
 
 	if e.TTL()-(time.Now().UnixNano()/1000000) <= 1900 {

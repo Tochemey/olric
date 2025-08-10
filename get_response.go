@@ -28,7 +28,8 @@ import (
 var ErrNilResponse = errors.New("storage entry is nil")
 
 type GetResponse struct {
-	entry storage.Entry
+	entry     storage.Entry
+	partition uint64
 }
 
 func (g *GetResponse) Scan(v any) error {
@@ -197,4 +198,8 @@ func (g *GetResponse) TTL() int64 {
 
 func (g *GetResponse) Timestamp() int64 {
 	return g.entry.Timestamp()
+}
+
+func (g *GetResponse) Partition() uint64 {
+	return g.partition
 }

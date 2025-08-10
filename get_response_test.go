@@ -26,7 +26,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/dmap"
+	"github.com/tochemey/olric/internal/ptr"
 	"github.com/tochemey/olric/internal/resp"
 	"github.com/tochemey/olric/internal/testcluster"
 )
@@ -45,14 +47,17 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-scan", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-scan")
+		expectedPartition := partitions.HKey(dm.Name(), "mykey-scan")
+		e, part, err := dm.Get(ctx, "mykey-scan")
 		require.NoError(t, err)
+		require.NotNil(t, part)
 
-		gr := &GetResponse{entry: e}
+		gr := &GetResponse{entry: e, partition: ptr.Deref(part, uint64(0))}
 		scannedValue := new(int)
 		err = gr.Scan(scannedValue)
 		require.NoError(t, err)
 		require.Equal(t, value, *scannedValue)
+		require.Exactly(t, expectedPartition, gr.Partition())
 	})
 
 	t.Run("Byte", func(t *testing.T) {
@@ -60,7 +65,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-byte", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-byte")
+		e, _, err := dm.Get(ctx, "mykey-byte")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -77,7 +82,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-byte")
+		e, _, err := dm.Get(ctx, "mykey-byte")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -90,7 +95,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-byte", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-byte")
+		e, _, err := dm.Get(ctx, "mykey-byte")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -103,7 +108,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Int", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Int")
+		e, _, err := dm.Get(ctx, "mykey-Int")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -117,7 +122,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-String", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-String")
+		e, _, err := dm.Get(ctx, "mykey-String")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -131,7 +136,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Int8", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Int8")
+		e, _, err := dm.Get(ctx, "mykey-Int8")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -145,7 +150,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Int16", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Int16")
+		e, _, err := dm.Get(ctx, "mykey-Int16")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -159,7 +164,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Int32", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Int32")
+		e, _, err := dm.Get(ctx, "mykey-Int32")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -173,7 +178,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Int64", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Int64")
+		e, _, err := dm.Get(ctx, "mykey-Int64")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -187,7 +192,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Int64", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Int64")
+		e, _, err := dm.Get(ctx, "mykey-Int64")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -201,7 +206,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Uint", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Uint")
+		e, _, err := dm.Get(ctx, "mykey-Uint")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -215,7 +220,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Uint8", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Uint8")
+		e, _, err := dm.Get(ctx, "mykey-Uint8")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -229,7 +234,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Uint16", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Uint16")
+		e, _, err := dm.Get(ctx, "mykey-Uint16")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -243,7 +248,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Uint32", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Uint32")
+		e, _, err := dm.Get(ctx, "mykey-Uint32")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -257,7 +262,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Uint64", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Uint64")
+		e, _, err := dm.Get(ctx, "mykey-Uint64")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -271,7 +276,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Float32", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Float32")
+		e, _, err := dm.Get(ctx, "mykey-Float32")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -285,7 +290,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Float64", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Float64")
+		e, _, err := dm.Get(ctx, "mykey-Float64")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -298,7 +303,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-Bool", true, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-Bool")
+		e, _, err := dm.Get(ctx, "mykey-Bool")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -312,7 +317,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-time.Time", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-time.Time")
+		e, _, err := dm.Get(ctx, "mykey-time.Time")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -336,7 +341,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-time.Duration", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-time.Duration")
+		e, _, err := dm.Get(ctx, "mykey-time.Duration")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}
@@ -362,7 +367,7 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-BinaryUnmarshaler", value, nil)
 		require.NoError(t, err)
 
-		e, err := dm.Get(ctx, "mykey-BinaryUnmarshaler")
+		e, _, err := dm.Get(ctx, "mykey-BinaryUnmarshaler")
 		require.NoError(t, err)
 
 		gr := &GetResponse{entry: e}

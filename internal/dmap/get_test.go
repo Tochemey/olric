@@ -23,7 +23,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/cluster/routingtable"
+	"github.com/tochemey/olric/internal/ptr"
 	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
 )
@@ -44,8 +46,9 @@ func TestDMap_Get_Standalone(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		gr, err := dm.Get(ctx, testutil.ToKey(i))
+		gr, part, err := dm.Get(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
+		require.NotNil(t, part)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
 	}
 }
@@ -70,8 +73,13 @@ func TestDMap_Get_Cluster(t *testing.T) {
 	dm2, err := s2.NewDMap("mydmap")
 	require.NoError(t, err)
 	for i := 0; i < 10; i++ {
-		res, err := dm2.Get(ctx, testutil.ToKey(i))
+		key := testutil.ToKey(i)
+		expected := partitions.HKey(dm2.name, key)
+		res, part, err := dm2.Get(ctx, key)
 		require.NoError(t, err)
+		require.NotNil(t, part)
+		partValue := ptr.Deref(part, uint64(0))
+		require.Exactly(t, expected, partValue)
 		require.Equal(t, testutil.ToVal(i), res.Value())
 	}
 }
@@ -99,9 +107,14 @@ func TestDMap_Get_Lookup(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		gr, err := dm3.Get(ctx, testutil.ToKey(i))
+		key := testutil.ToKey(i)
+		expected := partitions.HKey(dm3.name, key)
+		gr, part, err := dm3.Get(ctx, key)
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
+		require.NotNil(t, part)
+		partValue := ptr.Deref(part, uint64(0))
+		require.Exactly(t, expected, partValue)
 	}
 }
 
@@ -121,10 +134,11 @@ func TestDMap_Get_NilValue(t *testing.T) {
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
 
-	gr, err := dm.Get(ctx, "foobar")
+	gr, part, err := dm.Get(ctx, "foobar")
 	if err != nil {
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
+	require.NotNil(t, part)
 	require.Equal(t, []byte{}, gr.Value())
 
 	_, err = dm.Delete(ctx, "foobar")
@@ -132,7 +146,7 @@ func TestDMap_Get_NilValue(t *testing.T) {
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
 
-	_, err = dm.Get(ctx, "foobar")
+	_, _, err = dm.Get(ctx, "foobar")
 	if err != ErrKeyNotFound {
 		t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 	}
@@ -156,14 +170,15 @@ func TestDMap_Get_NilValue_Cluster(t *testing.T) {
 	dm2, err := s2.NewDMap("mydmap")
 	require.NoError(t, err)
 
-	gr, err := dm2.Get(ctx, "foobar")
+	gr, part, err := dm2.Get(ctx, "foobar")
 	require.NoError(t, err)
 	require.Equal(t, []byte{}, gr.Value())
+	require.NotNil(t, part)
 
 	_, err = dm2.Delete(ctx, "foobar")
 	require.NoError(t, err)
 
-	_, err = dm2.Get(ctx, "foobar")
+	_, _, err = dm2.Get(ctx, "foobar")
 	require.ErrorIs(t, err, ErrKeyNotFound)
 }
 
@@ -182,7 +197,7 @@ func TestDMap_Put_ReadQuorum(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
-	_, err = dm.Get(ctx, testutil.ToKey(1))
+	_, _, err = dm.Get(ctx, testutil.ToKey(1))
 	if err != ErrReadQuorum {
 		t.Fatalf("Expected ErrReadQuorum. Got: %v", err)
 	}
@@ -232,8 +247,13 @@ func TestDMap_Get_ReadRepair(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		gr, err := dm2.Get(ctx, testutil.ToKey(i))
+		key := testutil.ToKey(i)
+		expected := partitions.HKey(dm2.name, key)
+		gr, part, err := dm2.Get(ctx, key)
 		require.NoError(t, err)
+		require.NotNil(t, part)
+		partValue := ptr.Deref(part, uint64(0))
+		require.Exactly(t, expected, partValue)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
 	}
 }

@@ -36,7 +36,7 @@ func (s *Service) getCommandHandler(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	raw, err := dm.Get(s.ctx, getCmd.Key)
+	raw, _, err := dm.Get(s.ctx, getCmd.Key)
 	if err != nil {
 		protocol.WriteError(conn, err)
 		return

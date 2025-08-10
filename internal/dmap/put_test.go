@@ -48,7 +48,7 @@ func TestDMap_Put_Standalone(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		gr, err := dm.Get(ctx, testutil.ToKey(i))
+		gr, _, err := dm.Get(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
 	}
@@ -74,7 +74,7 @@ func TestDMap_Put_Cluster(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		gr, err := dm2.Get(ctx, testutil.ToKey(i))
+		gr, _, err := dm2.Get(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
 	}
@@ -111,7 +111,7 @@ func TestDMap_Put_AsyncReplicationMode(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		gr, err := dm2.Get(ctx, testutil.ToKey(i))
+		gr, _, err := dm2.Get(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
 	}
@@ -175,7 +175,7 @@ func TestDMap_Put_PX(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		_, err := dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err := dm2.Get(ctx, testutil.ToKey(i))
 		if err != ErrKeyNotFound {
 			t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 		}
@@ -208,7 +208,7 @@ func TestDMap_Put_NX(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		gr, err := dm.Get(ctx, testutil.ToKey(i))
+		gr, _, err := dm.Get(ctx, testutil.ToKey(i))
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
 	}
@@ -235,7 +235,7 @@ func TestDMap_Put_XX(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		if !errors.Is(err, ErrKeyNotFound) {
 			t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 		}
@@ -267,7 +267,7 @@ func TestDMap_Put_EX(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		_, err := dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err := dm2.Get(ctx, testutil.ToKey(i))
 		if err != ErrKeyNotFound {
 			t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 		}
@@ -299,7 +299,7 @@ func TestDMap_Put_EXAT(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		_, err := dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err := dm2.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 }
@@ -329,7 +329,7 @@ func TestDMap_Put_PXAT(t *testing.T) {
 	require.NoError(t, err)
 
 	for i := 0; i < 10; i++ {
-		_, err := dm2.Get(ctx, testutil.ToKey(i))
+		_, _, err := dm2.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 }

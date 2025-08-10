@@ -53,7 +53,7 @@ func TestDMap_Destroy_Standalone(t *testing.T) {
 	}
 
 	for i := 0; i < 100; i++ {
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		if err != ErrKeyNotFound {
 			t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 		}
@@ -93,7 +93,7 @@ func TestDMap_Destroy_Cluster(t *testing.T) {
 	}
 
 	for i := 0; i < 100; i++ {
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		if err != ErrKeyNotFound {
 			t.Fatalf("Expected ErrKeyNotFound. Got: %v", err)
 		}
@@ -125,7 +125,7 @@ func TestDMap_Destroy_destroyOperation(t *testing.T) {
 	require.NoError(t, cmd.Err())
 
 	for i := 0; i < 100; i++ {
-		_, err = dm.Get(ctx, testutil.ToKey(i))
+		_, _, err = dm.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 }

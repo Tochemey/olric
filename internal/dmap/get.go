@@ -30,6 +30,7 @@ import (
 	"github.com/tochemey/olric/internal/collection"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/ptr"
 	"github.com/tochemey/olric/internal/stats"
 	"github.com/tochemey/olric/pkg/storage"
 )
@@ -347,7 +348,7 @@ func (dm *DMap) getOnCluster(hkey uint64, key string) (storage.Entry, error) {
 // Get gets the value for the given key. It returns ErrKeyNotFound if the DB
 // does not contain the key. It's thread-safe. It is safe to modify the contents
 // of the returned value.
-func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, error) {
+func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, *uint64, error) {
 	hkey := partitions.HKey(dm.name, key)
 	member := dm.s.primary.PartitionByHKey(hkey).Owner()
 	// We are on the partition owner
@@ -357,13 +358,13 @@ func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, error) {
 			GetMisses.Increase(1)
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		// number of keys that have been requested and found present
 		GetHits.Increase(1)
 
-		return entry, nil
+		return entry, ptr.To(hkey), nil
 	}
 
 	// Redirect to the partition owner
@@ -371,12 +372,12 @@ func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, error) {
 	rc := dm.s.client.Get(member.String())
 	err := rc.Process(ctx, cmd)
 	if err != nil {
-		return nil, protocol.ConvertError(err)
+		return nil, nil, protocol.ConvertError(err)
 	}
 
 	value, err := cmd.Bytes()
 	if err != nil {
-		return nil, protocol.ConvertError(err)
+		return nil, nil, protocol.ConvertError(err)
 	}
 
 	// number of keys that have been requested and found present
@@ -384,5 +385,5 @@ func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, error) {
 
 	entry := dm.engine.NewEntry()
 	entry.Decode(value)
-	return entry, nil
+	return entry, ptr.To(hkey), nil
 }

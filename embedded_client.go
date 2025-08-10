@@ -26,6 +26,7 @@ import (
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/dmap"
 	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/ptr"
 	"github.com/tochemey/olric/internal/util"
 	"github.com/tochemey/olric/stats"
 )
@@ -271,13 +272,14 @@ func (dm *EmbeddedDMap) Delete(ctx context.Context, keys ...string) (int, error)
 // does not contain the key. It's thread-safe. It is safe to modify the contents
 // of the returned value. See GetResponse for the details.
 func (dm *EmbeddedDMap) Get(ctx context.Context, key string) (*GetResponse, error) {
-	result, err := dm.dm.Get(ctx, key)
+	result, part, err := dm.dm.Get(ctx, key)
 	if err != nil {
 		return nil, convertDMapError(err)
 	}
 
 	return &GetResponse{
-		entry: result,
+		entry:     result,
+		partition: ptr.Deref(part, uint64(0)),
 	}, nil
 }
 

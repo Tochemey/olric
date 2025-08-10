@@ -41,7 +41,7 @@ func TestDMap_Expire(t *testing.T) {
 	err = dm.Put(ctx, key, "myvalue", nil)
 	require.NoError(t, err)
 
-	_, err = dm.Get(ctx, key)
+	_, _, err = dm.Get(ctx, key)
 	require.NoError(t, err)
 
 	err = dm.Expire(ctx, key, time.Millisecond)
@@ -50,7 +50,7 @@ func TestDMap_Expire(t *testing.T) {
 	<-time.After(time.Millisecond)
 
 	// Get the value and check it.
-	_, err = dm.Get(ctx, key)
+	_, _, err = dm.Get(ctx, key)
 	require.ErrorIs(t, err, ErrKeyNotFound)
 }
 
@@ -87,7 +87,7 @@ func TestDMap_Expire_expireCommandHandler(t *testing.T) {
 	<-time.After(200 * time.Millisecond)
 
 	// Get the value and check it.
-	_, err = dm.Get(ctx, key)
+	_, _, err = dm.Get(ctx, key)
 	require.ErrorIs(t, err, ErrKeyNotFound)
 }
 
@@ -112,6 +112,6 @@ func TestDMap_Expire_pexpireCommandHandler(t *testing.T) {
 	<-time.After(10 * time.Millisecond)
 
 	// Get the value and check it.
-	_, err = dm.Get(ctx, key)
+	_, _, err = dm.Get(ctx, key)
 	require.ErrorIs(t, err, ErrKeyNotFound)
 }
