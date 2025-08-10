@@ -12,59 +12,60 @@ on:
     paths-ignore:
       - '**/README.md'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  build:
+    name: Tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
-      # Default is true, cancels jobs for other platforms in the matrix if one fails
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest ]
-        go: ['1.23' ]
-
-    runs-on: ${{ matrix.os }}
-
+        include:
+          - os: linux
+            runner: ubuntu-latest
+          - os: macos
+            runner: macos-13
+          - os: windows
+            runner: windows-latest
     steps:
-    - name: Install Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ matrix.go }}
-
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Print Go version and environment
-      id: vars
-      run: |
-        printf "Using go at: $(which go)\n"
-        printf "Go version: $(go version)\n"
-        printf "\n\nGo environment:\n\n"
-        go env
-        printf "\n\nSystem environment:\n\n"
-        env
-        # Calculate the short SHA1 hash of the git commit
-        echo "::set-output name=short_sha::$(git rev-parse --short HEAD)"
-        echo "::set-output name=go_cache::$(go env GOCACHE)"
-
-    - name: Cache the build cache
-      uses: actions/cache@v4
-      with:
-        path: ${{ steps.vars.outputs.go_cache }}
-        key: ${{ runner.os }}-${{ matrix.go }}-go-ci-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-${{ matrix.go }}-go-ci
-
-    - name: Install dependencies
-      run: |
-        go mod download
-
-    - name: Run tests
-      run: |
-        make test
-
-    - uses: codecov/codecov-action@v5
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        files: ./coverage.out
-        fail_ci_if_error: false
-        verbose: true
-
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.5"
+          check-latest: true
+          cache-dependency-path: "**/*.sum"
+      - run: go version
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      - name: Vendoring and Tidy
+        run: go mod tidy && go mod vendor
+      - name: Install dependencies
+        run: |
+          go mod download
+      - name: Run tests
+        shell: bash
+        run: |
+          go test -mod=vendor -p 1 -timeout 0 -v -coverprofile=coverage.out -covermode=atomic -coverpkg=./... `go list -mod=vendor ./... | grep -v -E "(hasher|internal/bufpool|pkg/flog|pkg/neterrors|pkg/service_discovery)"`
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          flags: ${{ matrix.os }}
+          name: coverage-${{ matrix.os }}
+          fail_ci_if_error: false
+          verbose: true
