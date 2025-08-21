@@ -17,6 +17,7 @@ Please use the original repo for any bugs or related questions.
 * Fix some go routines leaks bugs
 * **Meta-information** can be passed to the cluster member
 * **TLS Support**
+* **Return the partition ID in Get response**
 
 ## Overview 
 
