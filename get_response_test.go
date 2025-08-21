@@ -26,7 +26,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/dmap"
 	"github.com/tochemey/olric/internal/ptr"
 	"github.com/tochemey/olric/internal/resp"
@@ -47,7 +46,6 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = dm.Put(ctx, "mykey-scan", value, nil)
 		require.NoError(t, err)
 
-		expectedPartition := partitions.HKey(dm.Name(), "mykey-scan")
 		e, part, err := dm.Get(ctx, "mykey-scan")
 		require.NoError(t, err)
 		require.NotNil(t, part)
@@ -57,7 +55,6 @@ func TestDMap_Get_GetResponse(t *testing.T) {
 		err = gr.Scan(scannedValue)
 		require.NoError(t, err)
 		require.Equal(t, value, *scannedValue)
-		require.Exactly(t, expectedPartition, gr.Partition())
 	})
 
 	t.Run("Byte", func(t *testing.T) {

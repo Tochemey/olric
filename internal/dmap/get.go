@@ -350,7 +350,8 @@ func (dm *DMap) getOnCluster(hkey uint64, key string) (storage.Entry, error) {
 // of the returned value.
 func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, *uint64, error) {
 	hkey := partitions.HKey(dm.name, key)
-	member := dm.s.primary.PartitionByHKey(hkey).Owner()
+	partition := dm.s.primary.PartitionByHKey(hkey)
+	member := partition.Owner()
 	// We are on the partition owner
 	if member.CompareByName(dm.s.rt.This()) {
 		entry, err := dm.getOnCluster(hkey, key)
@@ -364,7 +365,7 @@ func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, *uint64, er
 		// number of keys that have been requested and found present
 		GetHits.Increase(1)
 
-		return entry, ptr.To(hkey), nil
+		return entry, ptr.To(partition.ID()), nil
 	}
 
 	// Redirect to the partition owner
@@ -385,5 +386,5 @@ func (dm *DMap) Get(ctx context.Context, key string) (storage.Entry, *uint64, er
 
 	entry := dm.engine.NewEntry()
 	entry.Decode(value)
-	return entry, ptr.To(hkey), nil
+	return entry, ptr.To(partition.ID()), nil
 }

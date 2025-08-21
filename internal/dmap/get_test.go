@@ -74,7 +74,7 @@ func TestDMap_Get_Cluster(t *testing.T) {
 	require.NoError(t, err)
 	for i := 0; i < 10; i++ {
 		key := testutil.ToKey(i)
-		expected := partitions.HKey(dm2.name, key)
+		expected := dm2.s.primary.PartitionByHKey(partitions.HKey(dm2.name, key)).ID()
 		res, part, err := dm2.Get(ctx, key)
 		require.NoError(t, err)
 		require.NotNil(t, part)
@@ -108,7 +108,7 @@ func TestDMap_Get_Lookup(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		key := testutil.ToKey(i)
-		expected := partitions.HKey(dm3.name, key)
+		expected := dm3.s.primary.PartitionByHKey(partitions.HKey(dm3.name, key)).ID()
 		gr, part, err := dm3.Get(ctx, key)
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
@@ -248,7 +248,7 @@ func TestDMap_Get_ReadRepair(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		key := testutil.ToKey(i)
-		expected := partitions.HKey(dm2.name, key)
+		expected := dm2.s.primary.PartitionByHKey(partitions.HKey(dm2.name, key)).ID()
 		gr, part, err := dm2.Get(ctx, key)
 		require.NoError(t, err)
 		require.NotNil(t, part)
