@@ -321,7 +321,7 @@ func TestDMap_Delete_Compaction(t *testing.T) {
 
 	kv, err := kvstore.New(storage.NewConfig(c.DMaps.Engine.Config))
 	require.NoError(t, err)
-	c.DMaps.Engine.Implementation = kv
+	c.DMaps.Engine.Storage = kv
 
 	e := testcluster.NewEnvironment(c)
 

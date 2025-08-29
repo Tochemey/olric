@@ -18,9 +18,9 @@
 
 # GoLand creates this
 .idea/
-vendor
+vendor/
 .vscode/
 
 # OSX creates this
 .DS_Store
-
+.cache

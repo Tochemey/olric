@@ -101,7 +101,7 @@ func (s *Service) NewDMap(name string) (*DMap, error) {
 	}
 
 	// It's a shortcut.
-	dm.engine = dm.config.engine.Implementation
+	dm.engine = dm.config.engine.Storage
 	s.dmaps[name] = dm
 	return dm, nil
 }

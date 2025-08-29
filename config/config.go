@@ -23,6 +23,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -291,7 +292,7 @@ type Config struct {
 
 	// ServiceDiscovery is a map that contains plugins implement ServiceDiscovery
 	// interface. See pkg/service_discovery/service_discovery.go for details.
-	ServiceDiscovery map[string]interface{}
+	ServiceDiscovery map[string]any
 
 	// Interface denotes a binding interface. It can be used instead of
 	// memberlist.Loader.BindAddr if the interface is known but not the address.
@@ -375,10 +376,8 @@ func (c *Config) Validate() error {
 	// Check peers. If Peers slice contains node's itself, return an error.
 	port := strconv.Itoa(c.MemberlistConfig.BindPort)
 	this := net.JoinHostPort(c.MemberlistConfig.BindAddr, port)
-	for _, peer := range c.Peers {
-		if this == peer {
-			return fmt.Errorf("cannot be peer with itself")
-		}
+	if slices.Contains(c.Peers, this) {
+		return fmt.Errorf("cannot be peer with itself")
 	}
 
 	if err := c.Client.Validate(); err != nil {

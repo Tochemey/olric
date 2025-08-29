@@ -141,10 +141,17 @@ func (e *EmbeddedClient) RefreshMetadata(_ context.Context) error {
 // * Count
 // * Match
 func (dm *EmbeddedDMap) Scan(ctx context.Context, options ...ScanOption) (Iterator, error) {
-	cc, err := dm.setOrGetClusterClient()
+	// prepare the cluster client options
+	opts := []ClusterClientOption{
+		WithHasher(dm.client.db.hashFunc),
+		WithConfig(dm.client.db.config.Client),
+	}
+
+	cc, err := NewClusterClient([]string{dm.client.db.rt.This().String()}, opts...)
 	if err != nil {
 		return nil, err
 	}
+
 	cdm, err := cc.NewDMap(dm.name)
 	if err != nil {
 		return nil, err

@@ -74,8 +74,8 @@ func TestDMap_Config(t *testing.T) {
 		require.Equal(t, c.DMaps.Custom["foobar"].LRUSamples, dcc.lruSamples)
 		require.Equal(t, c.DMaps.Custom["foobar"].EvictionPolicy, dcc.evictionPolicy)
 
-		c.DMaps.Custom["foobar"].Engine.Implementation = nil
-		dcc.engine.Implementation = nil
+		c.DMaps.Custom["foobar"].Engine.Storage = nil
+		dcc.engine.Storage = nil
 
 		require.Equal(t, c.DMaps.Custom["foobar"].Engine, dcc.engine)
 	})

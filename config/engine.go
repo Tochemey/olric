@@ -30,12 +30,12 @@ import (
 type Engine struct {
 	Name string
 
-	Implementation storage.Engine
+	Storage storage.Engine
 
 	// Config is a map that contains configuration of the storage engines, for
 	// both plugins and imported ones. If you want to use a storage engine other
 	// than the default one, you must set configuration for it.
-	Config map[string]interface{}
+	Config map[string]any
 }
 
 // NewEngine initializes Engine with sane defaults.
@@ -43,14 +43,14 @@ type Engine struct {
 // if there is no other engine.
 func NewEngine() *Engine {
 	return &Engine{
-		Config: make(map[string]interface{}),
+		Config: make(map[string]any),
 	}
 }
 
 // Validate finds errors in the current configuration.
 func (s *Engine) Validate() error {
 	if s.Config == nil {
-		s.Config = make(map[string]interface{})
+		s.Config = make(map[string]any)
 	}
 	return nil
 }
@@ -61,7 +61,7 @@ func (s *Engine) Sanitize() error {
 		s.Name = DefaultStorageEngine
 	}
 
-	if s.Implementation == nil {
+	if s.Storage == nil {
 		switch s.Name {
 		case DefaultStorageEngine:
 			cfg := kvstore.DefaultConfig().ToMap()
@@ -75,12 +75,12 @@ func (s *Engine) Sanitize() error {
 			if err != nil {
 				return err
 			}
-			s.Implementation = kv
+			s.Storage = kv
 		default:
 			return fmt.Errorf("unknown storage engine: %s", s.Name)
 		}
 	} else {
-		s.Name = s.Implementation.Name()
+		s.Name = s.Storage.Name()
 	}
 	return nil
 }

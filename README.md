@@ -12,12 +12,18 @@ Please use the original repo for any bugs or related questions.
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
 * Renamed module name
-* Upgrade **go version to 1.23.0**
+* Upgrade go version to 1.23.0
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
-* **Meta-information** can be passed to the cluster member
-* **TLS Support**
-* **Return the partition ID in Get response**
+* Meta-information can be passed to the cluster member
+* TLS Support
+* Return the partition ID in Get response
+* New public in-memory storage engine: `pkg/buntstore` (BuntDB-backed)
+  - Drop-in alternative to the default `kvstore` engine
+  - Optimizations: last-access metadata stored separately (`a:<hkey>`), optional key index for fast regex scans (`k:<key>`),
+    chunked TransferIterator with MsgPack encoding, and reduced allocations in hot paths
+  - Select via config by setting `DMaps.Engine.Name = "buntdb"`
+  - See `pkg/buntstore/README.md` for details, usage and benchmarks
 
 ## Overview 
 
