@@ -30,10 +30,11 @@ type EmbeddedIterator struct {
 	mtx sync.Mutex
 
 	// this is only used when performing scanning
-	clusterClient   *ClusterClient
+	clusterClient   Client
 	client          *EmbeddedClient
 	dm              *dmap.DMap
 	clusterIterator *ClusterIterator
+	ctx             context.Context
 }
 
 func (e *EmbeddedIterator) scanOnOwners() error {
@@ -100,7 +101,7 @@ func (e *EmbeddedIterator) Key() string {
 // Close stops the iteration and releases allocated resources.
 func (e *EmbeddedIterator) Close() {
 	e.clusterIterator.Close()
-	if err := e.clusterClient.Close(context.Background()); err != nil {
+	if err := e.clusterClient.Close(e.ctx); err != nil {
 		panic(err)
 	}
 }
