@@ -24,3 +24,4 @@ vendor/
 # OSX creates this
 .DS_Store
 .cache
+playground/
