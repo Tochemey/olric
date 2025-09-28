@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kapetan-io/tackle/autotls"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
@@ -958,4 +959,28 @@ func TestEmbeddedClient_Ping_WithMessage(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, message, response)
 	})
+}
+
+func TestEmbeddedClient_DMap_Put_PX_With_NX(t *testing.T) {
+	cluster := newTestCluster(t)
+	db0 := cluster.addMember(t)
+	db1 := cluster.addMember(t)
+
+	ctx := context.Background()
+	e := db0.NewEmbeddedClient()
+	dm0, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	err = dm0.Put(ctx, "mykey", "myvalue", PX(time.Minute), NX())
+	require.NoError(t, err)
+
+	<-time.After(time.Millisecond)
+
+	e = db1.NewEmbeddedClient()
+	dm1, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	gr, err := dm1.Get(ctx, "mykey")
+	require.NoError(t, err)
+	assert.NotZero(t, gr.TTL())
 }
