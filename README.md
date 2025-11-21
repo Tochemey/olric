@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/Tochemey/olric/branch/main/graph/badge.svg?token=C5Z0JE8SNj)](https://codecov.io/gh/Tochemey/olric)
 
 
-This is a forked version of the [main repository](https://github.com/tochemey/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
+This is a forked version of the [main repository](https://github.com/olric-data/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
 Please use the original repo for any bugs or related questions.
 
 ## Modifications from the original library
@@ -12,18 +12,12 @@ Please use the original repo for any bugs or related questions.
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
 * Renamed module name
-* Upgrade go version to 1.23.0
+* Upgrade go version to 1.24.0
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
 * Meta-information can be passed to the cluster member
 * TLS Support
 * Return the partition ID in Get response
-* New public in-memory storage engine: `pkg/buntstore` (BuntDB-backed)
-  - Drop-in alternative to the default `kvstore` engine
-  - Optimizations: last-access metadata stored separately (`a:<hkey>`), optional key index for fast regex scans (`k:<key>`),
-    chunked TransferIterator with MsgPack encoding, and reduced allocations in hot paths
-  - Select via config by setting `DMaps.Engine.Name = "buntdb"`
-  - See `pkg/buntstore/README.md` for details, usage and benchmarks
 
 ## Overview 
 

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/maintnotifications"
 )
 
 const (
@@ -156,11 +157,13 @@ func (c *Client) Sanitize() error {
 		c.IdleTimeout = DefaultIdleTimeout
 	}
 
-	if c.MaxRetries == -1 {
+	switch c.MaxRetries {
+	case -1:
 		c.MaxRetries = 0
-	} else if c.MaxRetries == 0 {
+	case 0:
 		c.MaxRetries = DefaultMaxRetries
 	}
+
 	switch c.MinRetryBackoff {
 	case -1:
 		c.MinRetryBackoff = 0
@@ -201,6 +204,10 @@ func (c *Client) RedisOptions() *redis.Options {
 		ConnMaxIdleTime: c.IdleTimeout,
 		TLSConfig:       c.TLS,
 		Limiter:         c.Limiter,
+		// https://github.com/redis/go-redis/tree/master/maintnotifications
+		MaintNotificationsConfig: &maintnotifications.Config{
+			Mode: maintnotifications.ModeDisabled, // TODO: change this when Cluster clients are supported
+		},
 	}
 }
 
