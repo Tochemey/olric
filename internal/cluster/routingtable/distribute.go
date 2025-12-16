@@ -20,8 +20,7 @@ package routingtable
 import (
 	"errors"
 
-	"github.com/buraksezer/consistent"
-
+	"github.com/tochemey/olric/internal/consistent"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/protocol"
 )

@@ -24,19 +24,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tochemey/olric/internal/protocol"
-
-	"github.com/buraksezer/consistent"
 	"github.com/hashicorp/memberlist"
 
 	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/internal/checkpoint"
-	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/consistent"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
+	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/service"
 	"github.com/tochemey/olric/pkg/flog"
+
+	"github.com/tochemey/olric/internal/cluster/partitions"
 )
 
 // ErrClusterQuorum means that the cluster could not reach a healthy numbers of members to operate.
