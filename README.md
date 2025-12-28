@@ -18,6 +18,8 @@ Please use the original repo for any bugs or related questions.
 * Meta-information can be passed to the cluster member
 * TLS Support
 * Return the partition ID in Get response
+* Rebalance lifecycle events (start/complete) are published on the cluster events channel
+* Rebalance coordination acknowledgements are tracked to emit completion after all members ack
 
 ## Overview 
 
@@ -97,7 +99,6 @@ It's good at distributed caching and publish/subscribe messaging.
 * [Samples](#samples)
 * [Contributions](#contributions)
 * [License](#license)
-* [About the name](#about-the-name)
 
 ## Features
 
@@ -230,7 +231,6 @@ config.DefaultWriteTimeout
 Olric uses:
 
 * [hashicorp/memberlist](https://github.com/hashicorp/memberlist) for cluster membership and failure detection,
-* [buraksezer/consistent](https://github.com/buraksezer/consistent) for consistent hashing and load balancing,
 * [Redis Serialization Protocol](https://github.com/tidwall/redcon) for communication.
 
 Olric distributes data among partitions. Every partition is being owned by a cluster member and may have one or more
@@ -890,8 +890,3 @@ Please don't hesitate to fork the project and send a pull request.
 ## License
 
 The Apache License, Version 2.0 - see LICENSE for more details.
-
-## About the name
-
-The inner voice of Turgut Özben who is the main character
-of [Oğuz Atay's masterpiece -The Disconnected-](https://www.themodernnovel.org/asia/other-asia/turkey/oguz-atay/the-disconnected/).
