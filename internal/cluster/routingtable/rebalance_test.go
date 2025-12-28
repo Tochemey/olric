@@ -91,3 +91,30 @@ func TestRoutingTable_rebalanceCompleteEventOnAck(t *testing.T) {
 		t.Fatalf("timed out waiting for rebalance completion event")
 	}
 }
+
+func TestRoutingTable_bootstrapStartsRebalanceEpoch(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	rt, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+
+	signature := rt.Signature()
+	if signature == 0 {
+		t.Skip("unexpected zero signature")
+	}
+
+	rt.rebalanceMtx.Lock()
+	epoch := rt.rebalanceState.epoch
+	pendingLen := len(rt.rebalanceState.pending)
+	rt.rebalanceMtx.Unlock()
+
+	require.Equal(t, signature, epoch)
+	require.NotZero(t, pendingLen)
+	require.True(t, rt.handleRebalanceAck(signature, rt.this.ID))
+
+	rt.rebalanceMtx.Lock()
+	completed := rt.rebalanceState.completed
+	rt.rebalanceMtx.Unlock()
+	require.True(t, completed)
+}

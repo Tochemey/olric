@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,11 +33,12 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/config"
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
+
+	"github.com/tochemey/olric/internal/cluster/partitions"
 )
 
 func newRoutingTableForTest(c *config.Config, srv *server.Server) *RoutingTable {
@@ -648,4 +650,198 @@ func TestRoutingTable_NodeUpdate(t *testing.T) {
 			t.Fatalf("Expected nil. Got: %v", err)
 		}
 	})
+}
+
+func TestRoutingTable_ConcurrentStartupRebalanceAck(t *testing.T) {
+	const nodeCount = 3
+
+	nodes, servers, err := startConcurrentCluster(nodeCount)
+	require.NoError(t, err)
+	defer shutdownCluster(nodes, servers)
+
+	require.NoError(t, waitForClusterMembers(nodes, nodeCount, 5*time.Second))
+	coordinator, epoch, err := waitForActiveEpoch(nodes, 5*time.Second)
+	require.NoError(t, err)
+
+	for _, rt := range nodes {
+		require.NoError(t, rt.SendRebalanceAck(epoch))
+	}
+	require.NoError(t, waitForRebalanceComplete(coordinator, epoch, 2*time.Second))
+}
+
+func startConcurrentCluster(nodeCount int) ([]*RoutingTable, []*server.Server, error) {
+	configs := make([]*config.Config, nodeCount)
+	memberPorts := make([]int, nodeCount)
+
+	for i := 0; i < nodeCount; i++ {
+		c := testutil.NewConfig()
+		c.JoinRetryInterval = 50 * time.Millisecond
+		c.MaxJoinAttempts = 100
+
+		memberPort, err := testutil.GetFreePort()
+		if err != nil {
+			return nil, nil, err
+		}
+		c.MemberlistConfig.BindPort = memberPort
+
+		configs[i] = c
+		memberPorts[i] = memberPort
+	}
+
+	for i := 0; i < nodeCount; i++ {
+		var peers []string
+		for j := 0; j < nodeCount; j++ {
+			if i == j {
+				continue
+			}
+			peers = append(peers, net.JoinHostPort("127.0.0.1", strconv.Itoa(memberPorts[j])))
+		}
+		configs[i].Peers = peers
+	}
+
+	nodes := make([]*RoutingTable, nodeCount)
+	servers := make([]*server.Server, nodeCount)
+	var mtx sync.Mutex
+	var g errgroup.Group
+
+	for i := 0; i < nodeCount; i++ {
+		i := i
+		g.Go(func() error {
+			srv := testutil.NewServer(configs[i])
+			rt := newRoutingTableForTest(configs[i], srv)
+			if err := rt.Join(); err != nil {
+				return err
+			}
+			if err := rt.Start(); err != nil {
+				return err
+			}
+			mtx.Lock()
+			nodes[i] = rt
+			servers[i] = srv
+			mtx.Unlock()
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		shutdownCluster(nodes, servers)
+		return nil, nil, err
+	}
+	return nodes, servers, nil
+}
+
+func shutdownCluster(nodes []*RoutingTable, servers []*server.Server) {
+	for _, rt := range nodes {
+		if rt == nil {
+			continue
+		}
+		_ = rt.Shutdown(context.Background())
+	}
+	for _, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		_ = srv.Shutdown(context.Background())
+	}
+}
+
+func waitForClusterMembers(nodes []*RoutingTable, expected int, timeout time.Duration) error {
+	return waitForCondition(timeout, func() bool {
+		for _, rt := range nodes {
+			if rt == nil {
+				return false
+			}
+			if rt.NumMembers() != int32(expected) {
+				return false
+			}
+			if membersLen(rt) != expected {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+func waitForActiveEpoch(nodes []*RoutingTable, timeout time.Duration) (*RoutingTable, uint64, error) {
+	var coordinator *RoutingTable
+	var epoch uint64
+
+	err := waitForCondition(timeout, func() bool {
+		coordinator = nil
+		epoch = 0
+
+		var coordID uint64
+		for _, rt := range nodes {
+			if rt == nil {
+				return false
+			}
+			coord := rt.Discovery().GetCoordinator()
+			if coord.ID == 0 {
+				return false
+			}
+			if coordID == 0 {
+				coordID = coord.ID
+			}
+			if coord.ID != coordID {
+				return false
+			}
+			if rt.This().CompareByID(coord) {
+				coordinator = rt
+			}
+		}
+		if coordinator == nil {
+			return false
+		}
+
+		signature := coordinator.Signature()
+		if signature == 0 {
+			return false
+		}
+
+		for _, rt := range nodes {
+			if rt.Signature() != signature {
+				return false
+			}
+		}
+
+		coordinator.rebalanceMtx.Lock()
+		epoch = coordinator.rebalanceState.epoch
+		coordinator.rebalanceMtx.Unlock()
+		if epoch != signature {
+			return false
+		}
+		return true
+	})
+
+	if err != nil {
+		return nil, 0, err
+	}
+	return coordinator, epoch, nil
+}
+
+func waitForRebalanceComplete(rt *RoutingTable, epoch uint64, timeout time.Duration) error {
+	return waitForCondition(timeout, func() bool {
+		rt.rebalanceMtx.Lock()
+		defer rt.rebalanceMtx.Unlock()
+		return rt.rebalanceState.epoch == epoch && rt.rebalanceState.completed
+	})
+}
+
+func waitForCondition(timeout time.Duration, f func() bool) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if f() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout while waiting for condition")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func membersLen(rt *RoutingTable) int {
+	rt.Members().RLock()
+	defer rt.Members().RUnlock()
+	return rt.Members().Length()
 }

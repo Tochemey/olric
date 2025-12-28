@@ -27,6 +27,7 @@ type rebalanceReason string
 
 const (
 	rebalanceReasonUnknown    rebalanceReason = "unknown"
+	rebalanceReasonBootstrap  rebalanceReason = "bootstrap"
 	rebalanceReasonPeriodic   rebalanceReason = "periodic"
 	rebalanceReasonManual     rebalanceReason = "manual"
 	rebalanceReasonNodeJoin   rebalanceReason = "node-join"
