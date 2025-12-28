@@ -85,3 +85,33 @@ func TestClusterEvents_FragmentReceivedEvent(t *testing.T) {
 	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"fragment-received-event","data_structure":"dmap","partition_id":123,"identifier":"mydmap","is_backup":false,"length":1234}`
 	require.Equal(t, expected, result)
 }
+
+func TestClusterEvents_RebalanceStartEvent(t *testing.T) {
+	var timestamp int64 = 585199808000 // Author's birthdate!
+	n := RebalanceStartEvent{
+		Kind:      KindRebalanceStartEvent,
+		Source:    "127.0.0.1:3423",
+		Epoch:     42,
+		Reason:    "node-left",
+		Node:      "127.0.0.1:3576",
+		Timestamp: timestamp,
+	}
+	result, err := n.Encode()
+	require.NoError(t, err)
+	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"rebalance-start-event","epoch":42,"reason":"node-left","node":"127.0.0.1:3576"}`
+	require.Equal(t, expected, result)
+}
+
+func TestClusterEvents_RebalanceCompleteEvent(t *testing.T) {
+	var timestamp int64 = 585199808000 // Author's birthdate!
+	n := RebalanceCompleteEvent{
+		Kind:      KindRebalanceCompleteEvent,
+		Source:    "127.0.0.1:3423",
+		Epoch:     42,
+		Timestamp: timestamp,
+	}
+	result, err := n.Encode()
+	require.NoError(t, err)
+	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"rebalance-complete-event","epoch":42}`
+	require.Equal(t, expected, result)
+}

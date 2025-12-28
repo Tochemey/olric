@@ -1,5 +1,4 @@
 /*
- * Copyright 2018-2024 Burak Sezer
  * Copyright 2025 Arsene Tochemey Gandote
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +18,7 @@ package olric
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"testing"
@@ -805,11 +805,45 @@ func TestClusterClient_smartPick(t *testing.T) {
 		require.NoError(t, c.Close(ctx))
 	}()
 
+	var expectedOwners map[string]struct{}
+	err = testutil.TryWithInterval(20, 100*time.Millisecond, func() error {
+		if err := c.fetchRoutingTable(); err != nil {
+			return err
+		}
+
+		raw := c.routingTable.Load()
+		if raw == nil {
+			return fmt.Errorf("routing table is empty")
+		}
+
+		routingTable, ok := raw.(RoutingTable)
+		if !ok {
+			return fmt.Errorf("routing table is corrupt")
+		}
+
+		owners := make(map[string]struct{})
+		for _, route := range routingTable {
+			if len(route.PrimaryOwners) == 0 {
+				continue
+			}
+			primary := route.PrimaryOwners[len(route.PrimaryOwners)-1]
+			owners[primary] = struct{}{}
+		}
+
+		if len(owners) == 0 {
+			return fmt.Errorf("routing table has no owners")
+		}
+		expectedOwners = owners
+		return nil
+	})
+	require.NoError(t, err)
+	expectedOwnerCount := len(expectedOwners)
+
 	clients := make(map[string]struct{})
 	for i := 0; i < 1000; i++ {
 		rc, err := c.smartPick("mydmap", testutil.ToKey(i))
 		require.NoError(t, err)
 		clients[rc.String()] = struct{}{}
 	}
-	require.Len(t, clients, 4)
+	require.Len(t, clients, expectedOwnerCount)
 }

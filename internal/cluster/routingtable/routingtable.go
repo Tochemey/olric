@@ -80,6 +80,9 @@ type RoutingTable struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	rebalanceMtx   sync.Mutex
+	rebalanceState rebalanceState
 }
 
 func registerErrors() {
@@ -233,10 +236,10 @@ func (r *RoutingTable) fillRoutingTable() {
 }
 
 func (r *RoutingTable) UpdateEagerly() {
-	r.updateRouting()
+	r.updateRoutingWithReason(rebalanceReasonManual, "")
 }
 
-func (r *RoutingTable) updateRouting() {
+func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node string) {
 	// This function is called by listenMemberlistEvents and updateRoutingPeriodically
 	// So this lock prevents parallel execution.
 	r.Lock()
@@ -255,12 +258,22 @@ func (r *RoutingTable) updateRouting() {
 	}
 
 	r.fillRoutingTable()
-	reports, err := r.updateRoutingTableOnCluster()
+	previousSignature := r.Signature()
+	data, signature, err := r.buildRoutingTablePayload()
+	if err != nil {
+		r.log.V(2).Printf("[ERROR] Failed to marshal routing table: %v", err)
+		return
+	}
+
+	reports, err := r.updateRoutingTableOnCluster(data)
 	if err != nil {
 		r.log.V(2).Printf("[ERROR] Failed to update routing table on cluster: %v", err)
 		return
 	}
 	r.processLeftOverDataReports(reports)
+	if signature != previousSignature {
+		r.startRebalanceEpoch(signature, reason, node)
+	}
 }
 
 func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) {
@@ -330,7 +343,8 @@ func (r *RoutingTable) listenClusterEvents(eventCh chan *discovery.ClusterEvent)
 			return
 		case e := <-eventCh:
 			r.processClusterEvent(e)
-			r.updateRouting()
+			reason, node := rebalanceReasonFromEvent(e)
+			r.updateRoutingWithReason(reason, node)
 		}
 	}
 }
@@ -345,7 +359,7 @@ func (r *RoutingTable) pushPeriodically() {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
-			r.updateRouting()
+			r.updateRoutingWithReason(rebalanceReasonPeriodic, "")
 		}
 	}
 }

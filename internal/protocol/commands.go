@@ -32,6 +32,7 @@ var Cluster = &ClusterCommands{
 type InternalCommands struct {
 	MoveFragment        string
 	UpdateRouting       string
+	RebalanceAck        string
 	LengthOfPart        string
 	ClusterRoutingTable string
 }
@@ -39,6 +40,7 @@ type InternalCommands struct {
 var Internal = &InternalCommands{
 	MoveFragment:  "internal.node.movefragment",
 	UpdateRouting: "internal.node.updaterouting",
+	RebalanceAck:  "internal.node.rebalanceack",
 	LengthOfPart:  "internal.node.lengthofpart",
 }
 

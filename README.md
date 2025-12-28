@@ -116,7 +116,7 @@ It's good at distributed caching and publish/subscribe messaging.
 * Horizontally scalable,
 * Provides best-effort consistency guarantees without being a complete CP (indeed PA/EC) solution,
 * Distributes load fairly among cluster members with
-  a [consistent hash function](https://github.com/buraksezer/consistent),
+  a [consistent hash function](./internal/consistent),
 * Supports replication by default (with sync and async options),
 * Quorum-based voting for replica control,
 * Thread-safe by default,
@@ -140,6 +140,13 @@ Olric can send push cluster events to `cluster.events` channel. Available cluste
 * node-left-event
 * fragment-migration-event
 * fragment-received-even
+* rebalance-start-event
+* rebalance-complete-event
+
+Rebalance lifecycle events track routing table epochs. A rebalance starts when the coordinator publishes a new routing
+table (for example after a node join/leave), and completes only after all live members report that no further fragment
+moves are required for that routing table epoch. Use `rebalance-start-event` and `rebalance-complete-event` to track
+completion; `node-left-event` remains a membership signal, not a rebalance barrier.
 
 If you want to receive these events, set `true` to `EnableClusterEventsChannel` and subscribe to `cluster.events`
 channel.
@@ -239,7 +246,7 @@ partID = MOD(hash result, partition count)
 ```
 
 The partitions are being distributed among cluster members by using a consistent hashing algorithm. In order to get
-details, please see [buraksezer/consistent](https://github.com/buraksezer/consistent).
+details, please see [consistent](./internal/consistent).
 
 When a new cluster is created, one of the instances is elected as the **cluster coordinator**. It manages the partition
 table:

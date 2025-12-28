@@ -66,6 +66,17 @@ func TestProtocol_UpdateRoutingTable(t *testing.T) {
 	require.Equal(t, uint64(123), parsed.CoordinatorID)
 }
 
+func TestProtocol_RebalanceAck(t *testing.T) {
+	rebalanceAckCmd := NewRebalanceAck(42, 7)
+
+	cmd := stringToCommand(rebalanceAckCmd.Command(context.Background()).String())
+	parsed, err := ParseRebalanceAckCommand(cmd)
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(42), parsed.Epoch)
+	require.Equal(t, uint64(7), parsed.MemberID)
+}
+
 func TestProtocol_LengthOfPart(t *testing.T) {
 	updateRoutingTableCmd := NewLengthOfPart(123)
 

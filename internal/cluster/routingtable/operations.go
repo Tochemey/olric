@@ -24,8 +24,9 @@ import (
 	"github.com/tidwall/redcon"
 	"github.com/vmihailenco/msgpack/v5"
 
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/protocol"
+
+	"github.com/tochemey/olric/internal/cluster/partitions"
 )
 
 func (r *RoutingTable) lengthOfPartCommandHandler(conn redcon.Conn, cmd redcon.Command) {
@@ -130,4 +131,26 @@ func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.
 	r.wg.Add(1)
 	go r.runCallbacks()
 	conn.WriteBulk(value)
+}
+
+func (r *RoutingTable) rebalanceAckCommandHandler(conn redcon.Conn, cmd redcon.Command) {
+	// The command handlers of the routing table service should wait for the cluster join event.
+	<-r.joined
+
+	ackCmd, err := protocol.ParseRebalanceAckCommand(cmd)
+	if err != nil {
+		protocol.WriteError(conn, err)
+		return
+	}
+
+	if !r.discovery.IsCoordinator() {
+		protocol.WriteError(conn, fmt.Errorf("%w: rebalance coordinator mismatch", protocol.ErrInvalidArgument))
+		return
+	}
+
+	if !r.handleRebalanceAck(ackCmd.Epoch, ackCmd.MemberID) {
+		protocol.WriteError(conn, fmt.Errorf("%w: rebalance epoch is not active", protocol.ErrInvalidArgument))
+		return
+	}
+	conn.WriteString(protocol.StatusOK)
 }

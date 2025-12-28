@@ -37,7 +37,11 @@ func (r *RoutingTable) bootstrapCoordinator() error {
 	defer r.Unlock()
 
 	r.fillRoutingTable()
-	_, err := r.updateRoutingTableOnCluster()
+	data, _, err := r.buildRoutingTablePayload()
+	if err != nil {
+		return err
+	}
+	_, err = r.updateRoutingTableOnCluster(data)
 	if err != nil {
 		return err
 	}
