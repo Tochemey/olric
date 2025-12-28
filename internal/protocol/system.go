@@ -119,6 +119,41 @@ func ParseUpdateRoutingCommand(cmd redcon.Command) (*UpdateRouting, error) {
 	return NewUpdateRouting(cmd.Args[1], coordinatorID), nil
 }
 
+type RebalanceAck struct {
+	Epoch    uint64
+	MemberID uint64
+}
+
+func NewRebalanceAck(epoch, memberID uint64) *RebalanceAck {
+	return &RebalanceAck{
+		Epoch:    epoch,
+		MemberID: memberID,
+	}
+}
+
+func (r *RebalanceAck) Command(ctx context.Context) *redis.StatusCmd {
+	var args []interface{}
+	args = append(args, Internal.RebalanceAck)
+	args = append(args, r.Epoch)
+	args = append(args, r.MemberID)
+	return redis.NewStatusCmd(ctx, args...)
+}
+
+func ParseRebalanceAckCommand(cmd redcon.Command) (*RebalanceAck, error) {
+	if len(cmd.Args) < 3 {
+		return nil, errWrongNumber(cmd.Args)
+	}
+	epoch, err := strconv.ParseUint(util.BytesToString(cmd.Args[1]), 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	memberID, err := strconv.ParseUint(util.BytesToString(cmd.Args[2]), 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	return NewRebalanceAck(epoch, memberID), nil
+}
+
 type LengthOfPart struct {
 	PartID  uint64
 	Replica bool

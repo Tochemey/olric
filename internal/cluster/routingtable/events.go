@@ -65,3 +65,47 @@ func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member) {
 		r.log.V(3).Printf("[ERROR] Failed to publish NodeLeftEvent to %s: %v", events.ClusterEventsChannel, err)
 	}
 }
+
+func (r *RoutingTable) publishRebalanceStartEvent(epoch uint64, reason, node string) {
+	defer r.wg.Done()
+
+	rc := r.client.Get(r.this.String())
+	message := events.RebalanceStartEvent{
+		Kind:      events.KindRebalanceStartEvent,
+		Source:    r.this.String(),
+		Epoch:     epoch,
+		Reason:    reason,
+		Node:      node,
+		Timestamp: time.Now().UnixNano(),
+	}
+	data, err := message.Encode()
+	if err != nil {
+		r.log.V(3).Printf("[ERROR] Failed to encode RebalanceStartEvent: %v", err)
+		return
+	}
+	err = rc.Publish(r.ctx, events.ClusterEventsChannel, data).Err()
+	if err != nil {
+		r.log.V(3).Printf("[ERROR] Failed to publish RebalanceStartEvent to %s: %v", events.ClusterEventsChannel, err)
+	}
+}
+
+func (r *RoutingTable) publishRebalanceCompleteEvent(epoch uint64) {
+	defer r.wg.Done()
+
+	rc := r.client.Get(r.this.String())
+	message := events.RebalanceCompleteEvent{
+		Kind:      events.KindRebalanceCompleteEvent,
+		Source:    r.this.String(),
+		Epoch:     epoch,
+		Timestamp: time.Now().UnixNano(),
+	}
+	data, err := message.Encode()
+	if err != nil {
+		r.log.V(3).Printf("[ERROR] Failed to encode RebalanceCompleteEvent: %v", err)
+		return
+	}
+	err = rc.Publish(r.ctx, events.ClusterEventsChannel, data).Err()
+	if err != nil {
+		r.log.V(3).Printf("[ERROR] Failed to publish RebalanceCompleteEvent to %s: %v", events.ClusterEventsChannel, err)
+	}
+}

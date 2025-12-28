@@ -96,3 +96,69 @@ func TestRoutingTable_publishNodeLeftEvent(t *testing.T) {
 	<-ctx.Done()
 	require.ErrorIs(t, context.Canceled, ctx.Err())
 }
+
+func TestRoutingTable_publishRebalanceStartEvent(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	c := testutil.NewConfig()
+	rt, err := cluster.addNode(c)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+		defer cancel()
+
+		publishCmd, err := protocol.ParsePublishCommand(cmd)
+		require.NoError(t, err)
+		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
+
+		v := events.RebalanceStartEvent{}
+		err = json.Unmarshal([]byte(publishCmd.Message), &v)
+		require.NoError(t, err)
+		require.Equal(t, events.KindRebalanceStartEvent, v.Kind)
+		require.Equal(t, rt.this.String(), v.Source)
+		require.Equal(t, uint64(42), v.Epoch)
+		require.Equal(t, "node-left", v.Reason)
+		require.Equal(t, "127.0.0.1:9999", v.Node)
+
+		conn.WriteInt(1)
+	})
+
+	rt.wg.Add(1)
+	go rt.publishRebalanceStartEvent(42, "node-left", "127.0.0.1:9999")
+	<-ctx.Done()
+	require.ErrorIs(t, context.Canceled, ctx.Err())
+}
+
+func TestRoutingTable_publishRebalanceCompleteEvent(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	c := testutil.NewConfig()
+	rt, err := cluster.addNode(c)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+		defer cancel()
+
+		publishCmd, err := protocol.ParsePublishCommand(cmd)
+		require.NoError(t, err)
+		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
+
+		v := events.RebalanceCompleteEvent{}
+		err = json.Unmarshal([]byte(publishCmd.Message), &v)
+		require.NoError(t, err)
+		require.Equal(t, events.KindRebalanceCompleteEvent, v.Kind)
+		require.Equal(t, rt.this.String(), v.Source)
+		require.Equal(t, uint64(42), v.Epoch)
+
+		conn.WriteInt(1)
+	})
+
+	rt.wg.Add(1)
+	go rt.publishRebalanceCompleteEvent(42)
+	<-ctx.Done()
+	require.ErrorIs(t, context.Canceled, ctx.Err())
+}

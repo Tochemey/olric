@@ -25,3 +25,7 @@ vendor/
 .DS_Store
 .cache
 playground/
+.trunk/
+.gocache/
+.cache/
+.gomodcache/

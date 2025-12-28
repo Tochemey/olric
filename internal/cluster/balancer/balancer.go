@@ -1,5 +1,4 @@
 /*
- * Copyright 2018-2024 Burak Sezer
  * Copyright 2025 Arsene Tochemey Gandote
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -44,6 +43,8 @@ type Balancer struct {
 	wg      sync.WaitGroup
 	ctx     context.Context
 	cancel  context.CancelFunc
+
+	lastAckedSignature uint64
 }
 
 func New(e *environment.Environment) *Balancer {
@@ -71,7 +72,11 @@ func (b *Balancer) isAlive() bool {
 	return true
 }
 
-func (b *Balancer) movePartition(sign uint64, part *partitions.Partition, owners ...discovery.Member) {
+func (b *Balancer) movePartition(sign uint64, part *partitions.Partition, owners ...discovery.Member) (bool, bool) {
+	var (
+		moved   bool
+		aborted bool
+	)
 	ownersStr := func() string {
 		var names []string
 		for _, owner := range owners {
@@ -90,6 +95,7 @@ func (b *Balancer) movePartition(sign uint64, part *partitions.Partition, owners
 		b.log.V(2).Printf("[INFO] Moving %s fragment: %s (kind: %s) on PartID: %d to %s",
 			f.Name(), name, part.Kind(), part.ID(), ownersStr)
 
+		moved = true
 		err := f.Move(part, name, owners)
 		if err != nil {
 			b.log.V(2).Printf("[ERROR] Failed to move %s fragment: %s on PartID: %d to %s: %v",
@@ -97,15 +103,20 @@ func (b *Balancer) movePartition(sign uint64, part *partitions.Partition, owners
 		}
 
 		// if this returns true, the iteration continues
-		return !b.breakLoop(sign)
+		if b.breakLoop(sign) {
+			aborted = true
+			return false
+		}
+		return true
 	})
+	return moved, aborted
 }
 
-func (b *Balancer) primaryCopies() {
-	sign := b.rt.Signature()
+func (b *Balancer) primaryCopies(sign uint64) (bool, bool) {
+	var moved bool
 	for partID := uint64(0); partID < b.config.PartitionCount; partID++ {
 		if b.breakLoop(sign) {
-			break
+			return moved, true
 		}
 
 		part := b.primary.PartitionByID(partID)
@@ -125,8 +136,13 @@ func (b *Balancer) primaryCopies() {
 		}
 
 		// This is a previous owner. Move the keys.
-		b.movePartition(sign, part, owner)
+		partitionMoved, aborted := b.movePartition(sign, part, owner)
+		moved = moved || partitionMoved
+		if aborted {
+			return moved, true
+		}
 	}
+	return moved, false
 }
 
 func (b *Balancer) breakLoop(sign uint64) bool {
@@ -143,12 +159,12 @@ func (b *Balancer) breakLoop(sign uint64) bool {
 	return false
 }
 
-func (b *Balancer) backupCopies() {
-	sign := b.rt.Signature()
+func (b *Balancer) backupCopies(sign uint64) (bool, bool) {
+	var moved bool
 LOOP:
 	for partID := uint64(0); partID < b.config.PartitionCount; partID++ {
 		if b.breakLoop(sign) {
-			break
+			return moved, true
 		}
 
 		part := b.backup.PartitionByID(partID)
@@ -184,8 +200,13 @@ LOOP:
 			continue LOOP
 		}
 
-		b.movePartition(sign, part, currentOwners...)
+		partitionMoved, aborted := b.movePartition(sign, part, currentOwners...)
+		moved = moved || partitionMoved
+		if aborted {
+			return moved, true
+		}
 	}
+	return moved, false
 }
 
 func (b *Balancer) triggerBalancer() {
@@ -197,13 +218,35 @@ func (b *Balancer) triggerBalancer() {
 		return
 	}
 
-	b.primaryCopies()
-
-	// TODO(arsene): using the default values will never perform a backup
-	// TODO(arsene): revisit this logic
-	if b.config.ReplicaCount > config.MinimumReplicaCount {
-		b.backupCopies()
+	sign := b.rt.Signature()
+	moved, aborted := b.primaryCopies(sign)
+	if aborted {
+		return
 	}
+
+	if b.config.ReplicaCount > config.MinimumReplicaCount {
+		backupMoved, aborted := b.backupCopies(sign)
+		moved = moved || backupMoved
+		if aborted {
+			return
+		}
+	}
+
+	if !moved {
+		b.tryAckRebalance(sign)
+	}
+}
+
+func (b *Balancer) tryAckRebalance(sign uint64) {
+	if sign == 0 || sign == b.lastAckedSignature {
+		return
+	}
+
+	if err := b.rt.SendRebalanceAck(sign); err != nil {
+		b.log.V(3).Printf("[WARN] Failed to send rebalance ack for signature %d: %v", sign, err)
+		return
+	}
+	b.lastAckedSignature = sign
 }
 
 func (b *Balancer) BalanceEagerly() {

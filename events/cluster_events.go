@@ -34,6 +34,8 @@ const (
 	KindNodeLeftEvent          = "node-left-event"
 	KindFragmentMigrationEvent = "fragment-migration-event"
 	KindFragmentReceivedEvent  = "fragment-received-event"
+	KindRebalanceStartEvent    = "rebalance-start-event"
+	KindRebalanceCompleteEvent = "rebalance-complete-event"
 )
 
 type Event interface {
@@ -206,6 +208,90 @@ func (f *FragmentReceivedEvent) Encode() (string, error) {
 			value = r.FieldByName(field).Int()
 		case "Source", "Kind", "DataStructure", "Identifier":
 			value = r.FieldByName(field).String()
+		default:
+			return nil, fmt.Errorf("invalid field: %s", field)
+		}
+		return value, nil
+	})
+}
+
+// RebalanceStartEvent marks the beginning of a rebalance epoch in the cluster.
+// It is emitted by the cluster coordinator after publishing a new routing table
+// and before data movement completes.
+//
+// Field usage:
+//   - Kind: event type identifier, always KindRebalanceStartEvent.
+//   - Source: coordinator address that emitted the event.
+//   - Epoch: routing table signature for this rebalance cycle. Correlate this
+//     with RebalanceCompleteEvent.Epoch to know when the cycle finishes.
+//   - Reason: why the rebalance started (e.g., "node-join", "node-left",
+//     "node-update", "periodic", "manual").
+//   - Node: the node associated with the trigger, if any (for example the
+//     joined or left node). May be empty for periodic/manual updates.
+//   - Timestamp: coordinator wall-clock time in nanoseconds since epoch.
+//
+// Application guidance: treat this as the start of data convergence for the
+// routing table epoch. Do not use node-left events as completion signals;
+// instead, wait for a matching RebalanceCompleteEvent with the same Epoch.
+type RebalanceStartEvent struct {
+	Kind      string `json:"kind"`
+	Source    string `json:"source"`
+	Epoch     uint64 `json:"epoch"`
+	Reason    string `json:"reason"`
+	Node      string `json:"node"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func (r *RebalanceStartEvent) Encode() (string, error) {
+	fields := []string{"Timestamp", "Source", "Kind", "Epoch", "Reason", "Node"}
+	return encodeEvent(r, fields, func(rv reflect.Value, field string) (any, error) {
+		var value any
+		switch field {
+		case "Epoch":
+			value = rv.FieldByName(field).Uint()
+		case "Timestamp":
+			value = rv.FieldByName(field).Int()
+		case "Source", "Kind", "Reason", "Node":
+			value = rv.FieldByName(field).String()
+		default:
+			return nil, fmt.Errorf("invalid field: %s", field)
+		}
+		return value, nil
+	})
+}
+
+// RebalanceCompleteEvent marks the completion of a rebalance epoch.
+// It is emitted by the cluster coordinator after all live members have
+// acknowledged that no further fragment moves are required for the epoch.
+//
+// Field usage:
+//   - Kind: event type identifier, always KindRebalanceCompleteEvent.
+//   - Source: coordinator address that emitted the event.
+//   - Epoch: routing table signature for the completed rebalance cycle. Match
+//     against RebalanceStartEvent.Epoch.
+//   - Timestamp: coordinator wall-clock time in nanoseconds since epoch.
+//
+// Application guidance: treat this as the point when rebalancing is complete
+// for the given epoch. If a newer rebalance-start arrives before completion,
+// the previous epoch should be considered superseded.
+type RebalanceCompleteEvent struct {
+	Kind      string `json:"kind"`
+	Source    string `json:"source"`
+	Epoch     uint64 `json:"epoch"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func (r *RebalanceCompleteEvent) Encode() (string, error) {
+	fields := []string{"Timestamp", "Source", "Kind", "Epoch"}
+	return encodeEvent(r, fields, func(rv reflect.Value, field string) (any, error) {
+		var value any
+		switch field {
+		case "Epoch":
+			value = rv.FieldByName(field).Uint()
+		case "Timestamp":
+			value = rv.FieldByName(field).Int()
+		case "Source", "Kind":
+			value = rv.FieldByName(field).String()
 		default:
 			return nil, fmt.Errorf("invalid field: %s", field)
 		}

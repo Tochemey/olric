@@ -21,18 +21,26 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/tochemey/olric/internal/protocol"
-
+	"github.com/cespare/xxhash/v2"
 	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/protocol"
 )
 
 type leftOverDataReport struct {
 	Partitions []uint64
 	Backups    []uint64
+}
+
+func (r *RoutingTable) buildRoutingTablePayload() ([]byte, uint64, error) {
+	data, err := msgpack.Marshal(r.table)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, xxhash.Sum64(data), nil
 }
 
 func (r *RoutingTable) prepareLeftOverDataReport() ([]byte, error) {
@@ -73,12 +81,7 @@ func (r *RoutingTable) updateRoutingTableOnMember(data []byte, member discovery.
 	return &report, nil
 }
 
-func (r *RoutingTable) updateRoutingTableOnCluster() (map[discovery.Member]*leftOverDataReport, error) {
-	data, err := msgpack.Marshal(r.table)
-	if err != nil {
-		return nil, err
-	}
-
+func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.Member]*leftOverDataReport, error) {
 	var mtx sync.Mutex
 	var g errgroup.Group
 	reports := make(map[discovery.Member]*leftOverDataReport)
