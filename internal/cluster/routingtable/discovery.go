@@ -37,7 +37,7 @@ func (r *RoutingTable) bootstrapCoordinator() error {
 	defer r.Unlock()
 
 	r.fillRoutingTable()
-	data, _, err := r.buildRoutingTablePayload()
+	data, signature, err := r.buildRoutingTablePayload()
 	if err != nil {
 		return err
 	}
@@ -45,6 +45,7 @@ func (r *RoutingTable) bootstrapCoordinator() error {
 	if err != nil {
 		return err
 	}
+	r.startRebalanceEpoch(signature, rebalanceReasonBootstrap, "")
 	// The coordinator bootstraps itself.
 	r.markBootstrapped()
 	r.log.V(2).Printf("[INFO] The cluster coordinator has been bootstrapped")
