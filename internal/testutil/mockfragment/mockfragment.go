@@ -85,7 +85,7 @@ func (f *MockFragment) Fill() {
 		}
 		return fmt.Sprintf("%X", b)
 	}
-	num := mrand.Intn(100)
+	num := mrand.Intn(100) + 1
 	for i := 0; i < num; i++ {
 		f.Put(randKey(), i)
 	}
