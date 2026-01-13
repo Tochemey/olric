@@ -28,6 +28,7 @@ import (
 	"github.com/tochemey/olric/internal/roundrobin"
 )
 
+
 type Client struct {
 	mu sync.RWMutex
 

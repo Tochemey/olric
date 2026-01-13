@@ -144,7 +144,7 @@ func (r *RoutingTable) rebalanceAckCommandHandler(conn redcon.Conn, cmd redcon.C
 	}
 
 	if !r.discovery.IsCoordinator() {
-		protocol.WriteError(conn, fmt.Errorf("%w: rebalance coordinator mismatch", protocol.ErrInvalidArgument))
+		protocol.WriteError(conn, protocol.ErrNotCoordinator)
 		return
 	}
 

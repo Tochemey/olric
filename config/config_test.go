@@ -20,9 +20,8 @@ package config
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/kapetan-io/tackle/autotls"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfig_Initialize(t *testing.T) {

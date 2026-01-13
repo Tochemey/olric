@@ -22,8 +22,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tochemey/olric/internal/kvstore/table"
 	"github.com/tochemey/olric/pkg/storage"
+
+	"github.com/tochemey/olric/internal/kvstore/table"
 )
 
 func (k *KVStore) evictTable(t *table.Table) error {

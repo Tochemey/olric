@@ -27,6 +27,7 @@ import (
 )
 
 var ErrInvalidArgument = errors.New("invalid argument")
+var ErrNotCoordinator = errors.New("not coordinator (expected during coordinator transitions, will retry)")
 
 var GenericError = "ERR"
 
@@ -41,6 +42,7 @@ var errorWithPrefix = struct {
 
 func init() {
 	SetError("INVALIDARGUMENT", ErrInvalidArgument)
+	SetError("NOTCOORDINATOR", ErrNotCoordinator)
 }
 
 func SetError(prefix string, err error) {

@@ -104,16 +104,59 @@ func (r *RoutingTable) handleRebalanceAck(epoch, memberID uint64) bool {
 	}
 
 	r.rebalanceState.acked[memberID] = struct{}{}
-	if len(r.rebalanceState.acked) != len(r.rebalanceState.pending) {
-		return true
+
+	// Check completion based on live members only (not departed ones)
+	// This implements: "completes only after all live members report"
+	// and "node-left-event remains a membership signal, not a rebalance barrier"
+	r.checkRebalanceCompletionLocked()
+
+	return true
+}
+
+// checkRebalanceCompletionLocked checks if rebalance is complete based on current live members.
+// This implements the requirement: "completes only after all live members report".
+// Must be called with rebalanceMtx locked.
+func (r *RoutingTable) checkRebalanceCompletionLocked() {
+	if r.rebalanceState.epoch == 0 || r.rebalanceState.completed {
+		return
 	}
 
-	r.rebalanceState.completed = true
-	if r.config.EnableClusterEventsChannel {
-		r.wg.Add(1)
-		go r.publishRebalanceCompleteEvent(epoch)
+	// Count current live members that were in the original pending set
+	// This ensures departed members don't block completion (node-left is not a barrier)
+	livePendingCount := 0
+	liveAckedCount := 0
+
+	r.Members().RLock()
+	r.Members().Range(func(id uint64, _ discovery.Member) bool {
+		// Only count members that were originally in pending
+		if _, wasPending := r.rebalanceState.pending[id]; wasPending {
+			livePendingCount++
+			if _, hasAcked := r.rebalanceState.acked[id]; hasAcked {
+				liveAckedCount++
+			}
+		}
+		return true
+	})
+	r.Members().RUnlock()
+
+	// Complete when all live members (that were in pending) have ACKed
+	// This implements: "completes only after all live members report"
+	// Note: If all members leave, livePendingCount will be 0, and we won't complete
+	// (which is correct - no one to complete for)
+	if livePendingCount > 0 && liveAckedCount == livePendingCount {
+		r.rebalanceState.completed = true
+		completedEpoch := r.rebalanceState.epoch
+		// Only publish event if context is still alive (node not shutting down)
+		if r.config.EnableClusterEventsChannel {
+			select {
+			case <-r.ctx.Done():
+				// Node is shutting down, don't publish event
+			default:
+				r.wg.Add(1)
+				go r.publishRebalanceCompleteEvent(completedEpoch)
+			}
+		}
 	}
-	return true
 }
 
 func (r *RoutingTable) SendRebalanceAck(epoch uint64) error {

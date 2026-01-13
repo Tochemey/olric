@@ -92,6 +92,14 @@ func (r *RoutingTable) publishRebalanceStartEvent(epoch uint64, reason, node str
 func (r *RoutingTable) publishRebalanceCompleteEvent(epoch uint64) {
 	defer r.wg.Done()
 
+	// Check if context is already canceled (node is shutting down)
+	select {
+	case <-r.ctx.Done():
+		// Node is shutting down, don't try to publish
+		return
+	default:
+	}
+
 	rc := r.client.Get(r.this.String())
 	message := events.RebalanceCompleteEvent{
 		Kind:      events.KindRebalanceCompleteEvent,
@@ -106,6 +114,12 @@ func (r *RoutingTable) publishRebalanceCompleteEvent(epoch uint64) {
 	}
 	err = rc.Publish(r.ctx, events.ClusterEventsChannel, data).Err()
 	if err != nil {
+		// Don't log if context was canceled (expected during shutdown)
+		select {
+		case <-r.ctx.Done():
+			return
+		default:
+		}
 		r.log.V(3).Printf("[ERROR] Failed to publish RebalanceCompleteEvent to %s: %v", events.ClusterEventsChannel, err)
 	}
 }

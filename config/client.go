@@ -23,10 +23,13 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
+
+	"github.com/tochemey/olric/internal/redislogger"
 )
 
 const (
@@ -106,6 +109,11 @@ type Client struct {
 
 	// Limiter interface used to implemented circuit breaker or rate limiter.
 	Limiter redis.Limiter
+
+	// DisableRedisLogging disables go-redis internal logging.
+	// When true, all go-redis log messages (including connection pool errors)
+	// will be suppressed. Default is false (logging enabled).
+	DisableRedisLogging bool
 }
 
 // NewClient returns a new configuration object for clients.
@@ -118,11 +126,23 @@ func NewClient() *Client {
 	return c
 }
 
+var (
+	redisLogSetupOnce sync.Once
+)
+
 // Sanitize sets default values to empty configuration variables, if it's possible.
 func (c *Client) Sanitize() error {
+	// Configure Redis logging if disabled, before any clients are created
+	if c.DisableRedisLogging {
+		redisLogSetupOnce.Do(func() {
+			redis.SetLogger(&redislogger.DiscardLogger{})
+		})
+	}
+
 	if c.DialTimeout == 0 {
 		c.DialTimeout = DefaultDialTimeout
 	}
+
 	if c.Dialer == nil {
 		c.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			netDialer := &net.Dialer{
@@ -135,9 +155,11 @@ func (c *Client) Sanitize() error {
 			return tls.DialWithDialer(netDialer, network, addr, c.TLS)
 		}
 	}
+
 	if c.PoolSize == 0 {
 		c.PoolSize = 10 * runtime.GOMAXPROCS(0)
 	}
+
 	switch c.ReadTimeout {
 	case -1:
 		c.ReadTimeout = 0
@@ -150,6 +172,7 @@ func (c *Client) Sanitize() error {
 	case 0:
 		c.WriteTimeout = c.ReadTimeout
 	}
+
 	if c.PoolTimeout == 0 {
 		c.PoolTimeout = c.ReadTimeout + time.Second
 	}

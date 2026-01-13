@@ -27,12 +27,10 @@ import (
 	"time"
 
 	"github.com/hashicorp/memberlist"
-
-	"github.com/tochemey/olric/pkg/service_discovery"
-
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/service_discovery"
 )
 
 type testCluster struct {

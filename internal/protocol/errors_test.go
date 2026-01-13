@@ -54,3 +54,16 @@ func TestProtocol_ConvertError(t *testing.T) {
 	cerr := ConvertError(err)
 	require.ErrorIs(t, cerr, errSomethingWentWrong)
 }
+
+func TestProtocol_ErrNotCoordinator(t *testing.T) {
+	prefix := GetPrefix(ErrNotCoordinator)
+	require.Equal(t, "NOTCOORDINATOR", prefix)
+
+	err := GetError("NOTCOORDINATOR")
+	require.ErrorIs(t, err, ErrNotCoordinator)
+
+	// Test error conversion from string format
+	errStr := fmt.Sprintf("NOTCOORDINATOR %s", ErrNotCoordinator.Error())
+	cerr := ConvertError(errors.New(errStr))
+	require.ErrorIs(t, cerr, ErrNotCoordinator)
+}

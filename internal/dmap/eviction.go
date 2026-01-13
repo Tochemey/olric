@@ -18,6 +18,7 @@
 package dmap
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -83,7 +84,9 @@ func (s *Service) evictKeysAtBackground() {
 		}
 
 		if err := sem.Acquire(s.ctx, 1); err != nil {
-			s.log.V(3).Printf("[WARN] Failed to acquire semaphore: %v", err)
+			if err != context.Canceled {
+				s.log.V(3).Printf("[WARN] Failed to acquire semaphore: %v", err)
+			}
 			return
 		}
 

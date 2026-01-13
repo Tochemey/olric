@@ -23,14 +23,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tochemey/olric/internal/kvstore"
-	"github.com/tochemey/olric/pkg/storage"
-
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/kvstore"
 	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 func TestDMap_Compaction(t *testing.T) {

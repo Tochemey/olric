@@ -669,6 +669,126 @@ func TestRoutingTable_ConcurrentStartupRebalanceAck(t *testing.T) {
 	require.NoError(t, waitForRebalanceComplete(coordinator, epoch, 2*time.Second))
 }
 
+func TestRoutingTable_RebalanceCompletesWhenNodesLeave(t *testing.T) {
+	// This test validates the critical requirement: "node departures don't block rebalance completion"
+	// It ensures that when nodes leave during rebalance, completion is based on live members only.
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.WriteQuorum = 1
+		c.ReadRepair = true
+		c.ReadQuorum = 1
+		c.EnableClusterEventsChannel = true
+		return c
+	}
+
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	// Start with 3 nodes
+	rt1, err := cluster.addNode(newConfig())
+	require.NoError(t, err)
+	rt2, err := cluster.addNode(newConfig())
+	require.NoError(t, err)
+	rt3, err := cluster.addNode(newConfig())
+	require.NoError(t, err)
+
+	t.Log("Wait for cluster to stabilize")
+	<-time.After(2 * time.Second)
+
+	// Get the coordinator
+	coordinator := rt1
+	if !rt1.Discovery().IsCoordinator() {
+		if rt2.Discovery().IsCoordinator() {
+			coordinator = rt2
+		} else {
+			coordinator = rt3
+		}
+	}
+
+	// Capture the initial signature (epoch)
+	initialSignature := coordinator.Signature()
+	t.Logf("Initial signature: %d", initialSignature)
+
+	// Add a 4th node - this will trigger a new rebalance epoch
+	t.Log("Adding 4th node to trigger rebalance")
+	rt4, err := cluster.addNode(newConfig())
+	require.NoError(t, err)
+
+	// Wait for rebalance epoch to start and capture it
+	var rebalanceEpoch uint64
+	err = func() error {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			epoch, pendingCount, _, completed := coordinator.getRebalanceState()
+			if pendingCount == 4 && !completed {
+				rebalanceEpoch = epoch
+				t.Logf("Rebalance epoch started: %d with %d pending members", epoch, pendingCount)
+				return nil
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return fmt.Errorf("timeout waiting for rebalance epoch to start")
+	}()
+	require.NoError(t, err, "Rebalance epoch should start after adding node")
+
+	// Immediately kill one of the original nodes (rt2) before it can ACK
+	// This simulates a node leaving during rebalance
+	t.Logf("Terminating node %s before it can ACK", rt2.This())
+	require.NoError(t, rt2.Shutdown(context.Background()))
+
+	// Wait for node leave event to propagate
+	<-time.After(2 * time.Second)
+
+	// Verify rt2 is no longer in the members list
+	coordinator.Members().RLock()
+	_, err = coordinator.Members().Get(rt2.This().ID)
+	coordinator.Members().RUnlock()
+	require.Error(t, err, "rt2 should be removed from members list")
+
+	// Get the current epoch (might be the same or a new one if node leave triggered rebalance)
+	currentEpoch, _, _, _ := coordinator.getRebalanceState()
+	t.Logf("Current epoch after node leave: %d (started with: %d)", currentEpoch, rebalanceEpoch)
+
+	// Manually send ACKs from the remaining live nodes (rt1, rt3, rt4)
+	// The routingtable test setup doesn't have a balancer running, so we need to send ACKs manually
+	// This simulates what the balancer would do automatically
+	t.Log("Sending ACKs from remaining live nodes")
+	remainingNodes := []*RoutingTable{rt1, rt3, rt4}
+	for _, rt := range remainingNodes {
+		if rt != nil {
+			err = rt.SendRebalanceAck(currentEpoch)
+			// Ignore errors if epoch changed (new rebalance started) - we'll retry with new epoch
+			if err != nil {
+				// If epoch changed, get the new epoch and retry
+				newEpoch, _, _, _ := coordinator.getRebalanceState()
+				if newEpoch != currentEpoch {
+					t.Logf("Epoch changed from %d to %d, retrying ACKs", currentEpoch, newEpoch)
+					currentEpoch = newEpoch
+					err = rt.SendRebalanceAck(currentEpoch)
+				}
+				if err != nil {
+					t.Logf("Node %s ACK error: %v", rt.This(), err)
+				}
+			}
+		}
+	}
+
+	// Wait for rebalance to complete - it should complete with only the 3 remaining live nodes
+	// This validates that departed nodes don't block completion
+	// Use the current epoch (which might be rebalanceEpoch or a newer one)
+	t.Log("Waiting for rebalance to complete with remaining live nodes")
+	err = waitForRebalanceComplete(coordinator, currentEpoch, 15*time.Second)
+	require.NoError(t, err, "Rebalance should complete even though rt2 left before ACKing")
+
+	// Verify completion state
+	_, _, ackedCount, completed := coordinator.getRebalanceState()
+
+	require.True(t, completed, "Rebalance should be marked as completed")
+	t.Logf("Rebalance completed with %d ACKs (expected 3, rt2 left before ACKing)", ackedCount)
+	require.Equal(t, 3, ackedCount, "Should have ACKs from 3 live nodes (rt1, rt3, rt4)")
+}
+
 func startConcurrentCluster(nodeCount int) ([]*RoutingTable, []*server.Server, error) {
 	configs := make([]*config.Config, nodeCount)
 	memberPorts := make([]int, nodeCount)
@@ -825,6 +945,13 @@ func waitForRebalanceComplete(rt *RoutingTable, epoch uint64, timeout time.Durat
 		defer rt.rebalanceMtx.Unlock()
 		return rt.rebalanceState.epoch == epoch && rt.rebalanceState.completed
 	})
+}
+
+// getRebalanceState is a test helper that returns the current rebalance state.
+func (r *RoutingTable) getRebalanceState() (epoch uint64, pendingCount int, ackedCount int, completed bool) {
+	r.rebalanceMtx.Lock()
+	defer r.rebalanceMtx.Unlock()
+	return r.rebalanceState.epoch, len(r.rebalanceState.pending), len(r.rebalanceState.acked), r.rebalanceState.completed
 }
 
 func waitForCondition(timeout time.Duration, f func() bool) error {

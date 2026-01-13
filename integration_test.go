@@ -367,6 +367,7 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 		c.ReadRepair = true
 		c.ReadQuorum = 1
 		c.LogOutput = io.Discard
+		c.Client.DisableRedisLogging = true
 		require.NoError(t, c.Sanitize())
 		require.NoError(t, c.Validate())
 		return c

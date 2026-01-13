@@ -18,6 +18,7 @@ package balancer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
+	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/service"
 	"github.com/tochemey/olric/pkg/flog"
 
@@ -242,7 +244,22 @@ func (b *Balancer) tryAckRebalance(sign uint64) {
 		return
 	}
 
+	// Don't try to send ACK if node is shutting down
+	select {
+	case <-b.ctx.Done():
+		return
+	default:
+	}
+
 	if err := b.rt.SendRebalanceAck(sign); err != nil {
+		// Convert protocol error and check if it's ErrNotCoordinator
+		// This is expected during coordinator transitions and will retry automatically
+		convertedErr := protocol.ConvertError(err)
+		if errors.Is(convertedErr, protocol.ErrNotCoordinator) || errors.Is(err, protocol.ErrNotCoordinator) {
+			// Silently ignore - this is expected during coordinator transitions
+			return
+		}
+		// Log other errors as they indicate actual problems
 		b.log.V(3).Printf("[WARN] Failed to send rebalance ack for signature %d: %v", sign, err)
 		return
 	}

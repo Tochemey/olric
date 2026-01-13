@@ -20,6 +20,8 @@ Please use the original repo for any bugs or related questions.
 * Return the partition ID in Get response
 * Rebalance lifecycle events (start/complete) are published on the cluster events channel
 * Rebalance coordination acknowledgements are tracked to emit completion after all members ack
+* Improved error handling: rebalance coordinator mismatch errors are now properly handled with `ErrNotCoordinator` sentinel error to reduce log noise during coordinator transitions
+* Improved shutdown logging: eviction worker now silently handles context cancellation during graceful shutdown, preventing misleading warning messages
 
 ## Overview 
 

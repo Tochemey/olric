@@ -29,9 +29,10 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/pkg/storage"
+
 	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/kvstore/table"
-	"github.com/tochemey/olric/pkg/storage"
 )
 
 func bkey(i int) string {
