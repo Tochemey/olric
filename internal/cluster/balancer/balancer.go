@@ -252,6 +252,10 @@ func (b *Balancer) tryAckRebalance(sign uint64) {
 	}
 
 	if err := b.rt.SendRebalanceAck(sign); err != nil {
+		// Don't log if context was canceled (expected during graceful shutdown)
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		// Convert protocol error and check if it's ErrNotCoordinator
 		// This is expected during coordinator transitions and will retry automatically
 		convertedErr := protocol.ConvertError(err)

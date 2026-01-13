@@ -99,7 +99,7 @@ func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
 		}
 	}
 
-	for i := 0; i < 100000; i++ {
+	for i := range 100000 {
 		_, err = dm.Get(context.Background(), fmt.Sprintf("mykey-%d", i))
 		require.NoError(t, err)
 	}
@@ -135,13 +135,13 @@ func TestIntegration_DMap_Cache_Eviction_LRU_MaxKeys(t *testing.T) {
 	dm, err := c.NewDMap("mydmap")
 	require.NoError(t, err)
 
-	for i := 0; i < maxKeys; i++ {
+	for i := range maxKeys {
 		err = dm.Put(ctx, fmt.Sprintf("mykey-%d", i), "myvalue")
 		require.NoError(t, err)
 	}
 
 	var total int
-	for i := 0; i < maxKeys; i++ {
+	for i := range maxKeys {
 		err = dm.Put(ctx, fmt.Sprintf("mykey-%d", i), "myvalue", NX())
 		if errors.Is(err, ErrKeyFound) {
 			err = nil
