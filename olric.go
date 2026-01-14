@@ -322,7 +322,7 @@ func (db *Olric) isOperable() error {
 // Start starts background servers and joins the cluster. You still must call Shutdown
 // method if Start function returns an early error.
 func (db *Olric) Start() error {
-	db.log.V(1).Printf("[INFO] Starting Olric on %s/%s %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
+	db.log.V(1).Printf("[INFO] Starting Node on %s/%s %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
 
 	// This error group is responsible to run the TCP server at background and report errors.
 	errGr, ctx := errgroup.WithContext(context.Background())
@@ -347,7 +347,7 @@ func (db *Olric) Start() error {
 
 	// First, we need to join the cluster. Then, the routing table has been started.
 	if err := db.rt.Join(); err != nil {
-		db.log.V(2).Printf("[ERROR] Failed to join the Olric cluster: %v", err)
+		db.log.V(2).Printf("[ERROR] Failed to join the cluster: %v", err)
 		return err
 	}
 	// Start routing table service and member discovery subsystem.
@@ -371,7 +371,7 @@ func (db *Olric) Start() error {
 	// Warn the user about his/her choice of configuration
 	if db.config.ReplicationMode == config.AsyncReplicationMode && db.config.WriteQuorum > 1 {
 		db.log.V(2).
-			Printf("[WARN] Olric is running in async replication mode. WriteQuorum (%d) is ineffective",
+			Printf("[WARN] Node is running in async replication mode. WriteQuorum (%d) is ineffective",
 				db.config.WriteQuorum)
 	}
 
@@ -383,10 +383,10 @@ func (db *Olric) Start() error {
 	db.log.V(2).Printf("[INFO] Node name in the cluster: %s",
 		db.name)
 	if db.config.Interface != "" {
-		db.log.V(2).Printf("[INFO] Olric uses interface: %s",
+		db.log.V(2).Printf("[INFO] Node uses interface: %s",
 			db.config.Interface)
 	}
-	db.log.V(2).Printf("[INFO] Olric bindAddr: %s, bindPort: %d",
+	db.log.V(2).Printf("[INFO] Node bindAddr: %s, bindPort: %d",
 		db.config.BindAddr, db.config.BindPort)
 	db.log.V(2).Printf("[INFO] Replication count is %d", db.config.ReplicaCount)
 
