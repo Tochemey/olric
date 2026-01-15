@@ -29,11 +29,12 @@ func TestClusterEvents_NodeJoinEvent(t *testing.T) {
 		Kind:      KindNodeJoinEvent,
 		Source:    "127.0.0.1:3423",
 		NodeJoin:  "127.0.0.1:3576",
+		NodeMeta:  "custom-meta",
 		Timestamp: timestamp,
 	}
 	result, err := n.Encode()
 	require.NoError(t, err)
-	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"node-join-event","node_join":"127.0.0.1:3576"}`
+	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"node-join-event","node_join":"127.0.0.1:3576","node_meta":"custom-meta"}`
 	require.Equal(t, expected, result)
 }
 
@@ -43,11 +44,12 @@ func TestClusterEvents_NodeLeftEvent(t *testing.T) {
 		Kind:      KindNodeLeftEvent,
 		Source:    "127.0.0.1:3423",
 		NodeLeft:  "127.0.0.1:3576",
+		NodeMeta:  "custom-meta",
 		Timestamp: timestamp,
 	}
 	result, err := n.Encode()
 	require.NoError(t, err)
-	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"node-left-event","node_left":"127.0.0.1:3576"}`
+	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"node-left-event","node_left":"127.0.0.1:3576","node_meta":"custom-meta"}`
 	require.Equal(t, expected, result)
 }
 

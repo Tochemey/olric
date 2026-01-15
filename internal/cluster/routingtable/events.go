@@ -32,6 +32,7 @@ func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member) {
 		Kind:      events.KindNodeJoinEvent,
 		Source:    r.this.String(),
 		NodeJoin:  m.String(),
+		NodeMeta:  m.Meta,
 		Timestamp: time.Now().UnixNano(),
 	}
 	data, err := message.Encode()
@@ -53,6 +54,7 @@ func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member) {
 		Kind:      events.KindNodeLeftEvent,
 		Source:    r.this.String(),
 		NodeLeft:  m.String(),
+		NodeMeta:  m.Meta,
 		Timestamp: time.Now().UnixNano(),
 	}
 	data, err := message.Encode()

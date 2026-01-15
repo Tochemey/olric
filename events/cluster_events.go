@@ -91,17 +91,18 @@ type NodeJoinEvent struct {
 	Kind      string `json:"kind"`
 	Source    string `json:"source"`
 	NodeJoin  string `json:"node_join"`
+	NodeMeta  string `json:"node_meta"`
 	Timestamp int64  `json:"timestamp"`
 }
 
 func (n *NodeJoinEvent) Encode() (string, error) {
-	fields := []string{"Timestamp", "Source", "Kind", "NodeJoin"}
+	fields := []string{"Timestamp", "Source", "Kind", "NodeJoin", "NodeMeta"}
 	return encodeEvent(n, fields, func(r reflect.Value, field string) (interface{}, error) {
 		var value interface{}
 		switch field {
 		case "Timestamp":
 			value = r.FieldByName(field).Int()
-		case "Source", "Kind", "NodeJoin":
+		case "Source", "Kind", "NodeJoin", "NodeMeta":
 			value = r.FieldByName(field).String()
 		default:
 			return nil, fmt.Errorf("invalid field: %s", field)
@@ -114,17 +115,18 @@ type NodeLeftEvent struct {
 	Kind      string `json:"kind"`
 	Source    string `json:"source"`
 	NodeLeft  string `json:"node_left"`
+	NodeMeta  string `json:"node_meta"`
 	Timestamp int64  `json:"timestamp"`
 }
 
 func (n *NodeLeftEvent) Encode() (string, error) {
-	fields := []string{"Timestamp", "Source", "Kind", "NodeLeft"}
+	fields := []string{"Timestamp", "Source", "Kind", "NodeLeft", "NodeMeta"}
 	return encodeEvent(n, fields, func(r reflect.Value, field string) (interface{}, error) {
 		var value interface{}
 		switch field {
 		case "Timestamp":
 			value = r.FieldByName(field).Int()
-		case "Source", "Kind", "NodeLeft":
+		case "Source", "Kind", "NodeLeft", "NodeMeta":
 			value = r.FieldByName(field).String()
 		default:
 			return nil, fmt.Errorf("invalid field: %s", field)
