@@ -63,7 +63,9 @@ func (i *ClusterIterator) loadRoute() {
 	if !ok {
 		panic("partID: could not be found in the routing table")
 	}
-	i.route = &route
+	// Make an explicit copy to avoid pointer aliasing issues
+	routeCopy := route
+	i.route = &routeCopy
 }
 
 func (i *ClusterIterator) updateCursor(owner string, cursor uint64) {
@@ -115,6 +117,9 @@ func (i *ClusterIterator) updateIterator(keys []string, cursor uint64, owner str
 }
 
 func (i *ClusterIterator) getOwners() []string {
+	i.routingTableMtx.Lock()
+	defer i.routingTableMtx.Unlock()
+
 	var raw []string
 	if i.config.Replica {
 		raw = i.routingTable[i.partID].ReplicaOwners
@@ -230,7 +235,11 @@ func (i *ClusterIterator) next() bool {
 
 	if len(i.page) == 0 && len(i.route.PrimaryOwners) == 0 && len(i.route.ReplicaOwners) == 0 {
 		i.partID++
-		if i.partID >= i.partitionCount {
+		// Protect partitionCount read
+		i.routingTableMtx.Lock()
+		partitionCount := i.partitionCount
+		i.routingTableMtx.Unlock()
+		if i.partID >= partitionCount {
 			return false
 		}
 		i.reset()
