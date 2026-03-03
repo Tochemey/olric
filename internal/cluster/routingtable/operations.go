@@ -94,7 +94,7 @@ func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.
 		protocol.WriteError(conn, err)
 		return
 	}
-	r.log.V(3).Printf("[INFO] Routing table has been pushed by %s", coordinator)
+	r.log.V(5).Printf("[DEBUG] Routing table has been pushed by %s", coordinator)
 
 	if err = r.verifyRoutingTable(updateRoutingCmd.CoordinatorID, table); err != nil {
 		protocol.WriteError(conn, err)

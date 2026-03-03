@@ -1,6 +1,6 @@
 /*
  * Copyright 2018-2024 Burak Sezer
- * Copyright 2025 Arsene Tochemey Gandote
+ * Copyright 2025-2026 Arsene Tochemey Gandote
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,23 @@ import (
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/memberlist"
+)
+
+// Memberlist environment constants for NewMemberlistConfig and config.New.
+// Use these when creating a config to specify the network environment for
+// gossip and membership discovery.
+const (
+	// MemberlistEnvLocal is for local loopback environments (e.g., development,
+	// testing). Uses memberlist.DefaultLocalConfig with conservative defaults.
+	MemberlistEnvLocal = "local"
+
+	// MemberlistEnvLAN is for LAN environments. Uses memberlist.DefaultLANConfig
+	// with values optimized for higher convergence on local networks.
+	MemberlistEnvLAN = "lan"
+
+	// MemberlistEnvWAN is for WAN environments. Uses memberlist.DefaultWANConfig
+	// with values optimized for higher-latency, wide-area networks.
+	MemberlistEnvWAN = "wan"
 )
 
 func (c *Config) validateMemberlistConfig() error {
@@ -63,11 +80,11 @@ func (c *Config) validateMemberlistConfig() error {
 func NewMemberlistConfig(env string) (*memberlist.Config, error) {
 	e := strings.ToLower(env)
 	switch e {
-	case "local":
+	case MemberlistEnvLocal:
 		return memberlist.DefaultLocalConfig(), nil
-	case "lan":
+	case MemberlistEnvLAN:
 		return memberlist.DefaultLANConfig(), nil
-	case "wan":
+	case MemberlistEnvWAN:
 		return memberlist.DefaultWANConfig(), nil
 	}
 	return nil, fmt.Errorf("unknown env: %s", env)

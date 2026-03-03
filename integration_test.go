@@ -34,7 +34,7 @@ func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
 	t.Skip("TestIntegration_NodesJoinOrLeftDuringQuery: flaky test")
 
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 2
 		c.WriteQuorum = 1
@@ -108,7 +108,7 @@ func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
 func TestIntegration_DMap_Cache_Eviction_LRU_MaxKeys(t *testing.T) {
 	maxKeys := 100000
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 1
 		c.WriteQuorum = 1
@@ -157,7 +157,7 @@ func TestIntegration_DMap_Cache_Eviction_LRU_MaxKeys(t *testing.T) {
 func TestIntegration_DMap_Cache_Eviction_MaxKeys(t *testing.T) {
 	maxKeys := 100000
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 1
 		c.WriteQuorum = 1
@@ -213,7 +213,7 @@ func TestIntegration_DMap_Cache_Eviction_MaxKeys(t *testing.T) {
 func TestIntegration_DMap_Cache_Eviction_MaxIdleDuration(t *testing.T) {
 	maxKeys := 100000
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 1
 		c.WriteQuorum = 1
@@ -262,7 +262,7 @@ func TestIntegration_DMap_Cache_Eviction_MaxIdleDuration(t *testing.T) {
 func TestIntegration_DMap_Cache_Eviction_TTLDuration(t *testing.T) {
 	maxKeys := 100000
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 1
 		c.WriteQuorum = 1
@@ -311,7 +311,7 @@ func TestIntegration_DMap_Cache_Eviction_TTLDuration(t *testing.T) {
 func TestIntegration_DMap_Cache_Eviction_LRU_MaxInuse(t *testing.T) {
 	maxKeys := 100000
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 1
 		c.WriteQuorum = 1
@@ -360,7 +360,7 @@ func TestIntegration_DMap_Cache_Eviction_LRU_MaxInuse(t *testing.T) {
 
 func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 3
 		c.WriteQuorum = 1
@@ -437,7 +437,7 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 
 func TestIntegration_ProductionConfig_NoDataLoss(t *testing.T) {
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 3
 		c.WriteQuorum = 2
@@ -595,7 +595,7 @@ func TestIntegration_Network_Partitioning_Embedded_DM_SCAN_Match(t *testing.T) {
 
 func scanIntegrationTestCommon(t *testing.T, embedded bool, keyFunc func(i int) string, options ...ScanOption) []map[string]struct{} {
 	newConfig := func() *config.Config {
-		c := config.New("local")
+		c := config.New(config.MemberlistEnvLocal)
 		c.PartitionCount = config.DefaultPartitionCount
 		c.ReplicaCount = 2
 		c.WriteQuorum = 1

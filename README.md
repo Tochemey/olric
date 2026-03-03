@@ -12,7 +12,7 @@ Please use the original repo for any bugs or related questions.
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
 * Renamed module name
-* Upgrade go version to 1.24.0
+* Upgrade go version to 1.25.0
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
 * Meta-information can be passed to the cluster member
@@ -162,7 +162,7 @@ See [events/cluster_events.go](events/cluster_events.go) file to get more inform
 ```go
 import "github.com/tochemey/olric/config"
 ...
-c := config.New("local")
+c := config.New(config.MemberlistEnvLocal)
 ```
 
 The `New` function takes a parameter called `env`. It denotes the network environment and consumed
@@ -545,7 +545,7 @@ func main() {
 
 	// config.New returns a new config.Config with sane defaults. Available values for env:
 	// local, lan, wan
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 
 	// Callback function. It's called when this node is ready to accept connections.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -638,7 +638,7 @@ func main() {
 
 	// config.New returns a new config.Config with sane defaults. Available values for env:
 	// local, lan, wan
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 
 	// Callback function. It's called when this node is ready to accept connections.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -729,7 +729,7 @@ func main() {
 
 	// config.New returns a new config.Config with sane defaults. Available values for env:
 	// local, lan, wan
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 
 	// Callback function. It's called when this node is ready to accept connections.
 	ctx, cancel := context.WithCancel(context.Background())

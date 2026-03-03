@@ -1,6 +1,6 @@
 module github.com/tochemey/olric
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/RoaringBitmap/roaring v1.9.4
@@ -11,7 +11,7 @@ require (
 	github.com/hashicorp/memberlist v0.5.4
 	github.com/kapetan-io/tackle v0.13.0
 	github.com/pkg/errors v0.9.1
-	github.com/redis/go-redis/v9 v9.17.2
+	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/btree v1.8.1
 	github.com/tidwall/match v1.2.0
@@ -32,14 +32,15 @@ require (
 	github.com/hashicorp/go-msgpack/v2 v2.1.5 // indirect
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
-	github.com/miekg/dns v1.1.70 // indirect
+	github.com/miekg/dns v1.1.72 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
-	golang.org/x/mod v0.32.0 // indirect
-	golang.org/x/net v0.49.0 // indirect
-	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/tools v0.41.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
+	golang.org/x/mod v0.33.0 // indirect
+	golang.org/x/net v0.51.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/tools v0.42.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -1,6 +1,6 @@
 /*
  * Copyright 2018-2024 Burak Sezer
- * Copyright 2025 Arsene Tochemey Gandote
+ * Copyright 2025-2026 Arsene Tochemey Gandote
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ func NewEngineConfig(t *testing.T) *config.Engine {
 }
 
 func NewConfig() *config.Config {
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 	c.PartitionCount = 7
 	mc := memberlist.DefaultLocalConfig()
 	mc.BindAddr = "127.0.0.1"
@@ -89,7 +89,7 @@ func NewConfig() *config.Config {
 }
 
 func NewConfigWithTLS(t *testing.T, serverTLS, clientTLS *tls.Config) *config.Config {
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 	c.Client.TLS = clientTLS
 	c.TLS = &config.TLS{
 		Client: serverTLS,
