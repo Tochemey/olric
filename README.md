@@ -12,7 +12,7 @@ Please use the original repo for any bugs or related questions.
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
 * Renamed module name
-* Upgrade go version to 1.25.0
+* Upgrade go version to 1.26.0
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
 * Meta-information can be passed to the cluster member
@@ -22,6 +22,7 @@ Please use the original repo for any bugs or related questions.
 * Rebalance coordination acknowledgements are tracked to emit completion after all members ack
 * Improved error handling: rebalance coordinator mismatch errors are now properly handled with `ErrNotCoordinator` sentinel error to reduce log noise during coordinator transitions
 * Improved shutdown logging: eviction worker now silently handles context cancellation during graceful shutdown, preventing misleading warning messages
+* `EnableProactiveSyncOnJoin`: new opt-in flag (default `false`) that makes existing primary owners push data to new backup owners immediately when a node joins, instead of waiting for the next balancer tick. The flag is single-purpose — it does not alter memberlist probe or gossip timing. Tune `MemberlistConfig` directly if faster failure detection is needed.
 
 ## Overview 
 
@@ -184,18 +185,18 @@ When nodes join or leave frequently—rolling restarts, auto-scaling, or any orc
 
 **Use case:** Enable proactive sync so existing owners push data to new nodes as soon as they join. This restores replica redundancy without relying on read traffic.
 
-**Configuration:** Set `EnableProactiveSyncOnJoin` to true. Memberlist timing (ProbeInterval, ProbeTimeout, etc.) is then tuned for faster join/departure detection regardless of the environment (local/lan/wan):
+**Configuration:** Set `EnableProactiveSyncOnJoin` to `true`. This flag only controls whether existing primary owners push data to new backup owners on node join — it has no effect when `ReplicaCount` is 1. It does **not** alter memberlist timing. If you also need faster failure detection (e.g. detecting dead nodes in under a second), tune `MemberlistConfig` directly for your network environment:
 
 ```go
 c := config.New(config.MemberlistEnvLAN)
 c.ReplicaCount = 2
 c.EnableProactiveSyncOnJoin = true
 c.EnableClusterEventsChannel = true
-// Optional: customize memberlist timing
-c.ProactiveSyncOnJoin = &config.ProactiveSyncOnJoinConfig{
-    ProbeInterval: 200 * time.Millisecond,
-    ProbeTimeout:  100 * time.Millisecond,
-}
+
+// Optional: tune memberlist for faster failure detection independently.
+// These are separate concerns from proactive sync.
+// c.MemberlistConfig.ProbeInterval = 200 * time.Millisecond
+// c.MemberlistConfig.ProbeTimeout  = 100 * time.Millisecond
 ```
 
 **Stable node identity:** In environments where IPs change on restart (containers, cloud instances), use a stable identifier instead of the default host:port:
@@ -223,13 +224,19 @@ if err := db.WaitForInitialSync(ctx); err != nil {
 // Safe defaults when deployment environment is unknown
 c := config.New(config.MemberlistEnvLAN) // or MemberlistEnvWAN for cross-datacenter
 c.ReplicaCount = 2
-c.EnableProactiveSyncOnJoin = true
+c.EnableProactiveSyncOnJoin = true // push data to new backups immediately on join
 c.ReadRepair = true
 
-// Use hostname as stable identity when IP may change (containers, cloud)
+// Use a stable identity when IPs change on restart (containers, cloud instances).
+// Kubernetes StatefulSet example: POD_NAME is "app-0", "app-1", etc.
 if name, err := os.Hostname(); err == nil && name != "" {
     c.MemberlistConfig.Name = name
 }
+
+// Optional: tune memberlist for faster failure detection.
+// Choose values appropriate for your network (LAN vs WAN).
+// c.MemberlistConfig.ProbeInterval = 500 * time.Millisecond
+// c.MemberlistConfig.ProbeTimeout  = 200 * time.Millisecond
 
 db, err := olric.New(c)
 if err != nil {
@@ -237,7 +244,7 @@ if err != nil {
 }
 go db.Start(context.Background())
 
-// Block until sync complete or timeout—don't serve traffic before ready
+// Block until sync complete or timeout — don't serve traffic before ready.
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 defer cancel()
 if err := db.WaitForInitialSync(ctx); err != nil {
