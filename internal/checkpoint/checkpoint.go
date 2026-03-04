@@ -35,3 +35,10 @@ func Pass() {
 func AllPassed() bool {
 	return atomic.LoadInt32(&passed) == required
 }
+
+// Reset resets the checkpoint counters to zero. Call this at the start of each
+// test that creates a fresh Olric node to prevent counter accumulation across tests.
+func Reset() {
+	atomic.StoreInt32(&required, 0)
+	atomic.StoreInt32(&passed, 0)
+}

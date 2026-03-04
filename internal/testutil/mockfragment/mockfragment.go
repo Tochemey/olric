@@ -96,14 +96,19 @@ func (f *MockFragment) Result() map[partitions.Kind]map[uint64]Result {
 }
 
 func (f *MockFragment) Move(part *partitions.Partition, name string, owners []discovery.Member) error {
+	return f.MoveWithTargetKind(part, name, owners, part.Kind())
+}
+
+func (f *MockFragment) MoveWithTargetKind(part *partitions.Partition, name string, owners []discovery.Member, targetKind partitions.Kind) error {
 	f.Lock()
 	defer f.Unlock()
 
-	f.result[part.Kind()] = map[uint64]Result{
-		part.ID(): {
-			Name:   name,
-			Owners: owners,
-		},
+	if f.result[targetKind] == nil {
+		f.result[targetKind] = make(map[uint64]Result)
+	}
+	f.result[targetKind][part.ID()] = Result{
+		Name:   name,
+		Owners: owners,
 	}
 
 	for key := range f.m {

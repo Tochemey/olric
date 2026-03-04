@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Arsene Tochemey Gandote
+ * Copyright 2025-2026 Arsene Tochemey Gandote
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,23 +37,30 @@ import (
 type Balancer struct {
 	sync.Mutex
 
-	log     *flog.Logger
-	config  *config.Config
-	primary *partitions.Partitions
-	backup  *partitions.Partitions
-	rt      *routingtable.RoutingTable
-	wg      sync.WaitGroup
-	ctx     context.Context
-	cancel  context.CancelFunc
+	log       *flog.Logger
+	config    *config.Config
+	primary   *partitions.Partitions
+	backup    *partitions.Partitions
+	rt        *routingtable.RoutingTable
+	syncState SyncState
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
 
-	lastAckedSignature uint64
+	lastAckedSignature         uint64
+	lastProactiveSyncSignature uint64
+}
+
+// SyncState is the minimal interface for sync completion tracking.
+type SyncState interface {
+	PendingEmpty() bool
 }
 
 func New(e *environment.Environment) *Balancer {
 	c := e.Get("config").(*config.Config)
 	log := e.Get("logger").(*flog.Logger)
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Balancer{
+	b := &Balancer{
 		config:  c,
 		primary: e.Get("primary").(*partitions.Partitions),
 		backup:  e.Get("backup").(*partitions.Partitions),
@@ -62,6 +69,10 @@ func New(e *environment.Environment) *Balancer {
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+	if v := e.Get("syncstate"); v != nil {
+		b.syncState = v.(SyncState)
+	}
+	return b
 }
 
 func (b *Balancer) isAlive() bool {
@@ -75,6 +86,10 @@ func (b *Balancer) isAlive() bool {
 }
 
 func (b *Balancer) movePartition(sign uint64, part *partitions.Partition, owners ...discovery.Member) (bool, bool) {
+	return b.movePartitionWithTargetKind(sign, part, 0, owners...)
+}
+
+func (b *Balancer) movePartitionWithTargetKind(sign uint64, part *partitions.Partition, targetKind partitions.Kind, owners ...discovery.Member) (bool, bool) {
 	var (
 		moved   bool
 		aborted bool
@@ -98,7 +113,12 @@ func (b *Balancer) movePartition(sign uint64, part *partitions.Partition, owners
 			f.Name(), name, part.Kind(), part.ID(), ownersStr)
 
 		moved = true
-		err := f.Move(part, name, owners)
+		var err error
+		if targetKind != 0 {
+			err = f.MoveWithTargetKind(part, name, owners, targetKind)
+		} else {
+			err = f.Move(part, name, owners)
+		}
 		if err != nil {
 			b.log.V(2).Printf("[ERROR] Failed to move %s fragment: %s on PartID: %d to %s: %v",
 				f.Name(), name, part.ID(), ownersStr, err)
@@ -211,6 +231,54 @@ LOOP:
 	return moved, false
 }
 
+// pushPrimaryToBackups pushes primary partition data to backup owners that may
+// not yet have it (e.g. newly joined nodes). Enables proactive sync on node join.
+func (b *Balancer) pushPrimaryToBackups(sign uint64) (bool, bool) {
+	if b.config.ReplicaCount <= config.MinimumReplicaCount {
+		return false, false
+	}
+
+	var moved bool
+	for partID := uint64(0); partID < b.config.PartitionCount; partID++ {
+		if b.breakLoop(sign) {
+			return moved, true
+		}
+
+		primaryPart := b.primary.PartitionByID(partID)
+		if primaryPart.Length() == 0 {
+			continue
+		}
+
+		owner := primaryPart.Owner()
+		if !owner.CompareByName(b.rt.This()) {
+			continue
+		}
+
+		backupPart := b.backup.PartitionByID(partID)
+		backupOwners := backupPart.Owners()
+		if len(backupOwners) == 0 {
+			continue
+		}
+
+		var targets []discovery.Member
+		for _, m := range backupOwners {
+			if !b.rt.This().CompareByName(m) {
+				targets = append(targets, m)
+			}
+		}
+		if len(targets) == 0 {
+			continue
+		}
+
+		partitionMoved, aborted := b.movePartitionWithTargetKind(sign, primaryPart, partitions.BACKUP, targets...)
+		moved = moved || partitionMoved
+		if aborted {
+			return moved, true
+		}
+	}
+	return moved, false
+}
+
 func (b *Balancer) triggerBalancer() {
 	b.Lock()
 	defer b.Unlock()
@@ -243,6 +311,9 @@ func (b *Balancer) tryAckRebalance(sign uint64) {
 	if sign == 0 || sign == b.lastAckedSignature {
 		return
 	}
+	if b.syncState != nil && !b.syncState.PendingEmpty() {
+		return
+	}
 
 	// Don't try to send ACK if node is shutting down
 	select {
@@ -270,8 +341,52 @@ func (b *Balancer) tryAckRebalance(sign uint64) {
 	b.lastAckedSignature = sign
 }
 
+// BalanceEagerly is the callback registered for node-join events. It runs the
+// full balance cycle AND the proactive primary-to-backup push for new nodes,
+// all under a single lock so tryAckRebalance fires only after the push.
+//
+// It must NOT be called on node-leave events: the write-lock held during the
+// network transfer in pushPrimaryToBackups would block concurrent reads for
+// the entire push duration, causing read timeouts. The routing table ensures
+// this by only triggering runCallbacks on rebalanceReasonNodeJoin.
 func (b *Balancer) BalanceEagerly() {
-	b.triggerBalancer()
+	b.Lock()
+	defer b.Unlock()
+
+	if err := b.rt.CheckBootstrap(); err != nil {
+		b.log.V(2).Printf("[WARN] Balancer awaits for bootstrapping")
+		return
+	}
+
+	sign := b.rt.Signature()
+	moved, aborted := b.primaryCopies(sign)
+	if aborted {
+		return
+	}
+
+	if b.config.ReplicaCount > config.MinimumReplicaCount {
+		if sign != b.lastProactiveSyncSignature {
+			primaryPushed, aborted := b.pushPrimaryToBackups(sign)
+			moved = moved || primaryPushed
+			if aborted {
+				return
+			}
+			// One push per epoch is sufficient. MoveWithTargetKind for BACKUP
+			// intentionally keeps data on the primary, so repeated calls would
+			// flood backup nodes with duplicate data.
+			b.lastProactiveSyncSignature = sign
+		}
+
+		backupMoved, aborted := b.backupCopies(sign)
+		moved = moved || backupMoved
+		if aborted {
+			return
+		}
+	}
+
+	if !moved {
+		b.tryAckRebalance(sign)
+	}
 }
 
 func (b *Balancer) balance() {

@@ -22,12 +22,14 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/cluster/routingtable"
 	"github.com/tochemey/olric/internal/environment"
+	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/internal/locker"
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/server"
@@ -46,19 +48,20 @@ type storageMap struct {
 type Service struct {
 	sync.RWMutex // protects dmaps map
 
-	log     *flog.Logger
-	config  *config.Config
-	client  *server.Client
-	server  *server.Server
-	rt      *routingtable.RoutingTable
-	primary *partitions.Partitions
-	backup  *partitions.Partitions
-	locker  *locker.Locker
-	dmaps   map[string]*DMap
-	storage *storageMap
-	wg      sync.WaitGroup
-	ctx     context.Context
-	cancel  context.CancelFunc
+	log       *flog.Logger
+	config    *config.Config
+	client    *server.Client
+	server    *server.Server
+	rt        *routingtable.RoutingTable
+	primary   *partitions.Partitions
+	backup    *partitions.Partitions
+	locker    *locker.Locker
+	dmaps     map[string]*DMap
+	storage   *storageMap
+	syncState *syncstate.State
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
 func registerErrors() {
@@ -91,6 +94,9 @@ func NewService(e *environment.Environment) (service.Service, error) {
 		dmaps:  make(map[string]*DMap),
 		ctx:    ctx,
 		cancel: cancel,
+	}
+	if v := e.Get("syncstate"); v != nil {
+		s.syncState = v.(*syncstate.State)
 	}
 	registerErrors()
 	s.RegisterHandlers()
@@ -142,7 +148,30 @@ func (s *Service) Start() error {
 	s.wg.Add(1)
 	go s.evictKeysAtBackground()
 
+	if s.syncState != nil && s.config.EnableClusterEventsChannel {
+		s.wg.Add(1)
+		go s.initialSyncCompletePublisher()
+	}
+
 	return nil
+}
+
+func (s *Service) initialSyncCompletePublisher() {
+	defer s.wg.Done()
+	select {
+	case <-s.syncState.Done():
+		if !s.syncState.IsDone() {
+			return
+		}
+		e := &events.InitialSyncCompleteEvent{
+			Kind:      events.KindInitialSyncCompleteEvent,
+			Source:    s.rt.This().String(),
+			Timestamp: time.Now().UnixNano(),
+		}
+		s.wg.Add(1)
+		go s.publishEvent(e)
+	case <-s.ctx.Done():
+	}
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {

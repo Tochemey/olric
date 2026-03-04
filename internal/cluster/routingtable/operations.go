@@ -120,6 +120,15 @@ func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.
 	// Bootstrapped by the coordinator.
 	r.markBootstrapped()
 
+	// Reset sync state for partitions we need to receive data for.
+	if r.syncState != nil {
+		pending := r.partitionsPendingReceive()
+		r.syncState.Reset(pending)
+		if len(pending) > 0 && r.config.InitialSyncEmptyPartitionTimeout > 0 {
+			r.syncState.StartEmptyPartitionTimeout(r.config.InitialSyncEmptyPartitionTimeout)
+		}
+	}
+
 	// Collect report
 	value, err := r.prepareLeftOverDataReport()
 	if err != nil {

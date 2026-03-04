@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/checkpoint"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/stats"
 )
@@ -36,6 +37,12 @@ import (
 // This function is intended for internal use. Please use testOlricCluster and its
 // methods to form a cluster in tests.
 func newTestWithConfig(t *testing.T, c *config.Config) *Olric {
+	// Reset checkpoint counters to prevent accumulation across tests. Tests that
+	// call New() without Start() (e.g. TestOlric_WaitForInitialSync_ReplicaCount1)
+	// leave required > passed, which would cause AllPassed() to return false for
+	// all subsequent tests that do call Start().
+	checkpoint.Reset()
+
 	port, err := testutil.GetFreePort()
 	require.NoError(t, err)
 
@@ -140,4 +147,38 @@ func TestClusterStartAndShutdown(t *testing.T) {
 	for _, member := range cluster.members {
 		require.Contains(t, st.ClusterMembers, stats.MemberID(member.rt.This().ID))
 	}
+}
+
+func TestOlric_WaitForInitialSync_ReplicaCount1(t *testing.T) {
+	c := testutil.NewConfig()
+	c.ReplicaCount = 1
+	db, err := New(c)
+	require.NoError(t, err)
+	require.NotNil(t, db)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = db.WaitForInitialSync(ctx)
+	require.NoError(t, err)
+}
+
+func TestOlric_InitialSyncComplete_ReplicaCount1(t *testing.T) {
+	c := testutil.NewConfig()
+	c.ReplicaCount = 1
+	db, err := New(c)
+	require.NoError(t, err)
+	require.NotNil(t, db)
+
+	ch := db.InitialSyncComplete()
+	select {
+	case <-ch:
+		// Channel closed immediately for ReplicaCount=1
+	default:
+		t.Fatal("InitialSyncComplete should return closed channel for ReplicaCount=1")
+	}
+}
+
+func TestOlric_EnableProactiveSyncOnJoin_Default(t *testing.T) {
+	c := config.New("local")
+	require.False(t, c.EnableProactiveSyncOnJoin)
 }

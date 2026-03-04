@@ -676,3 +676,225 @@ func scanIntegrationTestCommon(t *testing.T, embedded bool, keyFunc func(i int) 
 
 	return []map[string]struct{}{passOne, passTwo}
 }
+
+// productionLikeConfig returns a config that mimics production: ReplicaCount=2,
+// proactive sync enabled, faster balancer for tests. Uses fewer partitions
+// to speed up sync in integration tests.
+func productionLikeConfig(t *testing.T) *config.Config {
+	c := config.New(config.MemberlistEnvLocal)
+	c.PartitionCount = 31 // Fewer partitions for faster sync in tests
+	c.ReplicaCount = 2
+	c.WriteQuorum = 1
+	c.ReadQuorum = 1
+	c.ReadRepair = true
+	c.EnableProactiveSyncOnJoin = true
+	c.TriggerBalancerInterval = 50 * time.Millisecond
+	c.LogOutput = io.Discard
+	c.Client.DisableRedisLogging = true
+	require.NoError(t, c.Sanitize())
+	require.NoError(t, c.Validate())
+	return c
+}
+
+// TestIntegration_ProactiveSync_RollingRestart simulates a Kubernetes rolling restart:
+// 3 nodes with data, 2 nodes are terminated, 2 new nodes join. The surviving node
+// pushes data to the new nodes via proactive sync. Verifies cache remains populated.
+func TestIntegration_ProactiveSync_RollingRestart(t *testing.T) {
+	cluster := newTestCluster(t)
+
+	db1 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+	db2 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+	db3 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+
+	t.Log("Wait for cluster to stabilize")
+	<-time.After(time.Second)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db1.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	dm, err := c.NewDMap("cache")
+	require.NoError(t, err)
+
+	keyCount := 5000
+	t.Logf("Insert %d keys across 3 nodes", keyCount)
+	for i := range keyCount {
+		err = dm.Put(ctx, fmt.Sprintf("key-%d", i), fmt.Sprintf("value-%d", i))
+		require.NoError(t, err)
+	}
+
+	t.Log("Verify all keys accessible before restart")
+	for i := range keyCount {
+		entry, err := dm.Get(ctx, fmt.Sprintf("key-%d", i))
+		require.NoError(t, err)
+		val, _ := entry.String()
+		require.Equal(t, fmt.Sprintf("value-%d", i), val)
+	}
+
+	t.Log("Simulate rolling restart: terminate 2 of 3 nodes")
+	require.NoError(t, db2.Shutdown(context.Background()))
+	require.NoError(t, db3.Shutdown(context.Background()))
+
+	t.Log("Wait for NodeLeave propagation")
+	<-time.After(2 * time.Second)
+
+	t.Log("Add 2 new nodes (replacement pods)")
+	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
+	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
+
+	t.Log("Wait for proactive sync: surviving node pushes data to new nodes")
+	<-time.After(30 * time.Second)
+
+	t.Log("Verify keys accessible via cluster client (use survivor as entry - routes to all)")
+	c2, err := NewClusterClient([]string{db1.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c2.Close(ctx))
+	}()
+	dm2, err := c2.NewDMap("cache")
+	require.NoError(t, err)
+
+	accessible := 0
+	for i := range keyCount {
+		entry, err := dm2.Get(ctx, fmt.Sprintf("key-%d", i))
+		if err != nil {
+			continue
+		}
+		val, _ := entry.String()
+		if val == fmt.Sprintf("value-%d", i) {
+			accessible++
+		}
+	}
+
+	require.GreaterOrEqual(t, accessible, keyCount*45/100,
+		"At least 45%% of keys should be accessible after rolling restart via proactive sync; got %d/%d",
+		accessible, keyCount)
+
+	t.Logf("Proactive sync succeeded: %d/%d keys accessible via cluster", accessible, keyCount)
+}
+
+// TestIntegration_ProactiveSync_WaitForInitialSync verifies that WaitForInitialSync
+// blocks until a newly joined node has received its replica data. Simulates a Pod
+// waiting for readiness before reporting to Kubernetes.
+func TestIntegration_ProactiveSync_WaitForInitialSync(t *testing.T) {
+	cluster := newTestCluster(t)
+
+	db1 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
+
+	t.Log("Wait for cluster to stabilize")
+	<-time.After(time.Second)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db1.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	dm, err := c.NewDMap("cache")
+	require.NoError(t, err)
+
+	keyCount := 1000
+	t.Logf("Insert %d keys on existing nodes", keyCount)
+	for i := range keyCount {
+		err = dm.Put(ctx, fmt.Sprintf("key-%d", i), fmt.Sprintf("value-%d", i))
+		require.NoError(t, err)
+	}
+
+	t.Log("Add 3rd node - it should receive data via proactive sync")
+	db3 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+
+	t.Log("WaitForInitialSync blocks until replica data is received (Kubernetes readiness)")
+	syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = db3.WaitForInitialSync(syncCtx)
+	require.NoError(t, err, "WaitForInitialSync should complete within timeout")
+
+	t.Log("Verify new node can read keys via cluster client")
+	c2, err := NewClusterClient([]string{db3.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c2.Close(ctx))
+	}()
+	dm2, err := c2.NewDMap("cache")
+	require.NoError(t, err)
+
+	readCount := 0
+	for i := range keyCount {
+		entry, err := dm2.Get(ctx, fmt.Sprintf("key-%d", i))
+		if err != nil {
+			continue
+		}
+		val, _ := entry.String()
+		if val == fmt.Sprintf("value-%d", i) {
+			readCount++
+		}
+	}
+
+	require.GreaterOrEqual(t, readCount, keyCount*90/100,
+		"New node should have received most keys via proactive sync; got %d/%d", readCount, keyCount)
+}
+
+// TestIntegration_Production_ReplicaRedundancyAfterRestart verifies that with
+// ReplicaCount=2 and proactive sync, a single surviving node can restore redundancy
+// to a rejoining node without any read traffic (no read-repair needed).
+func TestIntegration_Production_ReplicaRedundancyAfterRestart(t *testing.T) {
+	cluster := newTestCluster(t)
+
+	db1 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+	db2 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+
+	t.Log("Wait for cluster to stabilize")
+	<-time.After(time.Second)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db1.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	dm, err := c.NewDMap("cache")
+	require.NoError(t, err)
+
+	keyCount := 2000
+	t.Logf("Insert %d keys (never read - simulates cold cache)", keyCount)
+	for i := range keyCount {
+		err = dm.Put(ctx, fmt.Sprintf("cold-key-%d", i), fmt.Sprintf("cold-val-%d", i))
+		require.NoError(t, err)
+	}
+
+	t.Log("Terminate node 2")
+	require.NoError(t, db2.Shutdown(context.Background()))
+	<-time.After(2 * time.Second)
+
+	t.Log("Add replacement node")
+	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
+
+	t.Log("Wait for proactive sync (no reads = no read-repair; sync is push-based)")
+	<-time.After(30 * time.Second)
+
+	t.Log("Read keys via cluster client (use survivor as entry - routes to all)")
+	c2, err := NewClusterClient([]string{db1.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c2.Close(ctx))
+	}()
+	dm2, err := c2.NewDMap("cache")
+	require.NoError(t, err)
+
+	found := 0
+	for i := range keyCount {
+		_, err := dm2.Get(ctx, fmt.Sprintf("cold-key-%d", i))
+		if err == nil {
+			found++
+		}
+	}
+
+	require.GreaterOrEqual(t, found, keyCount*80/100,
+		"Cold keys (never read) should be on new node via proactive sync; got %d/%d", found, keyCount)
+}

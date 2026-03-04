@@ -132,6 +132,65 @@ func (f *fragment) Move(part *partitions.Partition, name string, owners []discov
 	return i.Drop(index)
 }
 
+func (f *fragment) MoveWithTargetKind(part *partitions.Partition, name string, owners []discovery.Member, targetKind partitions.Kind) error {
+	f.Lock()
+	defer f.Unlock()
+
+	i := f.storage.TransferIterator()
+	if !i.Next() {
+		return nil
+	}
+
+	payload, index, err := i.Export()
+	if err != nil {
+		return err
+	}
+	fp := &fragmentPack{
+		PartID:  part.ID(),
+		Kind:    targetKind,
+		Name:    strings.TrimPrefix(name, "dmap."),
+		Payload: payload,
+	}
+	value, err := msgpack.Marshal(fp)
+	if err != nil {
+		return err
+	}
+
+	for _, owner := range owners {
+		if f.service.config.EnableClusterEventsChannel {
+			e := &events.FragmentMigrationEvent{
+				Kind:          events.KindFragmentMigrationEvent,
+				Source:        f.service.rt.This().String(),
+				Target:        owner.String(),
+				DataStructure: "dmap",
+				PartitionID:   part.ID(),
+				Identifier:    fp.Name,
+				Length:        len(value),
+				IsBackup:      targetKind == partitions.BACKUP,
+				Timestamp:     time.Now().UnixNano(),
+			}
+			f.service.wg.Add(1)
+			go f.service.publishEvent(e)
+		}
+
+		cmd := protocol.NewMoveFragment(value).Command(f.service.ctx)
+		rc := f.service.client.Get(owner.String())
+		err = rc.Process(f.service.ctx, cmd)
+		if err != nil {
+			return err
+		}
+		if err := cmd.Err(); err != nil {
+			return err
+		}
+	}
+
+	// When pushing to backups (replication), keep data on primary. Only drop when moving ownership.
+	if targetKind != partitions.BACKUP {
+		return i.Drop(index)
+	}
+	return nil
+}
+
 func (dm *DMap) newFragment() (*fragment, error) {
 	c := storage.NewConfig(dm.config.engine.Config)
 	engine, err := dm.engine.Fork(c)

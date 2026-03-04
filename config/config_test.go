@@ -1,6 +1,6 @@
 /*
  * Copyright 2018-2024 Burak Sezer
- * Copyright 2025 Arsene Tochemey Gandote
+ * Copyright 2025-2026 Arsene Tochemey Gandote
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kapetan-io/tackle/autotls"
 	"github.com/stretchr/testify/require"
@@ -45,4 +46,49 @@ func TestConfig_Initialize(t *testing.T) {
 		require.NoError(t, c.Sanitize())
 		require.NoError(t, c.Validate())
 	})
+}
+
+func TestNewMemberlistConfig_UnknownEnv(t *testing.T) {
+	_, err := NewMemberlistConfig("invalid")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown env")
+}
+
+func TestProactiveSyncOnJoin_ApplyToMemberlist(t *testing.T) {
+	c := New("lan")
+	c.EnableProactiveSyncOnJoin = true
+	require.NoError(t, c.Sanitize())
+
+	require.Equal(t, 200*time.Millisecond, c.MemberlistConfig.ProbeInterval)
+	require.Equal(t, 100*time.Millisecond, c.MemberlistConfig.ProbeTimeout)
+	require.Equal(t, 3, c.MemberlistConfig.SuspicionMult)
+	require.Equal(t, 100*time.Millisecond, c.MemberlistConfig.GossipInterval)
+	require.Equal(t, 30*time.Second, c.MemberlistConfig.GossipToTheDeadTime)
+}
+
+func TestProactiveSyncOnJoin_NotAppliedWhenDisabled(t *testing.T) {
+	c := New("lan")
+	require.False(t, c.EnableProactiveSyncOnJoin)
+
+	cEnabled := New("lan")
+	cEnabled.EnableProactiveSyncOnJoin = true
+	require.NoError(t, cEnabled.Sanitize())
+
+	require.Equal(t, 200*time.Millisecond, cEnabled.MemberlistConfig.ProbeInterval)
+	require.NotEqual(t, c.MemberlistConfig.ProbeInterval, cEnabled.MemberlistConfig.ProbeInterval,
+		"disabled and enabled should produce different ProbeInterval")
+}
+
+func TestProactiveSyncOnJoin_CustomValues(t *testing.T) {
+	c := New("lan")
+	c.EnableProactiveSyncOnJoin = true
+	c.ProactiveSyncOnJoin = &ProactiveSyncOnJoinConfig{
+		ProbeInterval: 500 * time.Millisecond,
+		ProbeTimeout:  250 * time.Millisecond,
+	}
+	require.NoError(t, c.Sanitize())
+
+	require.Equal(t, 500*time.Millisecond, c.MemberlistConfig.ProbeInterval)
+	require.Equal(t, 250*time.Millisecond, c.MemberlistConfig.ProbeTimeout)
+	require.Equal(t, 3, c.MemberlistConfig.SuspicionMult) // default
 }

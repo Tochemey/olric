@@ -117,3 +117,16 @@ func TestClusterEvents_RebalanceCompleteEvent(t *testing.T) {
 	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"rebalance-complete-event","epoch":42}`
 	require.Equal(t, expected, result)
 }
+
+func TestClusterEvents_InitialSyncCompleteEvent(t *testing.T) {
+	var timestamp int64 = 585199808000 // Author's birthdate!
+	n := InitialSyncCompleteEvent{
+		Kind:      KindInitialSyncCompleteEvent,
+		Source:    "127.0.0.1:3423",
+		Timestamp: timestamp,
+	}
+	result, err := n.Encode()
+	require.NoError(t, err)
+	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"initial-sync-complete-event"}`
+	require.Equal(t, expected, result)
+}

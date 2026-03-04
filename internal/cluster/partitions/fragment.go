@@ -26,6 +26,9 @@ type Fragment interface {
 	Name() string
 	Stats() storage.Stats
 	Move(*Partition, string, []discovery.Member) error
+	// MoveWithTargetKind is like Move but uses targetKind in the payload so the
+	// receiver merges into the correct partition (e.g. BACKUP when pushing from primary).
+	MoveWithTargetKind(*Partition, string, []discovery.Member, Kind) error
 	Compaction() (bool, error)
 	Destroy() error
 	Close() error
