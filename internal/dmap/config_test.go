@@ -28,7 +28,7 @@ import (
 )
 
 func TestDMap_Config(t *testing.T) {
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 	// Config for all new DMaps
 	c.DMaps.NumEvictionWorkers = 1
 	c.DMaps.TTLDuration = 100 * time.Second

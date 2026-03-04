@@ -43,6 +43,10 @@ func (tf *testFragment) Move(_ *Partition, _ string, _ []discovery.Member) error
 	return nil
 }
 
+func (tf *testFragment) MoveWithTargetKind(_ *Partition, _ string, _ []discovery.Member, _ Kind) error {
+	return nil
+}
+
 func (tf *testFragment) Close() error {
 	return nil
 }

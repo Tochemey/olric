@@ -29,13 +29,14 @@ import (
 )
 
 const (
-	ClusterEventsChannel       = "cluster.events"
-	KindNodeJoinEvent          = "node-join-event"
-	KindNodeLeftEvent          = "node-left-event"
-	KindFragmentMigrationEvent = "fragment-migration-event"
-	KindFragmentReceivedEvent  = "fragment-received-event"
-	KindRebalanceStartEvent    = "rebalance-start-event"
-	KindRebalanceCompleteEvent = "rebalance-complete-event"
+	ClusterEventsChannel            = "cluster.events"
+	KindNodeJoinEvent               = "node-join-event"
+	KindNodeLeftEvent               = "node-left-event"
+	KindFragmentMigrationEvent      = "fragment-migration-event"
+	KindFragmentReceivedEvent       = "fragment-received-event"
+	KindRebalanceStartEvent         = "rebalance-start-event"
+	KindRebalanceCompleteEvent      = "rebalance-complete-event"
+	KindInitialSyncCompleteEvent    = "initial-sync-complete-event"
 )
 
 type Event interface {
@@ -290,6 +291,31 @@ func (r *RebalanceCompleteEvent) Encode() (string, error) {
 		switch field {
 		case "Epoch":
 			value = rv.FieldByName(field).Uint()
+		case "Timestamp":
+			value = rv.FieldByName(field).Int()
+		case "Source", "Kind":
+			value = rv.FieldByName(field).String()
+		default:
+			return nil, fmt.Errorf("invalid field: %s", field)
+		}
+		return value, nil
+	})
+}
+
+// InitialSyncCompleteEvent is emitted when the local node has received initial
+// data for all partitions it is responsible for. Use this to signal Kubernetes
+// that the Pod is ready (e.g. in a readiness probe).
+type InitialSyncCompleteEvent struct {
+	Kind      string `json:"kind"`
+	Source    string `json:"source"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func (i *InitialSyncCompleteEvent) Encode() (string, error) {
+	fields := []string{"Timestamp", "Source", "Kind"}
+	return encodeEvent(i, fields, func(rv reflect.Value, field string) (any, error) {
+		var value any
+		switch field {
 		case "Timestamp":
 			value = rv.FieldByName(field).Int()
 		case "Source", "Kind":

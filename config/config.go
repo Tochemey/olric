@@ -241,6 +241,18 @@ type Config struct {
 	// Switch to control read-repair algorithm which helps to reduce entropy.
 	ReadRepair bool
 
+	// EnableProactiveSyncOnJoin when true, existing primary owners immediately push
+	// their data to new backup owners when a node joins, instead of waiting for the
+	// periodic balancer tick. This restores replica redundancy faster after rolling
+	// restarts or scale-out events. It has no effect when ReplicaCount is 1.
+	// Default is false.
+	EnableProactiveSyncOnJoin bool
+
+	// InitialSyncEmptyPartitionTimeout is the max time to wait for partitions that
+	// have no data on the source. Such partitions never receive MoveFragment, so
+	// WaitForInitialSync would block forever without this. Default 15s.
+	InitialSyncEmptyPartitionTimeout time.Duration
+
 	// Default value is SyncReplicationMode.
 	ReplicationMode int
 
@@ -464,6 +476,10 @@ func (c *Config) Sanitize() error {
 		c.MemberlistConfig = m
 	}
 
+	if c.InitialSyncEmptyPartitionTimeout == 0 {
+		c.InitialSyncEmptyPartitionTimeout = 15 * time.Second
+	}
+
 	if c.BootstrapTimeout == 0 {
 		c.BootstrapTimeout = DefaultBootstrapTimeout
 	}
@@ -535,15 +551,16 @@ func (c *Config) Sanitize() error {
 // very conservative and errs on the side of caution.
 func New(env string) *Config {
 	c := &Config{
-		BindAddr:          "0.0.0.0",
-		BindPort:          DefaultPort,
-		ReadRepair:        false,
-		ReplicaCount:      1,
-		WriteQuorum:       1,
-		ReadQuorum:        1,
-		MemberCountQuorum: 1,
-		Peers:             []string{},
-		DMaps:             &DMaps{},
+		BindAddr:                  "0.0.0.0",
+		BindPort:                  DefaultPort,
+		ReadRepair:                false,
+		ReplicaCount:              1,
+		WriteQuorum:               1,
+		ReadQuorum:                1,
+		MemberCountQuorum:         1,
+		Peers:                     []string{},
+		DMaps:                     &DMaps{},
+		EnableProactiveSyncOnJoin: false,
 	}
 
 	m, err := NewMemberlistConfig(env)

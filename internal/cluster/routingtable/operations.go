@@ -94,7 +94,7 @@ func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.
 		protocol.WriteError(conn, err)
 		return
 	}
-	r.log.V(3).Printf("[INFO] Routing table has been pushed by %s", coordinator)
+	r.log.V(5).Printf("[DEBUG] Routing table has been pushed by %s", coordinator)
 
 	if err = r.verifyRoutingTable(updateRoutingCmd.CoordinatorID, table); err != nil {
 		protocol.WriteError(conn, err)
@@ -119,6 +119,15 @@ func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.
 
 	// Bootstrapped by the coordinator.
 	r.markBootstrapped()
+
+	// Reset sync state for partitions we need to receive data for.
+	if r.syncState != nil {
+		pending := r.partitionsPendingReceive()
+		r.syncState.Reset(pending)
+		if len(pending) > 0 && r.config.InitialSyncEmptyPartitionTimeout > 0 {
+			r.syncState.StartEmptyPartitionTimeout(r.config.InitialSyncEmptyPartitionTimeout)
+		}
+	}
 
 	// Collect report
 	value, err := r.prepareLeftOverDataReport()

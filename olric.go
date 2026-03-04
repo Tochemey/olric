@@ -57,6 +57,7 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/pubsub"
 	"github.com/tochemey/olric/internal/server"
+	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/pkg/flog"
 )
 
@@ -168,10 +169,16 @@ func prepareConfig(c *config.Config) (*config.Config, error) {
 }
 
 func initializeServices(db *Olric) error {
+	if db.config.ReplicaCount > config.MinimumReplicaCount {
+		db.env.Set("syncstate", syncstate.New())
+	}
 	db.rt = routingtable.New(db.env)
 	db.env.Set("routingtable", db.rt)
 
 	db.balancer = balancer.New(db.env)
+	if db.config.EnableProactiveSyncOnJoin {
+		db.rt.AddCallback(db.balancer.BalanceEagerly)
+	}
 
 	// Add Services
 	dt, err := pubsub.NewService(db.env)
@@ -308,6 +315,40 @@ func convertClusterError(err error) error {
 	default:
 		return err
 	}
+}
+
+// WaitForInitialSync blocks until the initial replica sync is complete for this node,
+// or the context is cancelled. Returns nil when sync is complete.
+// Use this before marking the Pod ready in Kubernetes (e.g. in a readiness probe).
+// When ReplicaCount is 1, returns immediately.
+func (db *Olric) WaitForInitialSync(ctx context.Context) error {
+	ss := db.env.Get("syncstate")
+	if ss == nil {
+		return nil
+	}
+	state := ss.(*syncstate.State)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-state.Done():
+			if state.IsDone() {
+				return nil
+			}
+		}
+	}
+}
+
+// InitialSyncComplete returns a channel that closes when initial sync is complete.
+// When ReplicaCount is 1, returns a closed channel.
+func (db *Olric) InitialSyncComplete() <-chan struct{} {
+	ss := db.env.Get("syncstate")
+	if ss == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+	return ss.(*syncstate.State).Done()
 }
 
 // isOperable controls bootstrapping status and cluster quorum to prevent split-brain syndrome.

@@ -59,6 +59,34 @@ func (r *RoutingTable) prepareLeftOverDataReport() ([]byte, error) {
 	return msgpack.Marshal(res)
 }
 
+// partitionsPendingReceive returns partition IDs where this node is an owner
+// but has no data (needs to receive from others).
+func (r *RoutingTable) partitionsPendingReceive() []uint64 {
+	var out []uint64
+	for partID := uint64(0); partID < r.config.PartitionCount; partID++ {
+		primaryPart := r.primary.PartitionByID(partID)
+		backupPart := r.backup.PartitionByID(partID)
+
+		// Primary: we need receive if we're the owner and have no data
+		if owners := primaryPart.Owners(); len(owners) > 0 {
+			last := owners[len(owners)-1]
+			if last.CompareByID(r.this) && primaryPart.Length() == 0 {
+				out = append(out, partID)
+				continue
+			}
+		}
+
+		// Backup: we need receive if we're in owner list and have no data
+		for _, m := range backupPart.Owners() {
+			if m.CompareByID(r.this) && backupPart.Length() == 0 {
+				out = append(out, partID)
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (r *RoutingTable) updateRoutingTableOnMember(data []byte, member discovery.Member) (*leftOverDataReport, error) {
 	cmd := protocol.NewUpdateRouting(data, r.this.ID).Command(r.ctx)
 	rc := r.client.Get(member.String())

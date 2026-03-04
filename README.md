@@ -12,7 +12,7 @@ Please use the original repo for any bugs or related questions.
 * Support only embedded mode even though the majority of the code to run client/server is still there except the runner code.
 * Remove Client/Server mode
 * Renamed module name
-* Upgrade go version to 1.24.0
+* Upgrade go version to 1.25.0
 * Refactor the readme to suit the behavior of this fork
 * Fix some go routines leaks bugs
 * Meta-information can be passed to the cluster member
@@ -81,6 +81,7 @@ It's good at distributed caching and publish/subscribe messaging.
 * [HowTo](#howto)
 * [Cluster Events](#cluster-events)
 * [Configuration](#configuration)
+    * [Orchestrated Deployments (Rolling Restarts, Auto-Scaling)](#orchestrated-deployments-rolling-restarts-auto-scaling)
     * [Network Configuration](#network-configuration)
     * [Service discovery](#service-discovery)
     * [Timeouts](#timeouts)
@@ -142,9 +143,10 @@ Olric can send push cluster events to `cluster.events` channel. Available cluste
 * node-join-event
 * node-left-event
 * fragment-migration-event
-* fragment-received-even
+* fragment-received-event
 * rebalance-start-event
 * rebalance-complete-event
+* initial-sync-complete-event
 
 Rebalance lifecycle events track routing table epochs. A rebalance starts when the coordinator publishes a new routing
 table (for example after a node join/leave), and completes only after all live members report that no further fragment
@@ -155,6 +157,10 @@ If you want to receive these events, set `true` to `EnableClusterEventsChannel` 
 channel.
 The default is `false`.
 
+The `initial-sync-complete-event` is emitted when the local node has received initial data for all partitions it is
+responsible for. Use `WaitForInitialSync` or `InitialSyncComplete` to block until sync is done—useful for readiness
+checks in orchestrated deployments (e.g. Kubernetes, Nomad, ECS) during rolling restarts.
+
 See [events/cluster_events.go](events/cluster_events.go) file to get more information about events.
 
 ## Configuration
@@ -162,7 +168,7 @@ See [events/cluster_events.go](events/cluster_events.go) file to get more inform
 ```go
 import "github.com/tochemey/olric/config"
 ...
-c := config.New("local")
+c := config.New(config.MemberlistEnvLocal)
 ```
 
 The `New` function takes a parameter called `env`. It denotes the network environment and consumed
@@ -171,6 +177,75 @@ Default configuration is good enough for distributed caching scenario. In order 
 please take a look at [this](https://godoc.org/github.com/tochemey/olric/config).
 
 See [Sample Code](#samples) section for an introduction.
+
+### Orchestrated Deployments (Rolling Restarts, Auto-Scaling)
+
+When nodes join or leave frequently—rolling restarts, auto-scaling, or any orchestration (Kubernetes, Nomad, Docker Swarm, ECS)—the cache can end up with cold partitions: keys that are rarely read never get repaired via read-repair. New nodes may serve traffic before they have received replica data.
+
+**Use case:** Enable proactive sync so existing owners push data to new nodes as soon as they join. This restores replica redundancy without relying on read traffic.
+
+**Configuration:** Set `EnableProactiveSyncOnJoin` to true. Memberlist timing (ProbeInterval, ProbeTimeout, etc.) is then tuned for faster join/departure detection regardless of the environment (local/lan/wan):
+
+```go
+c := config.New(config.MemberlistEnvLAN)
+c.ReplicaCount = 2
+c.EnableProactiveSyncOnJoin = true
+c.EnableClusterEventsChannel = true
+// Optional: customize memberlist timing
+c.ProactiveSyncOnJoin = &config.ProactiveSyncOnJoinConfig{
+    ProbeInterval: 200 * time.Millisecond,
+    ProbeTimeout:  100 * time.Millisecond,
+}
+```
+
+**Stable node identity:** In environments where IPs change on restart (containers, cloud instances), use a stable identifier instead of the default host:port:
+
+* Set `MemberlistConfig.Name` to a stable name (e.g. instance ID, task name, or in Kubernetes: Pod DNS like `$(POD_NAME).$(SERVICE_NAME).$(NAMESPACE).svc.cluster.local` or StatefulSet ordinal like `app-0`).
+* Set `AdvertiseAddr` to the current IP (or leave empty for auto-detect).
+* Use `MemberMeta` for labels: `{"instance":"app-0","node":"worker-1"}`.
+
+**Readiness:** Block until initial replica sync is complete before marking the node ready to receive traffic:
+
+```go
+db, _ := olric.New(c)
+db.Start(context.Background())
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+if err := db.WaitForInitialSync(ctx); err != nil {
+    log.Fatal(err)
+}
+// Now safe to mark node ready (e.g. pass orchestrator readiness probe)
+```
+
+**Safe defaults when deployment is unknown:** When you are unsure about the deployment environment, use conservative settings that work across most scenarios:
+
+```go
+// Safe defaults when deployment environment is unknown
+c := config.New(config.MemberlistEnvLAN) // or MemberlistEnvWAN for cross-datacenter
+c.ReplicaCount = 2
+c.EnableProactiveSyncOnJoin = true
+c.ReadRepair = true
+
+// Use hostname as stable identity when IP may change (containers, cloud)
+if name, err := os.Hostname(); err == nil && name != "" {
+    c.MemberlistConfig.Name = name
+}
+
+db, err := olric.New(c)
+if err != nil {
+    log.Fatal(err)
+}
+go db.Start(context.Background())
+
+// Block until sync complete or timeout—don't serve traffic before ready
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+if err := db.WaitForInitialSync(ctx); err != nil {
+    log.Printf("initial sync incomplete after timeout: %v (proceeding anyway)", err)
+    // Optional: exit or retry instead of proceeding
+}
+// Now safe to mark node ready
+```
 
 ### Network Configuration
 
@@ -545,7 +620,7 @@ func main() {
 
 	// config.New returns a new config.Config with sane defaults. Available values for env:
 	// local, lan, wan
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 
 	// Callback function. It's called when this node is ready to accept connections.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -638,7 +713,7 @@ func main() {
 
 	// config.New returns a new config.Config with sane defaults. Available values for env:
 	// local, lan, wan
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 
 	// Callback function. It's called when this node is ready to accept connections.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -729,7 +804,7 @@ func main() {
 
 	// config.New returns a new config.Config with sane defaults. Available values for env:
 	// local, lan, wan
-	c := config.New("local")
+	c := config.New(config.MemberlistEnvLocal)
 
 	// Callback function. It's called when this node is ready to accept connections.
 	ctx, cancel := context.WithCancel(context.Background())

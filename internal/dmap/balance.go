@@ -145,6 +145,10 @@ func (s *Service) moveFragmentCommandHandler(conn redcon.Conn, cmd redcon.Comman
 		return
 	}
 
+	if s.syncState != nil {
+		s.syncState.MarkReceived(fp.PartID)
+	}
+
 	if s.config.EnableClusterEventsChannel {
 		e := &events.FragmentReceivedEvent{
 			Kind:          events.KindFragmentReceivedEvent,

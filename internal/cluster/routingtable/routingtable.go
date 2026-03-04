@@ -37,6 +37,7 @@ import (
 	"github.com/tochemey/olric/pkg/flog"
 
 	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/syncstate"
 )
 
 // ErrClusterQuorum means that the cluster could not reach a healthy numbers of members to operate.
@@ -83,6 +84,8 @@ type RoutingTable struct {
 
 	rebalanceMtx   sync.Mutex
 	rebalanceState rebalanceState
+
+	syncState *syncstate.State
 }
 
 func registerErrors() {
@@ -120,6 +123,9 @@ func New(e *environment.Environment) *RoutingTable {
 		joined:     make(chan struct{}),
 		ctx:        ctx,
 		cancel:     cancel,
+	}
+	if v := e.Get("syncstate"); v != nil {
+		rt.syncState = v.(*syncstate.State)
 	}
 	registerErrors()
 	rt.RegisterHandlers()
@@ -258,6 +264,13 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 	}
 
 	r.fillRoutingTable()
+	if r.syncState != nil {
+		pending := r.partitionsPendingReceive()
+		r.syncState.Reset(pending)
+		if len(pending) > 0 && r.config.InitialSyncEmptyPartitionTimeout > 0 {
+			r.syncState.StartEmptyPartitionTimeout(r.config.InitialSyncEmptyPartitionTimeout)
+		}
+	}
 	previousSignature := r.Signature()
 	data, signature, err := r.buildRoutingTablePayload()
 	if err != nil {
@@ -273,6 +286,14 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 	r.processLeftOverDataReports(reports)
 	if signature != previousSignature {
 		r.startRebalanceEpoch(signature, reason, node)
+		// Proactive sync pushes primary data to newly joined backup owners.
+		// It must NOT run on node-leave events: when nodes die the fragment
+		// write-lock held during the network transfer would block concurrent
+		// reads for the entire push duration, causing read timeouts.
+		if r.config.EnableProactiveSyncOnJoin && reason == rebalanceReasonNodeJoin {
+			r.wg.Add(1)
+			go r.runCallbacks()
+		}
 	}
 }
 
