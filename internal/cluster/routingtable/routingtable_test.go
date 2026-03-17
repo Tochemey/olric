@@ -793,7 +793,7 @@ func startConcurrentCluster(nodeCount int) ([]*RoutingTable, []*server.Server, e
 	configs := make([]*config.Config, nodeCount)
 	memberPorts := make([]int, nodeCount)
 
-	for i := 0; i < nodeCount; i++ {
+	for i := range nodeCount {
 		c := testutil.NewConfig()
 		c.JoinRetryInterval = 50 * time.Millisecond
 		c.MaxJoinAttempts = 100
@@ -808,9 +808,9 @@ func startConcurrentCluster(nodeCount int) ([]*RoutingTable, []*server.Server, e
 		memberPorts[i] = memberPort
 	}
 
-	for i := 0; i < nodeCount; i++ {
+	for i := range nodeCount {
 		var peers []string
-		for j := 0; j < nodeCount; j++ {
+		for j := range nodeCount {
 			if i == j {
 				continue
 			}
@@ -824,8 +824,7 @@ func startConcurrentCluster(nodeCount int) ([]*RoutingTable, []*server.Server, e
 	var mtx sync.Mutex
 	var g errgroup.Group
 
-	for i := 0; i < nodeCount; i++ {
-		i := i
+	for i := range nodeCount {
 		g.Go(func() error {
 			srv := testutil.NewServer(configs[i])
 			rt := newRoutingTableForTest(configs[i], srv)
@@ -971,4 +970,233 @@ func membersLen(rt *RoutingTable) int {
 	rt.Members().RLock()
 	defer rt.Members().RUnlock()
 	return rt.Members().Length()
+}
+
+func TestRoutingTable_RejoinLoop_NotStartedWithDefaultQuorum(t *testing.T) {
+	// MemberCountQuorum defaults to 1 (MinimumMemberCountQuorum).
+	// The rejoin loop must not be started in this case — it is only
+	// meaningful when quorum > 1 because a single-node cluster is always
+	// trivially above quorum.
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	c := testutil.NewConfig()
+	// MemberCountQuorum == 1 (default) → loop guard fires, no goroutine started.
+	rt, err := cluster.addNode(c)
+	if err != nil {
+		t.Fatalf("Expected nil. Got: %v", err)
+	}
+
+	if !rt.IsBootstrapped() {
+		t.Fatalf("Node should be bootstrapped")
+	}
+	if rt.CheckMemberCountQuorum() != nil {
+		t.Fatalf("Expected quorum to be satisfied with one member and quorum=1")
+	}
+}
+
+func TestRoutingTable_RejoinLoop_QuorumSatisfiedNoSpuriousRejoin(t *testing.T) {
+	// With MemberCountQuorum=2 and two live nodes the quorum check in
+	// rejoinLoop returns nil, so Join is never called. Verify the cluster
+	// remains stable after the loop has had time to tick several times.
+	//
+	// Both nodes must be started concurrently because Start() blocks until
+	// MemberCountQuorum is satisfied; with quorum=2, neither node can
+	// complete Start() on its own.
+	newCfg := func(memberPort int, peers []string) *config.Config {
+		c := testutil.NewConfig()
+		c.MemberCountQuorum = 2
+		c.RejoinInterval = 50 * time.Millisecond
+		c.MemberlistConfig.BindPort = memberPort
+		c.Peers = peers
+		return c
+	}
+
+	port1, err := testutil.GetFreePort()
+	if err != nil {
+		t.Fatalf("GetFreePort: %v", err)
+	}
+	port2, err := testutil.GetFreePort()
+	if err != nil {
+		t.Fatalf("GetFreePort: %v", err)
+	}
+
+	c1 := newCfg(port1, []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port2))})
+	c2 := newCfg(port2, []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(port1))})
+
+	srv1 := testutil.NewServer(c1)
+	srv2 := testutil.NewServer(c2)
+	rt1 := newRoutingTableForTest(c1, srv1)
+	rt2 := newRoutingTableForTest(c2, srv2)
+
+	if err := rt1.Join(); err != nil {
+		t.Fatalf("rt1.Join: %v", err)
+	}
+	if err := rt2.Join(); err != nil {
+		t.Fatalf("rt2.Join: %v", err)
+	}
+
+	var g errgroup.Group
+	g.Go(func() error { return rt1.Start() })
+	g.Go(func() error { return rt2.Start() })
+	if err := g.Wait(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	defer func() {
+		_ = rt1.Shutdown(context.Background())
+		_ = rt2.Shutdown(context.Background())
+		_ = srv1.Shutdown(context.Background())
+		_ = srv2.Shutdown(context.Background())
+	}()
+
+	// Let the rejoin loop tick several times with quorum satisfied.
+	time.Sleep(300 * time.Millisecond)
+
+	if rt1.CheckMemberCountQuorum() != nil {
+		t.Fatalf("rt1: quorum should be satisfied with two members")
+	}
+	if rt2.CheckMemberCountQuorum() != nil {
+		t.Fatalf("rt2: quorum should be satisfied with two members")
+	}
+	if rt1.NumMembers() != 2 {
+		t.Fatalf("Expected 2 members on rt1. Got: %d", rt1.NumMembers())
+	}
+	if rt2.NumMembers() != 2 {
+		t.Fatalf("Expected 2 members on rt2. Got: %d", rt2.NumMembers())
+	}
+}
+
+func TestRoutingTable_RejoinLoop_RejoinsAfterPartitionHeals(t *testing.T) {
+	// Scenario:
+	//   1. node1 and node2 form a 2-node cluster (MemberCountQuorum=2).
+	//   2. node1 is shut down — node2 drops below quorum.
+	//   3. node1 is restarted at the SAME memberlist address with no peers
+	//      configured, so it cannot contact node2 on its own.
+	//   4. node2's rejoin loop calls discovery.Join() → memberlist.Join(peers)
+	//      where peers includes node1's address. This reconnects the two nodes.
+	//   5. node2 regains quorum.
+
+	// Pre-allocate fixed ports for node1 so node2 can reference them in
+	// its peers list before node1 is restarted.
+	node1MemberPort, err := testutil.GetFreePort()
+	if err != nil {
+		t.Fatalf("GetFreePort: %v", err)
+	}
+	node1TCPPort, err := testutil.GetFreePort()
+	if err != nil {
+		t.Fatalf("GetFreePort: %v", err)
+	}
+
+	// Build node1 config with the pre-allocated ports.
+	c1 := testutil.NewConfig()
+	c1.MemberCountQuorum = 2
+	c1.RejoinInterval = 100 * time.Millisecond
+	c1.MemberlistConfig.BindPort = node1MemberPort
+	c1.BindAddr = "127.0.0.1"
+	c1.BindPort = node1TCPPort
+	c1.MemberlistConfig.Name = net.JoinHostPort("127.0.0.1", strconv.Itoa(node1TCPPort))
+
+	// node2 knows about node1's memberlist address.
+	c2 := testutil.NewConfig()
+	c2.MemberCountQuorum = 2
+	c2.RejoinInterval = 100 * time.Millisecond
+	c2.Peers = []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(node1MemberPort))}
+
+	srv1 := testutil.NewServer(c1)
+	srv2 := testutil.NewServer(c2)
+	rt1 := newRoutingTableForTest(c1, srv1)
+	rt2 := newRoutingTableForTest(c2, srv2)
+
+	if err := rt1.Join(); err != nil {
+		t.Fatalf("rt1.Join: %v", err)
+	}
+	if err := rt2.Join(); err != nil {
+		t.Fatalf("rt2.Join: %v", err)
+	}
+
+	// Both nodes must start concurrently: Start() blocks until quorum is met.
+	var startG errgroup.Group
+	startG.Go(func() error { return rt1.Start() })
+	startG.Go(func() error { return rt2.Start() })
+	if err := startG.Wait(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait for both nodes to see each other.
+	if err := waitForClusterMembers([]*RoutingTable{rt1, rt2}, 2, 5*time.Second); err != nil {
+		t.Fatalf("Cluster did not stabilise with 2 members: %v", err)
+	}
+
+	// Partition: shut down node1.
+	if err := rt1.Shutdown(context.Background()); err != nil {
+		t.Fatalf("rt1.Shutdown: %v", err)
+	}
+	if err := srv1.Shutdown(context.Background()); err != nil {
+		t.Fatalf("srv1.Shutdown: %v", err)
+	}
+
+	// Verify node2 is now below quorum.
+	if err := waitForCondition(5*time.Second, func() bool {
+		return rt2.CheckMemberCountQuorum() != nil
+	}); err != nil {
+		t.Fatalf("node2 should be below quorum after node1 left: %v", err)
+	}
+
+	// Allow OS to release the ports before rebinding.
+	time.Sleep(200 * time.Millisecond)
+
+	// Heal: restart node1 at the SAME addresses, but with NO peers — it
+	// cannot reach node2 on its own. Only node2's rejoin loop can reconnect
+	// the two nodes.
+	c1New := testutil.NewConfig()
+	c1New.MemberCountQuorum = 2
+	c1New.RejoinInterval = 100 * time.Millisecond
+	c1New.MemberlistConfig.BindPort = node1MemberPort
+	c1New.BindAddr = "127.0.0.1"
+	c1New.BindPort = node1TCPPort
+	c1New.MemberlistConfig.Name = c1.MemberlistConfig.Name
+	c1New.Peers = []string{} // intentionally empty — rejoin loop on node2 must do the work
+
+	srv1New := testutil.NewServer(c1New)
+	rt1New := newRoutingTableForTest(c1New, srv1New)
+	if err := rt1New.Join(); err != nil {
+		t.Fatalf("rt1New.Join: %v", err)
+	}
+
+	// Start rt1New in a goroutine: its Start() blocks until MemberCountQuorum=2
+	// is met. node2's rejoin loop will call discovery.Join() which contacts
+	// node1New's memberlist address; gossip then syncs the two nodes, allowing
+	// both Start() calls to proceed.
+	startErrCh := make(chan error, 1)
+	go func() { startErrCh <- rt1New.Start() }()
+
+	defer func() {
+		_ = rt1New.Shutdown(context.Background())
+		_ = srv1New.Shutdown(context.Background())
+		_ = rt2.Shutdown(context.Background())
+		_ = srv2.Shutdown(context.Background())
+	}()
+
+	// node2's rejoin loop calls discovery.Join() → memberlist.Join([node1_addr]).
+	// node1New is listening; gossip syncs; node2 fires NodeJoin; quorum restored.
+	if err := waitForCondition(10*time.Second, func() bool {
+		return rt2.CheckMemberCountQuorum() == nil
+	}); err != nil {
+		t.Fatalf("node2 did not regain quorum after node1 restarted: %v", err)
+	}
+
+	// Ensure rt1New.Start() also completed without error.
+	select {
+	case err := <-startErrCh:
+		if err != nil {
+			t.Fatalf("rt1New.Start: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("rt1New.Start did not complete in time")
+	}
+
+	if rt2.NumMembers() < 2 {
+		t.Fatalf("Expected at least 2 members on node2 after rejoin. Got: %d", rt2.NumMembers())
+	}
 }

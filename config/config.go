@@ -121,6 +121,10 @@ const (
 	// before forming a standalone cluster.
 	DefaultMaxJoinAttempts = 10
 
+	// DefaultRejoinInterval is the time between attempts to rejoin the cluster
+	// when a node detects it is in a minority partition.
+	DefaultRejoinInterval = 5 * time.Second
+
 	// MinimumMemberCountQuorum denotes minimum required count of members to form
 	// a cluster.
 	MinimumMemberCountQuorum = 1
@@ -297,6 +301,11 @@ type Config struct {
 	// MaxJoinAttempts denotes the maximum number of attempts to join an existing
 	// cluster before forming a new one.
 	MaxJoinAttempts int
+
+	// RejoinInterval is the time between attempts to rejoin the cluster when
+	// the node detects it is in a minority partition. It is only effective when
+	// MemberCountQuorum is greater than MinimumMemberCountQuorum. Default is 5s.
+	RejoinInterval time.Duration
 
 	// Callback function. Olric calls this after
 	// the server is ready to accept new connections.
@@ -488,6 +497,9 @@ func (c *Config) Sanitize() error {
 	}
 	if c.MaxJoinAttempts == 0 {
 		c.MaxJoinAttempts = DefaultMaxJoinAttempts
+	}
+	if c.RejoinInterval == 0 {
+		c.RejoinInterval = DefaultRejoinInterval
 	}
 	if c.LeaveTimeout == 0 {
 		c.LeaveTimeout = DefaultLeaveTimeout
