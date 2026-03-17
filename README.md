@@ -3,9 +3,46 @@
 [![build](https://img.shields.io/github/actions/workflow/status/Tochemey/olric/ci.yml?branch=main)](https://github.com/Tochemey/olric/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/Tochemey/olric/branch/main/graph/badge.svg?token=C5Z0JE8SNj)](https://codecov.io/gh/Tochemey/olric)
 
-
-This is a forked version of the [main repository](https://github.com/olric-data/olric) with few bug fixes, refactoring, and it is only handles the embedded version.
+This is a forked version of the [main repository](https://github.com/olric-data/olric) with few bug fixes, refactoring, and it only handles the embedded version.
 Please use the original repo for any bugs or related questions.
+
+## Table of Contents
+
+* [Modifications from the original library](#modifications-from-the-original-library)
+* [Overview](#overview)
+* [At a Glance](#at-a-glance)
+* [Possible Use Cases](#possible-use-cases)
+* [Features](#features)
+* [HowTo](#howto)
+* [Cluster Events](#cluster-events)
+* [Configuration](#configuration)
+    * [Orchestrated Deployments (Rolling Restarts, Auto-Scaling)](#orchestrated-deployments-rolling-restarts-auto-scaling)
+    * [Network Configuration](#network-configuration)
+    * [Service Discovery](#service-discovery)
+    * [Timeouts](#timeouts)
+* [Architecture](#architecture)
+    * [Architectural Overview](#architectural-overview)
+    * [Consistency and Replication Model](#consistency-and-replication-model)
+        * [Last-write-wins conflict resolution](#last-write-wins-conflict-resolution)
+        * [PACELC Theorem](#pacelc-theorem)
+        * [Read-Repair on DMaps](#read-repair-on-dmaps)
+        * [Quorum-based Replica Control](#quorum-based-replica-control)
+        * [Simple Split-Brain Protection](#simple-split-brain-protection)
+    * [Eviction](#eviction)
+        * [Expire with TTL](#expire-with-ttl)
+        * [Expire with MaxIdleDuration](#expire-with-maxidleduration)
+        * [Expire with LRU](#expire-with-lru)
+    * [Lock Implementation](#lock-implementation)
+    * [Storage Engine](#storage-engine)
+* [Samples](#samples)
+    * [Embedded-member scenario](#embedded-member-scenario)
+        * [Distributed Map](#distributed-map)
+        * [Publish-Subscribe](#publish-subscribe)
+        * [SCAN on DMaps](#scan-on-dmaps)
+    * [Client-server scenario](#client-server-scenario)
+        * [Publish-Subscribe](#publish-subscribe-1)
+* [Contributions](#contributions)
+* [License](#license)
 
 ## Modifications from the original library
 
@@ -23,34 +60,25 @@ Please use the original repo for any bugs or related questions.
 * Improved error handling: rebalance coordinator mismatch errors are now properly handled with `ErrNotCoordinator` sentinel error to reduce log noise during coordinator transitions
 * Improved shutdown logging: eviction worker now silently handles context cancellation during graceful shutdown, preventing misleading warning messages
 * `EnableProactiveSyncOnJoin`: new opt-in flag (default `false`) that makes existing primary owners push data to new backup owners immediately when a node joins, instead of waiting for the next balancer tick. The flag is single-purpose — it does not alter memberlist probe or gossip timing. Tune `MemberlistConfig` directly if faster failure detection is needed.
+* **Partition healing via rejoin loop**: the original library calls `memberlist.Join()` once at startup. If a network partition isolates a node long enough for memberlist to evict the unreachable peers from its membership view, that node becomes a permanent solo cluster — even after the network recovers, it has no addresses to reconnect to and stays isolated indefinitely. The only recovery path in the original code is an operator-triggered restart.
 
-## Overview 
+  To address this, a background rejoin loop is introduced. When `MemberCountQuorum` is greater than `1`, a goroutine runs for the lifetime of the node and periodically calls `discovery.Join()` whenever the live member count drops below quorum. `discovery.Join()` re-queries the configured service discovery backend (or static peers) on every attempt, so it always has fresh addresses regardless of how stale the local memberlist view has become. Once the network heals and gossip re-syncs, the existing LWW fragment-merge and ownership-report mechanisms reconcile any diverged state — no additional reconciliation logic is required. When quorum is already satisfied the loop performs a single atomic read per tick and returns immediately, making it a no-op in normal operation. The interval is controlled by `RejoinInterval` (default `5s`). The goroutine is not started when `MemberCountQuorum` is `1` (the default), so there is no overhead for single-node or cache-only deployments.
 
-Olric is a distributed, in-memory key/value store and cache. It's designed from the ground up to be distributed, and it
-can be
-used both as an embedded Go library and as a language-independent service.
+## Overview
+
+Olric is a distributed, in-memory key/value store and cache. It's designed from the ground up to be distributed, and it can be used as an embedded Go library.
 
 With Olric, you can instantly create a fast, scalable, shared pool of RAM across a cluster of computers.
 
-Olric is implemented in [Go](https://go.dev/) and uses
-the [Redis serialization protocol](https://redis.io/topics/protocol). So Olric has client implementations in all major
-programming
-languages.
+Olric is implemented in [Go](https://go.dev/) and uses the [Redis serialization protocol](https://redis.io/topics/protocol). So Olric has client implementations in all major programming languages.
 
-Olric is highly scalable and available. Distributed applications can use it for distributed caching, clustering and
-publish-subscribe messaging.
+Olric is highly scalable and available. Distributed applications can use it for distributed caching, clustering and publish-subscribe messaging.
 
-It is designed to scale out to hundreds of members and thousands of clients. When you add new members, they
-automatically
-discover the cluster and linearly increase the memory capacity. Olric offers simple scalability, partitioning (
-sharding),
-and re-balancing out-of-the-box. It does not require any extra coordination processes. With Olric, when you start
-another
-process to add more capacity, data and backups are automatically and evenly balanced.
+It is designed to scale out to hundreds of members and thousands of clients. When you add new members, they automatically discover the cluster and linearly increase the memory capacity. Olric offers simple scalability, partitioning (sharding), and re-balancing out-of-the-box. It does not require any extra coordination processes. With Olric, when you start another process to add more capacity, data and backups are automatically and evenly balanced.
 
-See [Samples](#samples) sections to get started!
+See [Samples](#samples) section to get started!
 
-## At a glance
+## At a Glance
 
 * Designed to share some transient, approximate, fast-changing data between servers,
 * Uses Redis serialization protocol,
@@ -65,44 +93,13 @@ See [Samples](#samples) sections to get started!
 * Supports atomic operations,
 * Provides an iterator on distributed maps,
 * Provides a plugin interface for service discovery daemons,
-* Provides a locking primitive which inspired
-  by [SETNX of Redis](https://redis.io/commands/setnx#design-pattern-locking-with-codesetnxcode),
+* Provides a locking primitive which inspired by [SETNX of Redis](https://redis.io/commands/setnx#design-pattern-locking-with-codesetnxcode),
 
 ## Possible Use Cases
 
-Olric is an eventually consistent, unordered key/value data store. It supports various eviction mechanisms for
-distributed caching implementations. Olric
-also provides publish-subscribe messaging, data replication, failure detection and simple anti-entropy services.
+Olric is an eventually consistent, unordered key/value data store. It supports various eviction mechanisms for distributed caching implementations. Olric also provides publish-subscribe messaging, data replication, failure detection and simple anti-entropy services.
 
 It's good at distributed caching and publish/subscribe messaging.
-
-## Table of Contents
-
-* [Features](#features)
-* [HowTo](#howto)
-* [Cluster Events](#cluster-events)
-* [Configuration](#configuration)
-    * [Orchestrated Deployments (Rolling Restarts, Auto-Scaling)](#orchestrated-deployments-rolling-restarts-auto-scaling)
-    * [Network Configuration](#network-configuration)
-    * [Service discovery](#service-discovery)
-    * [Timeouts](#timeouts)
-* [Architecture](#architecture)
-    * [Overview](#overview)
-    * [Consistency and Replication Model](#consistency-and-replication-model)
-        * [Last-write-wins conflict resolution](#last-write-wins-conflict-resolution)
-        * [PACELC Theorem](#pacelc-theorem)
-        * [Read-Repair on DMaps](#read-repair-on-dmaps)
-        * [Quorum-based Replica Control](#quorum-based-replica-control)
-        * [Simple Split-Brain Protection](#simple-split-brain-protection)
-    * [Eviction](#eviction)
-        * [Expire with TTL](#expire-with-ttl)
-        * [Expire with MaxIdleDuration](#expire-with-maxidleduration)
-        * [Expire with LRU](#expire-with-lru)
-    * [Lock Implementation](#lock-implementation)
-    * [Storage Engine](#storage-engine)
-* [Samples](#samples)
-* [Contributions](#contributions)
-* [License](#license)
 
 ## Features
 
@@ -120,20 +117,18 @@ It's good at distributed caching and publish/subscribe messaging.
 * Highly available,
 * Horizontally scalable,
 * Provides best-effort consistency guarantees without being a complete CP (indeed PA/EC) solution,
-* Distributes load fairly among cluster members with
-  a [consistent hash function](./internal/consistent),
+* Distributes load fairly among cluster members with a [consistent hash function](./internal/consistent),
 * Supports replication by default (with sync and async options),
 * Quorum-based voting for replica control,
 * Thread-safe by default,
 * Provides an iterator on distributed maps,
 * Provides a plugin interface for service discovery daemons and cloud providers,
-* Provides a locking primitive which inspired
-  by [SETNX of Redis](https://redis.io/commands/setnx#design-pattern-locking-with-codesetnxcode),
+* Provides a locking primitive which inspired by [SETNX of Redis](https://redis.io/commands/setnx#design-pattern-locking-with-codesetnxcode),
 * Provides a drop-in replacement of Redis' Publish-Subscribe messaging feature.
 
 See [Architecture](#architecture) section to see details.
 
-#### HowTo.
+## HowTo
 
 See [Samples](#samples) section to learn how to embed Olric into your existing Golang application.
 
@@ -149,20 +144,13 @@ Olric can send push cluster events to `cluster.events` channel. Available cluste
 * rebalance-complete-event
 * initial-sync-complete-event
 
-Rebalance lifecycle events track routing table epochs. A rebalance starts when the coordinator publishes a new routing
-table (for example after a node join/leave), and completes only after all live members report that no further fragment
-moves are required for that routing table epoch. Use `rebalance-start-event` and `rebalance-complete-event` to track
-completion; `node-left-event` remains a membership signal, not a rebalance barrier.
+Rebalance lifecycle events track routing table epochs. A rebalance starts when the coordinator publishes a new routing table (for example after a node join/leave), and completes only after all live members report that no further fragment moves are required for that routing table epoch. Use `rebalance-start-event` and `rebalance-complete-event` to track completion; `node-left-event` remains a membership signal, not a rebalance barrier.
 
-If you want to receive these events, set `true` to `EnableClusterEventsChannel` and subscribe to `cluster.events`
-channel.
-The default is `false`.
+If you want to receive these events, set `true` to `EnableClusterEventsChannel` and subscribe to `cluster.events` channel. The default is `false`.
 
-The `initial-sync-complete-event` is emitted when the local node has received initial data for all partitions it is
-responsible for. Use `WaitForInitialSync` or `InitialSyncComplete` to block until sync is done—useful for readiness
-checks in orchestrated deployments (e.g. Kubernetes, Nomad, ECS) during rolling restarts.
+The `initial-sync-complete-event` is emitted when the local node has received initial data for all partitions it is responsible for. Use `WaitForInitialSync` or `InitialSyncComplete` to block until sync is done — useful for readiness checks in orchestrated deployments (e.g. Kubernetes, Nomad, ECS) during rolling restarts.
 
-See [events/cluster_events.go](events/cluster_events.go) file to get more information about events.
+See [events/cluster_events.go](events/cluster_events.go) for more information about events.
 
 ## Configuration
 
@@ -172,16 +160,13 @@ import "github.com/tochemey/olric/config"
 c := config.New(config.MemberlistEnvLocal)
 ```
 
-The `New` function takes a parameter called `env`. It denotes the network environment and consumed
-by [hashicorp/memberlist](https://github.com/hashicorp/memberlist).
-Default configuration is good enough for distributed caching scenario. In order to see all configuration parameters,
-please take a look at [this](https://godoc.org/github.com/tochemey/olric/config).
+The `New` function takes a parameter called `env`. It denotes the network environment and is consumed by [hashicorp/memberlist](https://github.com/hashicorp/memberlist). Default configuration is good enough for a distributed caching scenario. To see all configuration parameters, please take a look at [pkg.go.dev/github.com/tochemey/olric/config](https://pkg.go.dev/github.com/tochemey/olric/config).
 
-See [Sample Code](#samples) section for an introduction.
+See [Samples](#samples) section for an introduction.
 
 ### Orchestrated Deployments (Rolling Restarts, Auto-Scaling)
 
-When nodes join or leave frequently—rolling restarts, auto-scaling, or any orchestration (Kubernetes, Nomad, Docker Swarm, ECS)—the cache can end up with cold partitions: keys that are rarely read never get repaired via read-repair. New nodes may serve traffic before they have received replica data.
+When nodes join or leave frequently — rolling restarts, auto-scaling, or any orchestration (Kubernetes, Nomad, Docker Swarm, ECS) — the cache can end up with cold partitions: keys that are rarely read never get repaired via read-repair. New nodes may serve traffic before they have received replica data.
 
 **Use case:** Enable proactive sync so existing owners push data to new nodes as soon as they join. This restores replica redundancy without relying on read traffic.
 
@@ -218,7 +203,7 @@ if err := db.WaitForInitialSync(ctx); err != nil {
 // Now safe to mark node ready (e.g. pass orchestrator readiness probe)
 ```
 
-**Safe defaults when deployment is unknown:** When you are unsure about the deployment environment, use conservative settings that work across most scenarios:
+**Safe defaults when deployment is unknown:**
 
 ```go
 // Safe defaults when deployment environment is unknown
@@ -256,25 +241,16 @@ if err := db.WaitForInitialSync(ctx); err != nil {
 
 ### Network Configuration
 
-In an Olric instance, there are two different TCP servers. One for Olric, and the other one is for memberlist.
-`BindAddr` is very
-critical to deploy a healthy Olric node. There are different scenarios:
+In an Olric instance, there are two different TCP servers — one for Olric, and one for memberlist. `BindAddr` is critical to deploy a healthy Olric node. There are different scenarios:
 
-* You can freely set a domain name or IP address as `BindAddr` for both Olric and memberlist. Olric will resolve and use
-  it to bind.
-* You can freely set `localhost`, `127.0.0.1` or `::1` as `BindAddr` in development environment for both Olric and
-  memberlist.
-* You can freely set `0.0.0.0` as `BindAddr` for both Olric and memberlist. Olric will pick an IP address, if there is
-  any.
+* You can freely set a domain name or IP address as `BindAddr` for both Olric and memberlist. Olric will resolve and use it to bind.
+* You can freely set `localhost`, `127.0.0.1` or `::1` as `BindAddr` in development environment for both Olric and memberlist.
+* You can freely set `0.0.0.0` as `BindAddr` for both Olric and memberlist. Olric will pick an IP address, if there is any.
 * If you don't set `BindAddr`, hostname will be used, and it will be resolved to get a valid IP address.
-* You can set a network interface by using `Config.Interface` and `Config.MemberlistInterface` fields. Olric will find
-  an appropriate IP address for the given interfaces, if there is any.
-* You can set both `BindAddr` and interface parameters. In this case Olric will ensure that `BindAddr` is available on
-  the given interface.
+* You can set a network interface by using `Config.Interface` and `Config.MemberlistInterface` fields. Olric will find an appropriate IP address for the given interfaces, if there is any.
+* You can set both `BindAddr` and interface parameters. In this case Olric will ensure that `BindAddr` is available on the given interface.
 
-You should know that Olric needs a single and stable IP address to function properly. If you don't know the IP address
-of the host at the deployment time,
-you can set `BindAddr` as `0.0.0.0`. Olric will very likely to find an IP address for you.
+You should know that Olric needs a single and stable IP address to function properly. If you don't know the IP address of the host at deployment time, you can set `BindAddr` as `0.0.0.0`. Olric will very likely find an IP address for you.
 
 ### Service Discovery
 
@@ -282,7 +258,7 @@ Olric provides a service discovery interface which can be used to implement plug
 
 ### Timeouts
 
-Olric nodes supports setting `KeepAlivePeriod` on TCP sockets.
+Olric nodes support setting `KeepAlivePeriod` on TCP sockets.
 
 **Server-side:**
 
@@ -294,173 +270,107 @@ KeepAlivePeriod denotes whether the operating system should send keep-alive mess
 
 ##### config.DialTimeout
 
-Timeout for TCP dial. The timeout includes name resolution, if required. When using TCP, and the host in the address
-parameter resolves to multiple IP addresses, the timeout is spread over each consecutive dial, such that each is
-given an appropriate fraction of the time to connect.
+Timeout for TCP dial. The timeout includes name resolution, if required. When using TCP, and the host in the address parameter resolves to multiple IP addresses, the timeout is spread over each consecutive dial, such that each is given an appropriate fraction of the time to connect.
 
 ##### config.ReadTimeout
 
-Timeout for socket reads. If reached, commands will fail with a timeout instead of blocking. Use value -1 for no
-timeout and 0 for default. The default is config.DefaultReadTimeout
+Timeout for socket reads. If reached, commands will fail with a timeout instead of blocking. Use value -1 for no timeout and 0 for default. The default is `config.DefaultReadTimeout`.
 
 ##### config.WriteTimeout
 
-Timeout for socket writes. If reached, commands will fail with a timeout instead of blocking. The default is
-config.DefaultWriteTimeout
+Timeout for socket writes. If reached, commands will fail with a timeout instead of blocking. The default is `config.DefaultWriteTimeout`.
 
 ## Architecture
 
-### Overview
+### Architectural Overview
 
 Olric uses:
 
 * [hashicorp/memberlist](https://github.com/hashicorp/memberlist) for cluster membership and failure detection,
 * [Redis Serialization Protocol](https://github.com/tidwall/redcon) for communication.
 
-Olric distributes data among partitions. Every partition is being owned by a cluster member and may have one or more
-backups for redundancy.
-When you read or write a DMap entry, you transparently talk to the partition owner. Each request hits the most
-up-to-date version of a
-particular data entry in a stable cluster.
+Olric distributes data among partitions. Every partition is owned by a cluster member and may have one or more backups for redundancy. When you read or write a DMap entry, you transparently talk to the partition owner. Each request hits the most up-to-date version of a particular data entry in a stable cluster.
 
-In order to find the partition which the key belongs to, Olric hashes the key and mod it with the number of partitions:
+In order to find the partition which the key belongs to, Olric hashes the key and mods it with the number of partitions:
 
 ```
 partID = MOD(hash result, partition count)
 ```
 
-The partitions are being distributed among cluster members by using a consistent hashing algorithm. In order to get
-details, please see [consistent](./internal/consistent).
+The partitions are distributed among cluster members using a consistent hashing algorithm. For details, see [consistent](./internal/consistent).
 
-When a new cluster is created, one of the instances is elected as the **cluster coordinator**. It manages the partition
-table:
+When a new cluster is created, one of the instances is elected as the **cluster coordinator**. It manages the partition table:
 
 * When a node joins or leaves, it distributes the partitions and their backups among the members again,
 * Removes empty previous owners from the partition owners list,
 * Pushes the new partition table to all the members,
 * Pushes the partition table to the cluster periodically.
 
-Members propagate their birthdate(POSIX time in nanoseconds) to the cluster. The coordinator is the oldest member in the
-cluster.
-If the coordinator leaves the cluster, the second oldest member gets elected as the coordinator.
+Members propagate their birthdate (POSIX time in nanoseconds) to the cluster. The coordinator is the oldest member in the cluster. If the coordinator leaves the cluster, the second oldest member gets elected as the coordinator.
 
 Olric has a component called **rebalancer** which is responsible for keeping underlying data structures consistent:
 
 * Works on every node,
-* When a node joins or leaves, the cluster coordinator pushes the new partition table. Then, the **rebalancer** runs
-  immediately and moves the partitions and backups to their new hosts,
+* When a node joins or leaves, the cluster coordinator pushes the new partition table. Then, the **rebalancer** runs immediately and moves the partitions and backups to their new hosts,
 * Merges fragmented partitions.
 
-Partitions have a concept called **owners list**. When a node joins or leaves the cluster, a new primary owner may be
-assigned by the
-coordinator. At any time, a partition may have one or more partition owners. If a partition has two or more owners, this
-is called **fragmented partition**.
-The last added owner is called **primary owner**. Write operation is only done by the primary owner. The previous owners
-are only used for read and delete.
+Partitions have a concept called **owners list**. When a node joins or leaves the cluster, a new primary owner may be assigned by the coordinator. At any time, a partition may have one or more partition owners. If a partition has two or more owners, this is called a **fragmented partition**. The last added owner is called the **primary owner**. Write operations are only done by the primary owner. The previous owners are only used for read and delete.
 
-When you read a key, the primary owner tries to find the key on itself, first. Then, queries the previous owners and
-backups, respectively.
-The delete operation works the same way.
+When you read a key, the primary owner tries to find the key on itself first, then queries the previous owners and backups, respectively. The delete operation works the same way.
 
-The data(distributed map objects) in the fragmented partition is moved slowly to the primary owner by the **rebalancer**. Until the move is done,
-the data remains available on the previous owners. The DMap methods use this list to query data on the cluster.
+The data (distributed map objects) in the fragmented partition is moved slowly to the primary owner by the **rebalancer**. Until the move is done, the data remains available on the previous owners. The DMap methods use this list to query data on the cluster.
 
-*Please note that, 'multiple partition owners' is an undesirable situation and the **rebalancer** component is designed
-to fix that in a short time.*
+*Please note that 'multiple partition owners' is an undesirable situation and the **rebalancer** component is designed to fix that in a short time.*
 
 ### Consistency and Replication Model
 
-**Olric is an AP product** in the context of [CAP theorem](https://en.wikipedia.org/wiki/CAP_theorem), which employs the
-combination of primary-copy
-and [optimistic replication](https://en.wikipedia.org/wiki/Optimistic_replication) techniques. With optimistic
-replication, when the partition owner
-receives a write or delete operation for a key, applies it locally, and propagates it to the backup owners.
+**Olric is an AP product** in the context of [CAP theorem](https://en.wikipedia.org/wiki/CAP_theorem), which employs the combination of primary-copy and [optimistic replication](https://en.wikipedia.org/wiki/Optimistic_replication) techniques. With optimistic replication, when the partition owner receives a write or delete operation for a key, it applies it locally and propagates it to the backup owners.
 
-This technique enables Olric clusters to offer high throughput. However, due to temporary situations in the system, such
-as network
-failure, backup owners can miss some updates and diverge from the primary owner. If a partition owner crashes while
-there is an
-inconsistency between itself and the backups, strong consistency of the data can be lost.
+This technique enables Olric clusters to offer high throughput. However, due to temporary situations in the system such as network failure, backup owners can miss some updates and diverge from the primary owner. If a partition owner crashes while there is an inconsistency between itself and the backups, strong consistency of the data can be lost.
 
-Two types of backup replication are available: **sync** and **async**. Both types are still implementations of the
-optimistic replication
-model.
+Two types of backup replication are available: **sync** and **async**. Both types are still implementations of the optimistic replication model.
 
 * **sync**: Blocks until write/delete operation is applied by backup owners.
 * **async**: Just fire & forget.
 
 #### Last-write-wins conflict resolution
 
-Every time a piece of data is written to Olric, a timestamp is attached by the client. Then, when Olric has to deal with
-conflict data in the case
-of network partitioning, it simply chooses the data with the most recent timestamp. This called LWW conflict resolution
-policy.
+Every time a piece of data is written to Olric, a timestamp is attached by the client. Then, when Olric has to deal with conflict data in the case of network partitioning, it simply chooses the data with the most recent timestamp. This is called the LWW conflict resolution policy.
 
 #### PACELC Theorem
 
 From Wikipedia:
 
-> In theoretical computer science, the [PACELC theorem](https://en.wikipedia.org/wiki/PACELC_theorem) is an extension to
-> the [CAP theorem](https://en.wikipedia.org/wiki/CAP_theorem). It states that in case of network partitioning (P) in a
-> distributed computer system, one has to choose between availability (A) and consistency (C) (as per the CAP theorem),
-> but else (E), even when the system is
-> running normally in the absence of partitions, one has to choose between latency (L) and consistency (C).
+> In theoretical computer science, the [PACELC theorem](https://en.wikipedia.org/wiki/PACELC_theorem) is an extension to the [CAP theorem](https://en.wikipedia.org/wiki/CAP_theorem). It states that in case of network partitioning (P) in a distributed computer system, one has to choose between availability (A) and consistency (C) (as per the CAP theorem), but else (E), even when the system is running normally in the absence of partitions, one has to choose between latency (L) and consistency (C).
 
-In the context of PACELC theorem, Olric is a **PA/EC** product. It means that Olric is considered to be **consistent**
-data store if the network is stable.
-Because the key space is divided between partitions and every partition is controlled by its primary owner. All
-operations on DMaps are redirected to the
-partition owner.
+In the context of PACELC theorem, Olric is a **PA/EC** product. It means that Olric is considered to be a **consistent** data store if the network is stable, because the key space is divided between partitions and every partition is controlled by its primary owner. All operations on DMaps are redirected to the partition owner.
 
-In the case of network partitioning, Olric chooses **availability** over consistency. So that you can still access some
-parts of the cluster when the network is unreliable,
-but the cluster may return inconsistent results.
+In the case of network partitioning, Olric chooses **availability** over consistency. So you can still access some parts of the cluster when the network is unreliable, but the cluster may return inconsistent results.
 
-Olric implements read-repair and quorum based voting system to deal with inconsistencies in the DMaps.
+Olric implements read-repair and a quorum-based voting system to deal with inconsistencies in the DMaps.
 
 Readings on PACELC theorem:
 
 * [Please stop calling databases CP or AP](https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html)
-* [Problems with CAP, and Yahoo’s little known NoSQL system](https://dbmsmusings.blogspot.com/2010/04/problems-with-cap-and-yahoos-little.html)
+* [Problems with CAP, and Yahoo's little known NoSQL system](https://dbmsmusings.blogspot.com/2010/04/problems-with-cap-and-yahoos-little.html)
 * [A Critique of the CAP Theorem](https://arxiv.org/abs/1509.05393)
 * [Hazelcast and the Mythical PA/EC System](https://dbmsmusings.blogspot.com/2017/10/hazelcast-and-mythical-paec-system.html)
 
 #### Read-Repair on DMaps
 
-Read repair is a feature that allows for inconsistent data to be fixed at query time. Olric tracks every write operation
-with a timestamp value and assumes
-that the latest write operation is the valid one. When you want to access a key/value pair, the partition owner
-retrieves all available copies for that pair
-and compares the timestamp values. The latest one is the winner. If there is some outdated version of the requested
-pair, the primary owner propagates the latest
-version of the pair.
+Read repair is a feature that allows for inconsistent data to be fixed at query time. Olric tracks every write operation with a timestamp value and assumes that the latest write operation is the valid one. When you want to access a key/value pair, the partition owner retrieves all available copies for that pair and compares the timestamp values. The latest one is the winner. If there is some outdated version of the requested pair, the primary owner propagates the latest version of the pair.
 
-Read-repair is disabled by default for the sake of performance. If you have a use case that requires a more strict
-consistency control than a distributed caching
-scenario, you can enable read-repair via the configuration.
+Read-repair is disabled by default for the sake of performance. If you have a use case that requires more strict consistency control than a distributed caching scenario, you can enable read-repair via the configuration.
 
-#### Quorum-based replica control
+#### Quorum-based Replica Control
 
-Olric implements Read/Write quorum to keep the data in a consistent state. When you start a write operation on the
-cluster and write quorum (W) is 2,
-the partition owner tries to write the given key/value pair on its own data storage and on the replica nodes. If the
-number of successful write operations
-is below W, the primary owner returns `ErrWriteQuorum`. The read flow is the same: if you have R=2 and the owner only
-access one of the replicas,
-it returns `ErrReadQuorum`.
+Olric implements Read/Write quorum to keep the data in a consistent state. When you start a write operation on the cluster and write quorum (W) is 2, the partition owner tries to write the given key/value pair on its own data storage and on the replica nodes. If the number of successful write operations is below W, the primary owner returns `ErrWriteQuorum`. The read flow is the same: if you have R=2 and the owner only accesses one of the replicas, it returns `ErrReadQuorum`.
 
 #### Simple Split-Brain Protection
 
-Olric implements a technique called *majority quorum* to manage split-brain conditions. If a network partitioning
-occurs, and some members
-lost the connection to rest of the cluster, they immediately stops functioning and return an error to incoming requests.
-This behaviour is controlled by
-`MemberCountQuorum` parameter. It's default `1`.
+Olric implements a technique called *majority quorum* to manage split-brain conditions. If a network partitioning occurs and some members lose connection to the rest of the cluster, they immediately stop functioning and return an error to incoming requests. This behaviour is controlled by the `MemberCountQuorum` parameter. Its default is `1`.
 
-When the network healed, the stopped nodes joins again the cluster and fragmented partitions is merged by their primary
-owners in accordance with
-*LWW policy*. Olric also implements an *ownership report* mechanism to fix inconsistencies in partition distribution
-after a partitioning event.
+When the network heals, the stopped nodes rejoin the cluster and fragmented partitions are merged by their primary owners in accordance with the *LWW policy*. Olric also implements an *ownership report* mechanism to fix inconsistencies in partition distribution after a partitioning event.
 
 ### Eviction
 
@@ -468,11 +378,9 @@ Olric supports different policies to evict keys from distributed maps.
 
 #### Expire with TTL
 
-Olric implements TTL eviction policy. It shares the same algorithm
-with [Redis](https://redis.io/commands/expire#appendix-redis-expires):
+Olric implements TTL eviction policy. It shares the same algorithm with [Redis](https://redis.io/commands/expire#appendix-redis-expires):
 
-> Periodically Redis tests a few keys at random among keys with an expire set. All the keys that are already expired are
-> deleted from the keyspace.
+> Periodically Redis tests a few keys at random among keys with an expire set. All the keys that are already expired are deleted from the keyspace.
 >
 > Specifically this is what Redis does 10 times per second:
 >
@@ -480,74 +388,45 @@ with [Redis](https://redis.io/commands/expire#appendix-redis-expires):
 > * Delete all the keys found expired.
 > * If more than 25% of keys were expired, start again from step 1.
 >
-> This is a trivial probabilistic algorithm, basically the assumption is that our sample is representative of the whole
-> key space, and we continue to expire until the percentage of keys that are likely to be expired is under 25%
+> This is a trivial probabilistic algorithm, basically the assumption is that our sample is representative of the whole key space, and we continue to expire until the percentage of keys that are likely to be expired is under 25%
 
-When a client tries to access a key, Olric returns `ErrKeyNotFound` if the key is found to be timed out. A background
-task evicts keys with the algorithm described above.
+When a client tries to access a key, Olric returns `ErrKeyNotFound` if the key is found to be timed out. A background task evicts keys with the algorithm described above.
 
 #### Expire with MaxIdleDuration
 
-Maximum time for each entry to stay idle in the DMap. It limits the lifetime of the entries relative to the time of the
-last read
-or write access performed on them. The entries whose idle period exceeds this limit are expired and evicted
-automatically.
-An entry is idle if no Get, Put, PutEx, Expire, PutIf, PutIfEx on it. Configuration of MaxIdleDuration feature varies by
-preferred deployment method.
+Maximum time for each entry to stay idle in the DMap. It limits the lifetime of the entries relative to the time of the last read or write access performed on them. The entries whose idle period exceeds this limit are expired and evicted automatically. An entry is idle if no Get, Put, PutEx, Expire, PutIf, or PutIfEx is called on it. Configuration of the MaxIdleDuration feature varies by preferred deployment method.
 
 #### Expire with LRU
 
-Olric implements LRU eviction method on DMaps. Approximated LRU algorithm is borrowed from Redis. The Redis authors
-proposes the following algorithm:
+Olric implements LRU eviction method on DMaps. The approximated LRU algorithm is borrowed from Redis. The Redis authors propose the following algorithm:
 
 > It is important to understand that the eviction process works like this:
 >
 > * A client runs a new command, resulting in more data added.
-> * Redis checks the memory usage, and if it is greater than the maxmemory limit , it evicts keys according to the
-    policy.
+> * Redis checks the memory usage, and if it is greater than the maxmemory limit, it evicts keys according to the policy.
 > * A new command is executed, and so forth.
 >
-> So we continuously cross the boundaries of the memory limit, by going over it, and then by evicting keys to return
-> back under the limits.
+> So we continuously cross the boundaries of the memory limit, by going over it, and then by evicting keys to return back under the limits.
 >
-> If a command results in a lot of memory being used (like a big set intersection stored into a new key) for some time
-> the memory
-> limit can be surpassed by a noticeable amount.
+> If a command results in a lot of memory being used (like a big set intersection stored into a new key) for some time the memory limit can be surpassed by a noticeable amount.
 >
 > **Approximated LRU algorithm**
 >
-> Redis LRU algorithm is not an exact implementation. This means that Redis is not able to pick the best candidate for
-> eviction,
-> that is, the access that was accessed the most in the past. Instead it will try to run an approximation of the LRU
-> algorithm,
-> by sampling a small number of keys, and evicting the one that is the best (with the oldest access time) among the
-> sampled keys.
+> Redis LRU algorithm is not an exact implementation. This means that Redis is not able to pick the best candidate for eviction, that is, the access that was accessed the most in the past. Instead it will try to run an approximation of the LRU algorithm, by sampling a small number of keys, and evicting the one that is the best (with the oldest access time) among the sampled keys.
 
-Olric tracks access time for every DMap instance. Then it picks and sorts some configurable amount of keys to select
-keys for eviction.
-Every node runs this algorithm independently. The access log is moved along with the partition when a network partition
-is occured.
+Olric tracks access time for every DMap instance. Then it picks and sorts some configurable amount of keys to select keys for eviction. Every node runs this algorithm independently. The access log is moved along with the partition when a network partition occurs.
 
 #### Configuration of eviction mechanisms
 
-For embedded-member deployment scenario, please take a look
-at [config#CacheConfig](https://godoc.org/github.com/tochemey/olric/config#CacheConfig)
-and [config#DMapCacheConfig](https://godoc.org/github.com/tochemey/olric/config#DMapCacheConfig) for the
-configuration.
+For the embedded-member deployment scenario, please take a look at [config.CacheConfig](https://pkg.go.dev/github.com/tochemey/olric/config#CacheConfig) and [config.DMapCacheConfig](https://pkg.go.dev/github.com/tochemey/olric/config#DMapCacheConfig) for the configuration.
 
 ### Lock Implementation
 
-The DMap implementation is already thread-safe to meet your thread safety requirements. When you want to have more
-control on the
-concurrency, you can use **LockWithTimeout** and **Lock** methods. Olric borrows the locking algorithm from Redis. Redis
-authors propose
-the following algorithm:
+The DMap implementation is already thread-safe to meet your thread safety requirements. When you want to have more control over concurrency, you can use **LockWithTimeout** and **Lock** methods. Olric borrows the locking algorithm from Redis. Redis authors propose the following algorithm:
 
-> The command <SET resource-name anystring NX EX max-lock-time> is a simple way to implement a locking system with
-> Redis.
+> The command `SET resource-name anystring NX EX max-lock-time` is a simple way to implement a locking system with Redis.
 >
-> A client can acquire the lock if the above command returns OK (or retry after some time if the command returns Nil),
-> and remove the lock just using DEL.
+> A client can acquire the lock if the above command returns OK (or retry after some time if the command returns Nil), and remove the lock just using DEL.
 >
 > The lock will be auto-released after the expire time is reached.
 >
@@ -555,46 +434,23 @@ the following algorithm:
 >
 > Instead of setting a fixed string, set a non-guessable large random string, called token.
 > Instead of releasing the lock with DEL, send a script that only removes the key if the value matches.
-> This avoids that a client will try to release the lock after the expire time deleting the key created by another
-> client that acquired the lock later.
+> This avoids that a client will try to release the lock after the expire time deleting the key created by another client that acquired the lock later.
 
-Equivalent of`SETNX` command in Olric is `PutIf(key, value, IfNotFound)`. Lock and LockWithTimeout commands are properly
-implements
-the algorithm which is proposed above.
+Equivalent of `SETNX` command in Olric is `PutIf(key, value, IfNotFound)`. Lock and LockWithTimeout commands properly implement the algorithm proposed above.
 
-You should know that this implementation is subject to the clustering algorithm. So there is no guarantee about
-reliability in the case of network partitioning. I recommend the lock implementation to be used for
-efficiency purposes in general, instead of correctness.
+You should know that this implementation is subject to the clustering algorithm. So there is no guarantee about reliability in the case of network partitioning. The lock implementation is recommended for efficiency purposes in general, rather than correctness.
 
 **Important note about consistency:**
 
-You should know that Olric is a PA/EC (see [Consistency and Replication Model](#consistency-and-replication-model))
-product. So if your network is stable, all the operations on key/value
-pairs are performed by a single cluster member. It means that you can be sure about the consistency when the cluster is
-stable. It's important to know that computer networks fail
-occasionally, processes crash and random GC pauses may happen. Many factors can lead a network partitioning. If you
-cannot tolerate losing strong consistency under network partitioning,
-you need to use a different tool for locking.
+You should know that Olric is a PA/EC (see [Consistency and Replication Model](#consistency-and-replication-model)) product. So if your network is stable, all the operations on key/value pairs are performed by a single cluster member. It means that you can be sure about the consistency when the cluster is stable. It's important to know that computer networks fail occasionally, processes crash and random GC pauses may happen. Many factors can lead to a network partitioning. If you cannot tolerate losing strong consistency under network partitioning, you need to use a different tool for locking.
 
-See [Hazelcast and the Mythical PA/EC System](https://dbmsmusings.blogspot.com/2017/10/hazelcast-and-mythical-paec-system.html)
-and [Jepsen Analysis on Hazelcast 3.8.3](https://hazelcast.com/blog/jepsen-analysis-hazelcast-3-8-3/) for more insight
-on this topic.
+See [Hazelcast and the Mythical PA/EC System](https://dbmsmusings.blogspot.com/2017/10/hazelcast-and-mythical-paec-system.html) and [Jepsen Analysis on Hazelcast 3.8.3](https://hazelcast.com/blog/jepsen-analysis-hazelcast-3-8-3/) for more insight on this topic.
 
 ### Storage Engine
 
-Olric implements a GC-friendly storage engine to store large amounts of data on RAM. Basically, it applies an
-append-only log file approach with indexes.
-Olric inserts key/value pairs into pre-allocated byte slices (table in Olric terminology) and indexes that memory region
-by using Golang's built-in map.
-The data type of this map is `map[uint64]uint64`. When a pre-allocated byte slice is full Olric allocates a new one and
-continues inserting the new data into it.
-This design greatly reduces the write latency.
+Olric implements a GC-friendly storage engine to store large amounts of data on RAM. Basically, it applies an append-only log file approach with indexes. Olric inserts key/value pairs into pre-allocated byte slices (called a table in Olric terminology) and indexes that memory region by using Golang's built-in map. The data type of this map is `map[uint64]uint64`. When a pre-allocated byte slice is full, Olric allocates a new one and continues inserting the new data into it. This design greatly reduces the write latency.
 
-When you want to read a key/value pair from the Olric cluster, it scans the related DMap fragment by iterating over the
-indexes(implemented by the built-in map).
-The number of allocated byte slices should be small. So Olric would find the key immediately but technically, the read
-performance depends on the number of keys in the fragment.
-The effect of this design on the read performance is negligible.
+When you want to read a key/value pair from the Olric cluster, it scans the related DMap fragment by iterating over the indexes (implemented by the built-in map). The number of allocated byte slices should be small, so Olric would find the key immediately — but technically, the read performance depends on the number of keys in the fragment. The effect of this design on the read performance is negligible.
 
 The size of the pre-allocated byte slices is configurable.
 
@@ -604,7 +460,7 @@ In this section, you can find code snippets for various scenarios.
 
 ### Embedded-member scenario
 
-#### Distributed map
+#### Distributed Map
 
 ```go
 package main
@@ -620,7 +476,7 @@ import (
 )
 
 func main() {
-	// Sample for Olric v0.5.x
+	// Sample for Olric
 
 	// Deployment scenario: embedded-member
 	// This creates a single-node Olric cluster. It's good enough for experimenting.
@@ -713,7 +569,7 @@ import (
 )
 
 func main() {
-	// Sample for Olric v0.5.x
+	// Sample for Olric
 
 	// Deployment scenario: embedded-member
 	// This creates a single-node Olric cluster. It's good enough for experimenting.
@@ -788,7 +644,7 @@ func main() {
 }
 ```
 
-### SCAN on DMaps
+#### SCAN on DMaps
 
 ```go
 package main
@@ -804,7 +660,7 @@ import (
 )
 
 func main() {
-	// Sample for Olric v0.5.x
+	// Sample for Olric
 
 	// Deployment scenario: embedded-member
 	// This creates a single-node Olric cluster. It's good enough for experimenting.
@@ -899,6 +755,8 @@ func main() {
 }
 ```
 
+### Client-server scenario
+
 #### Publish-Subscribe
 
 ```go
@@ -914,7 +772,7 @@ import (
 )
 
 func main() {
-	// Sample for Olric v0.5.x
+	// Sample for Olric
 
 	// Deployment scenario: client-server
 
@@ -964,7 +822,6 @@ func main() {
 		log.Printf("Failed to close ClusterClient: %v", err)
 	}
 }
-
 ```
 
 ## Contributions

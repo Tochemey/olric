@@ -461,6 +461,11 @@ func (r *RoutingTable) Start() error {
 	r.wg.Add(1)
 	go r.pushPeriodically()
 
+	if r.config.MemberCountQuorum > config.MinimumMemberCountQuorum {
+		r.wg.Add(1)
+		go r.rejoinLoop()
+	}
+
 	if r.config.MemberlistInterface != "" {
 		r.log.V(2).Printf("[INFO] Memberlist uses interface: %s", r.config.MemberlistInterface)
 	}

@@ -82,6 +82,38 @@ func (r *RoutingTable) attemptToJoin() error {
 	return ErrClusterJoin
 }
 
+// rejoinLoop periodically attempts to rejoin the cluster when the node is in a
+// minority partition. It calls discovery.Join on each tick, which queries the
+// configured service discovery backend or static peers for live addresses.
+// The loop only fires when CheckMemberCountQuorum reports a quorum failure;
+// it is silent when quorum is satisfied. The goroutine is started only when
+// MemberCountQuorum is greater than MinimumMemberCountQuorum.
+func (r *RoutingTable) rejoinLoop() {
+	defer r.wg.Done()
+
+	ticker := time.NewTicker(r.config.RejoinInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			if r.CheckMemberCountQuorum() == nil {
+				continue
+			}
+			r.log.V(2).Printf("[INFO] Minority partition detected (%d/%d members). Attempting to rejoin cluster.",
+				r.NumMembers(), r.config.MemberCountQuorum)
+			n, err := r.discovery.Join()
+			if err != nil {
+				r.log.V(3).Printf("[WARN] Rejoin attempt failed: %v", err)
+				continue
+			}
+			r.log.V(2).Printf("[INFO] Rejoin contacted %d node(s)", n)
+		}
+	}
+}
+
 func (r *RoutingTable) tryWithInterval(ctx context.Context, interval time.Duration, f func() error) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

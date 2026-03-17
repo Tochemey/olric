@@ -60,6 +60,12 @@ func TestEnableProactiveSyncOnJoin_Default(t *testing.T) {
 	require.False(t, c.EnableProactiveSyncOnJoin)
 }
 
+func TestRejoinInterval_Default(t *testing.T) {
+	c := &Config{}
+	require.NoError(t, c.Sanitize())
+	require.Equal(t, DefaultRejoinInterval, c.RejoinInterval)
+}
+
 func TestEnableProactiveSyncOnJoin_DoesNotAlterMemberlistTiming(t *testing.T) {
 	// Enabling proactive sync must only control whether primary owners push
 	// data to backup owners on node-join. It must not touch memberlist probe
