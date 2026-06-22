@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/internal/testutil"
@@ -108,6 +109,25 @@ func TestDMapPipeline_Get(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), value)
 	}
+}
+
+func TestFutureGet_Result_NilPipelineValue(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.get", "mydmap", "missing", "RW")
+	cmd.SetVal(nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	future := &FutureGet{
+		dp: &DMapPipeline{
+			result: map[uint64][]redis.Cmder{0: {cmd}},
+		},
+		ctx:       ctx,
+		closedCtx: context.Background(),
+	}
+
+	res, err := future.Result()
+	require.Nil(t, res)
+	require.ErrorIs(t, err, ErrKeyNotFound)
 }
 
 func TestDMapPipeline_Delete(t *testing.T) {
@@ -291,6 +311,25 @@ func TestDMapPipeline_GetPut(t *testing.T) {
 		_, err := fp.Result()
 		require.NoError(t, err)
 	}
+}
+
+func TestFutureGetPut_Result_NilPipelineValue(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.getput", "mydmap", "key", "value", "RW")
+	cmd.SetVal(nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	future := &FutureGetPut{
+		dp: &DMapPipeline{
+			result: map[uint64][]redis.Cmder{0: {cmd}},
+		},
+		ctx:       ctx,
+		closedCtx: context.Background(),
+	}
+
+	res, err := future.Result()
+	require.NoError(t, err)
+	require.Nil(t, res)
 }
 
 func TestDMapPipeline_IncrByFloat(t *testing.T) {

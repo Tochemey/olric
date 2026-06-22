@@ -45,6 +45,12 @@ var (
 
 	// ErrPipelineExecuted denotes that Exec was already called on the underlying pipeline.
 	ErrPipelineExecuted = errors.New("pipeline already executed")
+
+	// ErrUnexpectedPipelineCmdType denotes that a pipelined command was not the expected *redis.Cmd type.
+	ErrUnexpectedPipelineCmdType = errors.New("unexpected pipeline command type")
+
+	// ErrUnexpectedPipelineValueType denotes that a pipelined command returned a value that was not a string.
+	ErrUnexpectedPipelineValueType = errors.New("unexpected pipeline command value type")
 )
 
 // DMapPipeline implements a pipeline for the following methods of the DMap API:
@@ -168,8 +174,18 @@ func (f *FutureGet) Result() (*GetResponse, error) {
 		if cmd.Err() != nil {
 			return nil, processProtocolError(cmd.Err())
 		}
+
+		value, nilValue, err := pipelineStringValue(cmd)
+		if err != nil {
+			return nil, err
+		}
+
+		if nilValue {
+			return nil, ErrKeyNotFound
+		}
+
 		stringCmd := redis.NewStringCmd(context.Background(), cmd.Args()...)
-		stringCmd.SetVal(cmd.(*redis.Cmd).Val().(string))
+		stringCmd.SetVal(value)
 		return f.dp.dm.makeGetResponse(stringCmd)
 	default:
 		return nil, ErrNotReady
@@ -396,8 +412,15 @@ func (f *FutureGetPut) Result() (*GetResponse, error) {
 		if cmd.Err() != nil {
 			return nil, processProtocolError(cmd.Err())
 		}
+		value, nilValue, err := pipelineStringValue(cmd)
+		if err != nil {
+			return nil, err
+		}
+		if nilValue {
+			return nil, nil
+		}
 		stringCmd := redis.NewStringCmd(context.Background(), cmd.Args()...)
-		stringCmd.SetVal(cmd.(*redis.Cmd).Val().(string))
+		stringCmd.SetVal(value)
 		return f.dp.dm.makeGetResponse(stringCmd)
 	default:
 		return nil, ErrNotReady
@@ -451,7 +474,13 @@ func (f *FutureIncrByFloat) Result() (float64, error) {
 		if cmd.Err() != nil {
 			return 0, processProtocolError(cmd.Err())
 		}
-		stringRes := cmd.(*redis.Cmd).Val().(string)
+		stringRes, nilValue, err := pipelineStringValue(cmd)
+		if err != nil {
+			return 0, err
+		}
+		if nilValue {
+			return 0, ErrKeyNotFound
+		}
 		return strconv.ParseFloat(stringRes, 64)
 	default:
 		return 0, ErrNotReady
@@ -648,4 +677,23 @@ func putPipelineCmdsIntoPool(cmds []redis.Cmder) {
 	}
 	cmds = cmds[:0]
 	pipelineCmdPool.Put(cmds)
+}
+
+func pipelineStringValue(cmd redis.Cmder) (string, bool, error) {
+	redisCmd, ok := cmd.(*redis.Cmd)
+	if !ok {
+		return "", false, ErrUnexpectedPipelineCmdType
+	}
+
+	value := redisCmd.Val()
+	if value == nil {
+		return "", true, nil
+	}
+
+	stringValue, ok := value.(string)
+	if !ok {
+		return "", false, ErrUnexpectedPipelineValueType
+	}
+
+	return stringValue, false, nil
 }
