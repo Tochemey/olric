@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package config
+package kvstore
 
 import (
 	"testing"
@@ -23,27 +23,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEngine_Dont_Overwrite_TableSize(t *testing.T) {
-	e := NewEngine()
-	e.Name = DefaultStorageEngine
-	e.Config = map[string]interface{}{
-		"tableSize": 1235,
-	}
+func TestTransferIterator_Drop_Empty(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
 
-	require.NoError(t, e.Sanitize())
-	require.NoError(t, e.Validate())
-	require.Equal(t, 1235, e.Config["tableSize"])
-}
+	it := kv.TransferIterator()
+	require.False(t, it.Next())
 
-func TestEngine_Validate_NilConfig(t *testing.T) {
-	e := &Engine{}
-	require.NoError(t, e.Validate())
-	require.NotNil(t, e.Config)
-}
-
-func TestEngine_Sanitize_UnknownEngine(t *testing.T) {
-	e := &Engine{Name: "does-not-exist"}
-	err := e.Sanitize()
+	err = it.Drop(0)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "unknown storage engine")
+}
+
+func TestTransferIterator_Export_Empty(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+
+	it := kv.TransferIterator()
+	_, _, err = it.Export()
+	require.Error(t, err)
 }

@@ -23,6 +23,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/tochemey/olric/internal/consistent"
+	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/testutil"
 )
 
@@ -89,4 +93,16 @@ func TestRoutingTable_distributedBackups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
+}
+
+func TestIsOwner(t *testing.T) {
+	owners := []consistent.Member{
+		discovery.Member{Name: "127.0.0.1:3320"},
+		discovery.Member{Name: "127.0.0.1:3321"},
+	}
+
+	require.True(t, isOwner(discovery.Member{Name: "127.0.0.1:3320"}, owners))
+	require.True(t, isOwner(discovery.Member{Name: "127.0.0.1:3321"}, owners))
+	require.False(t, isOwner(discovery.Member{Name: "127.0.0.1:9999"}, owners))
+	require.False(t, isOwner(discovery.Member{Name: "127.0.0.1:3320"}, nil))
 }

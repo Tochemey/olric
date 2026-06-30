@@ -60,3 +60,56 @@ func TestMux_PubSub_Command(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(10), num)
 }
+
+// noopHandler is a redcon.Handler that does nothing. It is used to exercise
+// the registration logic of ServeMux without needing a network connection.
+type noopHandler struct{}
+
+func (noopHandler) ServeRESP(conn redcon.Conn, cmd redcon.Command) {}
+
+func TestServeMux_HandleFunc(t *testing.T) {
+	t.Run("registers handler", func(t *testing.T) {
+		m := NewServeMux()
+		m.HandleFunc("ping", noopHandler{})
+		_, ok := m.handlers["ping"]
+		require.True(t, ok)
+	})
+
+	t.Run("nil handler panics", func(t *testing.T) {
+		m := NewServeMux()
+		require.PanicsWithValue(t, "olric: nil handler", func() {
+			m.HandleFunc("ping", nil)
+		})
+	})
+}
+
+func TestServeMux_Handle(t *testing.T) {
+	t.Run("empty command panics", func(t *testing.T) {
+		m := NewServeMux()
+		require.PanicsWithValue(t, "olric: invalid command", func() {
+			m.Handle("", noopHandler{})
+		})
+	})
+
+	t.Run("nil handler panics", func(t *testing.T) {
+		m := NewServeMux()
+		require.PanicsWithValue(t, "olric: nil handler", func() {
+			m.Handle("ping", nil)
+		})
+	})
+
+	t.Run("duplicate registration panics", func(t *testing.T) {
+		m := NewServeMux()
+		m.Handle("ping", noopHandler{})
+		require.PanicsWithValue(t, "olric: multiple registrations for ping", func() {
+			m.Handle("ping", noopHandler{})
+		})
+	})
+
+	t.Run("registers handler", func(t *testing.T) {
+		m := NewServeMux()
+		m.Handle("get", noopHandler{})
+		_, ok := m.handlers["get"]
+		require.True(t, ok)
+	})
+}

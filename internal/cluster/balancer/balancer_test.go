@@ -35,6 +35,7 @@ import (
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/server"
+	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
 
@@ -447,4 +448,147 @@ func checkBackupOwnership(e *environment.Environment) error {
 	}
 
 	return nil
+}
+
+func TestRegisterHandlers(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	e := newTestEnvironment(nil)
+	b := cluster.addNode(e)
+
+	// RegisterHandlers is a no-op but must remain callable.
+	require.NotPanics(t, func() {
+		b.RegisterHandlers()
+	})
+}
+
+func TestShutdown_Idempotent(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	e := newTestEnvironment(nil)
+	b := cluster.addNode(e)
+
+	// First shutdown stops the balance goroutine.
+	require.NoError(t, b.Shutdown(context.Background()))
+	// Second shutdown must be a no-op and return nil.
+	require.NoError(t, b.Shutdown(context.Background()))
+
+	// isAlive must now report false because the context was cancelled.
+	require.False(t, b.isAlive())
+}
+
+func TestNew_WithSyncState(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	e := newTestEnvironment(nil)
+	state := syncstate.New()
+	e.Set("syncstate", state)
+
+	b := cluster.addNode(e)
+	require.NotNil(t, b.syncState)
+	// The same state instance is shared with the balancer; PendingEmpty is
+	// driven by the routing table lifecycle, so just assert it is wired up.
+	require.NotPanics(t, func() {
+		_ = b.syncState.PendingEmpty()
+	})
+}
+
+func TestTryAckRebalance_Guards(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	e := newTestEnvironment(nil)
+	b := cluster.addNode(e)
+
+	// Signature 0 must be a no-op (no panic, lastAckedSignature stays 0).
+	b.tryAckRebalance(0)
+	require.Equal(t, uint64(0), b.lastAckedSignature)
+
+	// When syncState reports pending data, ack is skipped.
+	pending := syncstate.New()
+	pending.Reset([]uint64{1})
+	b.syncState = pending
+	require.False(t, b.syncState.PendingEmpty())
+	b.tryAckRebalance(1234)
+	require.Equal(t, uint64(0), b.lastAckedSignature)
+
+	// When the context is cancelled, ack is skipped even with empty pending.
+	b.syncState = syncstate.New()
+	b.cancel()
+	b.tryAckRebalance(5678)
+	require.Equal(t, uint64(0), b.lastAckedSignature)
+}
+
+// TestBalanceEagerly exercises the proactive node-join balance path including
+// pushPrimaryToBackups by filling the primary partitions and triggering an
+// eager balance on a two-node cluster with backups enabled.
+func TestBalanceEagerly(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	c1 := testutil.NewConfig()
+	c1.ReplicaCount = 2
+	e1 := newTestEnvironment(c1)
+	b1 := cluster.addNode(e1)
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get(strings.ToLower(partitions.PRIMARY.String())).(*partitions.Partitions)
+	for partID := uint64(0); partID < c.PartitionCount; partID++ {
+		part := primary.PartitionByID(partID)
+		s := mockfragment.New()
+		s.Fill()
+		part.Map().Store("dmap.test-data", s)
+	}
+
+	c2 := testutil.NewConfig()
+	c2.ReplicaCount = 2
+	e2 := newTestEnvironment(c2)
+	b2 := cluster.addNode(e2)
+
+	err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Drive the eager balance path several times. The first push records the
+	// proactive sync signature; later calls hit the already-synced branch.
+	for i := 0; i < 5; i++ {
+		b1.rt.UpdateEagerly()
+		require.NotPanics(t, func() {
+			b1.BalanceEagerly()
+		})
+	}
+}
+
+func TestBalanceEagerly_SingleReplica(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	// ReplicaCount defaults to MinimumReplicaCount so the backup branches are
+	// skipped, covering the early-skip path of pushPrimaryToBackups indirectly.
+	e := newTestEnvironment(nil)
+	b := cluster.addNode(e)
+
+	err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !b.rt.IsBootstrapped() {
+			return errors.New("node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		b.BalanceEagerly()
+	})
+
+	// pushPrimaryToBackups returns immediately when replicas are at minimum.
+	moved, aborted := b.pushPrimaryToBackups(b.rt.Signature())
+	require.False(t, moved)
+	require.False(t, aborted)
 }

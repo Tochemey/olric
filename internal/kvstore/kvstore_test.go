@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"testing"
 	"time"
@@ -579,4 +580,290 @@ func TestKVStore_Put_ErrEntryTooLarge(t *testing.T) {
 
 	err := s.Put(hkey, e)
 	require.ErrorIs(t, err, storage.ErrEntryTooLarge)
+}
+
+func TestKVStore_New_MissingTableSize(t *testing.T) {
+	c := storage.NewConfig(nil)
+	// No "tableSize" key configured -> Get must fail.
+	_, err := New(c)
+	require.Error(t, err)
+}
+
+func TestKVStore_New_InvalidTableSizeType(t *testing.T) {
+	c := storage.NewConfig(nil)
+	c.Add("tableSize", "not-a-number")
+	_, err := New(c)
+	require.Error(t, err)
+}
+
+func TestKVStore_New_NilConfigUsesDefault(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+	require.NotNil(t, kv)
+	require.Equal(t, defaultTableSize, kv.tableSize)
+}
+
+func TestKVStore_SetConfig(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+
+	newCfg := DefaultConfig()
+	kv.SetConfig(newCfg)
+	require.Same(t, newCfg, kv.config)
+}
+
+func TestKVStore_SetLogger(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+	// SetLogger is a no-op but must remain callable without panicking.
+	require.NotPanics(t, func() {
+		kv.SetLogger(log.Default())
+	})
+}
+
+func TestKVStore_Start_NilConfig(t *testing.T) {
+	kv := &KVStore{}
+	err := kv.Start()
+	require.Error(t, err)
+}
+
+func TestKVStore_Start_OK(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+	require.NoError(t, kv.Start())
+}
+
+func TestKVStore_PrepareTableSize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want uint64
+	}{
+		{"uint", uint(10), 10},
+		{"uint8", uint8(10), 10},
+		{"uint16", uint16(10), 10},
+		{"uint32", uint32(10), 10},
+		{"uint64", uint64(10), 10},
+		{"int", int(10), 10},
+		{"int8", int8(10), 10},
+		{"int16", int16(10), 10},
+		{"int32", int32(10), 10},
+		{"int64", int64(10), 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := prepareTableSize(tc.in)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+
+	t.Run("invalid", func(t *testing.T) {
+		_, err := prepareTableSize("bad")
+		require.Error(t, err)
+	})
+}
+
+func TestKVStore_PutRaw_ErrEntryTooLarge(t *testing.T) {
+	c := DefaultConfig()
+	c.Add("tableSize", 1024)
+	s := testKVStore(t, c)
+
+	err := s.PutRaw(xxhash.Sum64([]byte("key")), make([]byte, 2048))
+	require.ErrorIs(t, err, storage.ErrEntryTooLarge)
+}
+
+func TestKVStore_PutRaw_EmptyTables(t *testing.T) {
+	// New KVStore with no tables yet: PutRaw must create the first table.
+	kv, err := New(nil)
+	require.NoError(t, err)
+	require.Len(t, kv.tables, 0)
+
+	err = kv.PutRaw(xxhash.Sum64([]byte("key")), []byte("value"))
+	require.NoError(t, err)
+	require.Len(t, kv.tables, 1)
+}
+
+func TestKVStore_Put_EmptyTables(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+
+	e := entry.New()
+	e.SetKey("key")
+	e.SetValue([]byte("value"))
+	e.SetTimestamp(time.Now().UnixNano())
+	require.NoError(t, kv.Put(xxhash.Sum64([]byte("key")), e))
+	require.Len(t, kv.tables, 1)
+}
+
+func TestKVStore_NotFound_Errors(t *testing.T) {
+	s := testKVStore(t, nil)
+	missing := xxhash.Sum64([]byte("does-not-exist"))
+
+	_, err := s.GetRaw(missing)
+	require.ErrorIs(t, err, storage.ErrKeyNotFound)
+
+	_, err = s.Get(missing)
+	require.ErrorIs(t, err, storage.ErrKeyNotFound)
+
+	_, err = s.GetTTL(missing)
+	require.ErrorIs(t, err, storage.ErrKeyNotFound)
+
+	_, err = s.GetLastAccess(missing)
+	require.ErrorIs(t, err, storage.ErrKeyNotFound)
+
+	_, err = s.GetKey(missing)
+	require.ErrorIs(t, err, storage.ErrKeyNotFound)
+
+	e := entry.New()
+	e.SetKey("does-not-exist")
+	e.SetTTL(10)
+	err = s.UpdateTTL(missing, e)
+	require.ErrorIs(t, err, storage.ErrKeyNotFound)
+
+	// Delete of a missing key must not return an error.
+	require.NoError(t, s.Delete(missing))
+
+	require.False(t, s.Check(missing))
+}
+
+func TestKVStore_RangeHKey(t *testing.T) {
+	s := testKVStore(t, nil)
+
+	hkeys := make(map[uint64]struct{})
+	for i := 0; i < 50; i++ {
+		e := entry.New()
+		e.SetKey(bkey(i))
+		e.SetValue(bval(i))
+		e.SetTimestamp(time.Now().UnixNano())
+		hkey := xxhash.Sum64([]byte(e.Key()))
+		require.NoError(t, s.Put(hkey, e))
+		hkeys[hkey] = struct{}{}
+	}
+
+	var visited int
+	s.(*KVStore).RangeHKey(func(hkey uint64) bool {
+		_, ok := hkeys[hkey]
+		require.True(t, ok)
+		visited++
+		return true
+	})
+	require.Equal(t, len(hkeys), visited)
+}
+
+func TestKVStore_RangeHKey_EarlyStop(t *testing.T) {
+	s := testKVStore(t, nil)
+	for i := 0; i < 10; i++ {
+		e := entry.New()
+		e.SetKey(bkey(i))
+		e.SetValue(bval(i))
+		e.SetTimestamp(time.Now().UnixNano())
+		require.NoError(t, s.Put(xxhash.Sum64([]byte(e.Key())), e))
+	}
+
+	var visited int
+	s.(*KVStore).RangeHKey(func(hkey uint64) bool {
+		visited++
+		return false
+	})
+	require.Equal(t, 1, visited)
+}
+
+func TestKVStore_Scan_EmptyTables(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+	// No tables yet: scanCommon must short-circuit and return cursor 0.
+	cursor, err := kv.Scan(0, 10, func(e storage.Entry) bool { return true })
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), cursor)
+}
+
+func TestKVStore_Scan_InvalidCursor(t *testing.T) {
+	s := testKVStore(t, nil)
+	for i := 0; i < 10; i++ {
+		e := entry.New()
+		e.SetKey(bkey(i))
+		e.SetValue(bval(i))
+		e.SetTimestamp(time.Now().UnixNano())
+		require.NoError(t, s.Put(xxhash.Sum64([]byte(e.Key())), e))
+	}
+
+	k := s.(*KVStore)
+	// A cursor far beyond the highest coefficient resolves to an invalid
+	// coefficient and returns 0 without error.
+	cursor, err := k.Scan(k.tableSize*1000, 10, func(e storage.Entry) bool { return true })
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), cursor)
+}
+
+func TestKVStore_FindCoefficient_EOF(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+	require.NoError(t, kv.makeTable())
+
+	// Coefficient 0 exists; searching beyond it must return io.EOF.
+	_, err = kv.findCoefficient(100)
+	require.Error(t, err)
+}
+
+// TestKVStore_MakeTable_ReuseRecycled drives a compaction that recycles an
+// emptied table and then writes more data so makeTable reuses the recycled
+// table instead of allocating a new one.
+func TestKVStore_MakeTable_ReuseRecycled(t *testing.T) {
+	s := testKVStore(t, nil)
+	k := s.(*KVStore)
+
+	put := func(i int) {
+		e := entry.New()
+		e.SetKey(bkey(i))
+		e.SetValue([]byte(fmt.Sprintf("%01000d", i)))
+		e.SetTimestamp(time.Now().UnixNano())
+		require.NoError(t, s.Put(xxhash.Sum64([]byte(e.Key())), e))
+	}
+
+	// Fill enough to allocate more than one table.
+	for i := 0; i < 1500; i++ {
+		put(i)
+	}
+	require.GreaterOrEqual(t, len(k.tables), 2)
+
+	// Empty the first table.
+	for i := 0; i < 750; i++ {
+		require.NoError(t, s.Delete(xxhash.Sum64([]byte(bkey(i)))))
+	}
+
+	for {
+		done, err := s.Compaction()
+		require.NoError(t, err)
+		if done {
+			break
+		}
+	}
+
+	// A recycled table must now exist.
+	var recycled bool
+	for _, tb := range k.tables {
+		if tb.State() == table.RecycledState {
+			recycled = true
+		}
+	}
+	require.True(t, recycled)
+
+	tablesBefore := len(k.tables)
+	// Write more data; makeTable should reuse the recycled table.
+	for i := 1500; i < 4000; i++ {
+		put(i)
+	}
+	// Reuse means the table count should not grow unbounded past reuse.
+	require.LessOrEqual(t, len(k.tables), tablesBefore+2)
+}
+
+func TestKVStore_Fork_InvalidConfig(t *testing.T) {
+	kv, err := New(nil)
+	require.NoError(t, err)
+
+	bad := storage.NewConfig(nil)
+	bad.Add("tableSize", "invalid")
+	_, err = kv.Fork(bad)
+	require.Error(t, err)
 }

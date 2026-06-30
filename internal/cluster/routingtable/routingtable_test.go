@@ -1200,3 +1200,50 @@ func TestRoutingTable_RejoinLoop_RejoinsAfterPartitionHeals(t *testing.T) {
 		t.Fatalf("Expected at least 2 members on node2 after rejoin. Got: %d", rt2.NumMembers())
 	}
 }
+
+func TestSetNumMembersEagerly(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	rt.SetNumMembersEagerly(42)
+	require.Equal(t, int32(42), rt.NumMembers())
+
+	rt.SetNumMembersEagerly(7)
+	require.Equal(t, int32(7), rt.NumMembers())
+}
+
+func TestCheckBootstrap_Bootstrapped(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	require.True(t, rt.IsBootstrapped())
+
+	// A bootstrapped node returns immediately with no error.
+	require.NoError(t, rt.CheckBootstrap())
+}
+
+func TestCheckBootstrap_Timeout(t *testing.T) {
+	c := testutil.NewConfig()
+	// Keep the wait short: the node is never bootstrapped so CheckBootstrap
+	// must exhaust its interval loop and return an error.
+	c.BootstrapTimeout = 250 * time.Millisecond
+
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	defer func() {
+		require.NoError(t, srv.Shutdown(context.Background()))
+	}()
+
+	require.False(t, rt.IsBootstrapped())
+	err = rt.CheckBootstrap()
+	require.Error(t, err)
+}

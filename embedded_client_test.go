@@ -984,3 +984,13 @@ func TestEmbeddedClient_DMap_Put_PX_With_NX(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotZero(t, gr.TTL())
 }
+
+func TestEmbeddedDMap_Name(t *testing.T) {
+	dm := &EmbeddedDMap{name: "mydmap"}
+	require.Equal(t, "mydmap", dm.Name())
+}
+
+func TestEmbeddedClient_RefreshMetadata(t *testing.T) {
+	e := &EmbeddedClient{}
+	require.NoError(t, e.RefreshMetadata(context.TODO()))
+}

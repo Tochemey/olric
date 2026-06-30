@@ -129,3 +129,56 @@ func TestDMap_Destroy_destroyOperation(t *testing.T) {
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
 }
+
+func TestDMap_destroyCommandHandler_Local(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s.NewDMap("destroy.test")
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		err = dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i), nil)
+		require.NoError(t, err)
+	}
+
+	cmd := protocol.NewDestroy("destroy.test").SetLocal().Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err = rc.Process(s.ctx, cmd)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Err())
+
+	// All keys must be gone after a local destroy.
+	for i := 0; i < 10; i++ {
+		_, _, err := dm.Get(ctx, testutil.ToKey(i))
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	}
+}
+
+func TestDMap_destroyCommandHandler_Cluster(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s.NewDMap("destroy.cluster")
+	require.NoError(t, err)
+
+	for i := 0; i < 10; i++ {
+		require.NoError(t, dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i), nil))
+	}
+
+	// Without the Local flag, the handler destroys the DMap across the cluster.
+	rc := s.client.Get(s.rt.This().String())
+	cmd := protocol.NewDestroy("destroy.cluster").Command(s.ctx)
+	err = rc.Process(s.ctx, cmd)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Err())
+
+	for i := 0; i < 10; i++ {
+		_, _, err := dm.Get(ctx, testutil.ToKey(i))
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	}
+}

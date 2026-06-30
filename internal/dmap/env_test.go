@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package config
+package dmap
 
 import (
 	"testing"
@@ -23,27 +23,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEngine_Dont_Overwrite_TableSize(t *testing.T) {
-	e := NewEngine()
-	e.Name = DefaultStorageEngine
-	e.Config = map[string]interface{}{
-		"tableSize": 1235,
-	}
-
-	require.NoError(t, e.Sanitize())
-	require.NoError(t, e.Validate())
-	require.Equal(t, 1235, e.Config["tableSize"])
-}
-
-func TestEngine_Validate_NilConfig(t *testing.T) {
-	e := &Engine{}
-	require.NoError(t, e.Validate())
-	require.NotNil(t, e.Config)
-}
-
-func TestEngine_Sanitize_UnknownEngine(t *testing.T) {
-	e := &Engine{Name: "does-not-exist"}
-	err := e.Sanitize()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "unknown storage engine")
+func TestDMap_newEnv_NilContext(t *testing.T) {
+	e := newEnv(nil)
+	require.NotNil(t, e)
+	require.NotNil(t, e.ctx)
+	require.NotNil(t, e.putConfig)
+	require.NotZero(t, e.timestamp)
 }

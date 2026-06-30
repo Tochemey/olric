@@ -15,35 +15,30 @@
  * limitations under the License.
  */
 
-package config
+package pubsub
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestEngine_Dont_Overwrite_TableSize(t *testing.T) {
-	e := NewEngine()
-	e.Name = DefaultStorageEngine
-	e.Config = map[string]interface{}{
-		"tableSize": 1235,
-	}
+// TestService_Shutdown_ContextCancelled covers the branch of Service.Shutdown
+// where the provided context is cancelled before the background workers finish.
+func TestService_Shutdown_ContextCancelled(t *testing.T) {
+	s := &Service{}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 
-	require.NoError(t, e.Sanitize())
-	require.NoError(t, e.Validate())
-	require.Equal(t, 1235, e.Config["tableSize"])
-}
+	// Add to the wait group without ever calling Done so that wg.Wait blocks
+	// and Shutdown has to fall back to the context.
+	s.wg.Add(1)
+	defer s.wg.Done()
 
-func TestEngine_Validate_NilConfig(t *testing.T) {
-	e := &Engine{}
-	require.NoError(t, e.Validate())
-	require.NotNil(t, e.Config)
-}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-func TestEngine_Sanitize_UnknownEngine(t *testing.T) {
-	e := &Engine{Name: "does-not-exist"}
-	err := e.Sanitize()
+	err := s.Shutdown(ctx)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "unknown storage engine")
+	require.ErrorIs(t, err, context.Canceled)
 }

@@ -18,11 +18,24 @@
 package config
 
 import (
+	"net"
+	"strconv"
 	"testing"
 
 	"github.com/kapetan-io/tackle/autotls"
 	"github.com/stretchr/testify/require"
 )
+
+// validSanitizedConfig returns a config that has been sanitized and validates
+// successfully. Tests mutate the returned value to exercise individual error
+// branches.
+func validSanitizedConfig(t *testing.T) *Config {
+	t.Helper()
+	c := &Config{}
+	require.NoError(t, c.Sanitize())
+	require.NoError(t, c.Validate())
+	return c
+}
 
 func TestConfig_Initialize(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
@@ -85,4 +98,105 @@ func TestEnableProactiveSyncOnJoin_DoesNotAlterMemberlistTiming(t *testing.T) {
 		"EnableProactiveSyncOnJoin must not change GossipInterval")
 	require.Equal(t, disabled.MemberlistConfig.SuspicionMult, enabled.MemberlistConfig.SuspicionMult,
 		"EnableProactiveSyncOnJoin must not change SuspicionMult")
+}
+
+func TestConfig_Validate_Errors(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(c *Config)
+		errContains string
+	}{
+		{
+			name:        "replica count below minimum",
+			mutate:      func(c *Config) { c.ReplicaCount = 0 },
+			errContains: "ReplicaCount smaller than MinimumReplicaCount",
+		},
+		{
+			name:        "read quorum non positive",
+			mutate:      func(c *Config) { c.ReadQuorum = 0 },
+			errContains: "ReadQuorum less than or equal to zero",
+		},
+		{
+			name:        "read quorum greater than replica count",
+			mutate:      func(c *Config) { c.ReadQuorum = 2 },
+			errContains: "ReadQuorum greater than ReplicaCount",
+		},
+		{
+			name:        "write quorum non positive",
+			mutate:      func(c *Config) { c.WriteQuorum = 0 },
+			errContains: "WriteQuorum less than or equal to zero",
+		},
+		{
+			name:        "write quorum greater than replica count",
+			mutate:      func(c *Config) { c.WriteQuorum = 2 },
+			errContains: "WriteQuorum greater than ReplicaCount",
+		},
+		{
+			name:        "invalid memberlist advertise addr",
+			mutate:      func(c *Config) { c.MemberlistConfig.AdvertiseAddr = "not-an-ip" },
+			errContains: "AdvertiseAddr has to be a valid",
+		},
+		{
+			name:        "empty memberlist bind addr",
+			mutate:      func(c *Config) { c.MemberlistConfig.BindAddr = "" },
+			errContains: "BindAddr cannot be an empty string",
+		},
+		{
+			name:        "member count quorum below minimum",
+			mutate:      func(c *Config) { c.MemberCountQuorum = 0 },
+			errContains: "MemberCountQuorum smaller than MinimumMemberCountQuorum",
+		},
+		{
+			name:        "empty bind addr",
+			mutate:      func(c *Config) { c.BindAddr = "" },
+			errContains: "bindAddr cannot be empty",
+		},
+		{
+			name:        "zero bind port",
+			mutate:      func(c *Config) { c.BindPort = 0 },
+			errContains: "bindPort cannot be empty or zero",
+		},
+		{
+			name: "peer with itself",
+			mutate: func(c *Config) {
+				this := net.JoinHostPort(c.MemberlistConfig.BindAddr,
+					strconv.Itoa(c.MemberlistConfig.BindPort))
+				c.Peers = []string{this}
+			},
+			errContains: "cannot be peer with itself",
+		},
+		{
+			name:        "invalid log level",
+			mutate:      func(c *Config) { c.LogLevel = "BOGUS" },
+			errContains: "invalid LogLevel",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := validSanitizedConfig(t)
+			tt.mutate(c)
+			err := c.Validate()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.errContains)
+		})
+	}
+}
+
+func TestConfig_Validate_AllLogLevels(t *testing.T) {
+	for _, lvl := range []string{LogLevelDebug, LogLevelWarn, LogLevelInfo, LogLevelError} {
+		c := validSanitizedConfig(t)
+		c.LogLevel = lvl
+		require.NoError(t, c.Validate())
+	}
+}
+
+func TestNew_AllEnvironments(t *testing.T) {
+	for _, env := range []string{MemberlistEnvLocal, MemberlistEnvLAN, MemberlistEnvWAN} {
+		c := New(env)
+		require.NotNil(t, c)
+		require.NotNil(t, c.MemberlistConfig)
+		require.Equal(t, DefaultDiscoveryPort, c.MemberlistConfig.BindPort)
+		require.NoError(t, c.Validate())
+	}
 }

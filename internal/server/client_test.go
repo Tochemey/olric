@@ -145,3 +145,81 @@ func TestServer_Client_Shutdown(t *testing.T) {
 	require.Empty(t, cs.clients)
 	require.Equal(t, 0, cs.roundRobin.Length())
 }
+
+func TestServer_Client_NewClient_NilConfig(t *testing.T) {
+	// Passing a nil config must fall back to the default sanitized client config.
+	cs := NewClient(nil)
+	require.NotNil(t, cs)
+	require.NotNil(t, cs.config)
+	require.NotNil(t, cs.clients)
+	require.NotNil(t, cs.roundRobin)
+}
+
+func TestServer_Client_Addresses(t *testing.T) {
+	cs := NewClient(nil)
+
+	// No clients registered yet.
+	require.Empty(t, cs.Addresses())
+
+	// Get lazily creates clients without connecting, so we can register
+	// arbitrary addresses.
+	cs.Get("127.0.0.1:6379")
+	cs.Get("127.0.0.1:6380")
+
+	addresses := cs.Addresses()
+	require.Len(t, addresses, 2)
+	require.Contains(t, addresses, "127.0.0.1:6379")
+	require.Contains(t, addresses, "127.0.0.1:6380")
+}
+
+func TestServer_Client_Pick_NoClients(t *testing.T) {
+	cs := NewClient(nil)
+
+	rc, err := cs.Pick()
+	require.Error(t, err)
+	require.Nil(t, rc)
+	require.Contains(t, err.Error(), "no available client found")
+}
+
+func TestServer_Client_pickNodeRoundRobin_NoClients(t *testing.T) {
+	cs := NewClient(nil)
+
+	addr, err := cs.pickNodeRoundRobin()
+	require.Error(t, err)
+	require.Empty(t, addr)
+	require.Contains(t, err.Error(), "no available client found")
+}
+
+func TestServer_Client_Close_UnknownAddr(t *testing.T) {
+	cs := NewClient(nil)
+
+	// Closing an address that was never registered is a no-op and must not error.
+	require.NoError(t, cs.Close("127.0.0.1:1234"))
+}
+
+func TestServer_Client_Pick_AfterGet(t *testing.T) {
+	cs := NewClient(nil)
+	cs.Get("127.0.0.1:6379")
+
+	rc, err := cs.Pick()
+	require.NoError(t, err)
+	require.NotNil(t, rc)
+}
+
+func TestServer_Client_Shutdown_Empty(t *testing.T) {
+	cs := NewClient(nil)
+	require.NoError(t, cs.Shutdown(context.Background()))
+}
+
+func TestServer_Client_Shutdown_ContextCanceled(t *testing.T) {
+	cs := NewClient(nil)
+	cs.Get("127.0.0.1:6379")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// With an already-canceled context and at least one registered client,
+	// Shutdown must bail out with the context error.
+	err := cs.Shutdown(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+}

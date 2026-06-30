@@ -30,6 +30,7 @@ import (
 
 	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
 )
@@ -399,4 +400,59 @@ func TestDMap_Put_PX_With_NX(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotZero(t, gr.TTL())
 	}
+}
+
+func TestDMap_Put_AsyncReplicationMode_WithReplicas(t *testing.T) {
+	cluster := testcluster.New(NewService)
+
+	c1 := testutil.NewConfig()
+	c1.ReplicaCount = 2
+	c1.ReplicationMode = config.AsyncReplicationMode
+	e1 := testcluster.NewEnvironment(c1)
+	s1 := cluster.AddMember(e1).(*Service)
+
+	c2 := testutil.NewConfig()
+	c2.ReplicaCount = 2
+	c2.ReplicationMode = config.AsyncReplicationMode
+	e2 := testcluster.NewEnvironment(c2)
+	s2 := cluster.AddMember(e2).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s1.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	for i := 0; i < 20; i++ {
+		err = dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i), nil)
+		require.NoError(t, err)
+	}
+
+	// Give the fire-and-forget backup goroutines time to replicate.
+	<-time.After(200 * time.Millisecond)
+
+	dm2, err := s2.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	for i := 0; i < 20; i++ {
+		gr, _, err := dm2.Get(ctx, testutil.ToKey(i))
+		require.NoError(t, err)
+		require.Equal(t, testutil.ToVal(i), gr.Value())
+	}
+}
+
+func TestDMap_putEntryCommandHandler_EntryTooLarge(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	// A value larger than the configured table size triggers the error path in
+	// putOnReplicaFragment.
+	bigValue := make([]byte, 1<<21)
+	cmd := protocol.NewPutEntry("mydmap", "key", bigValue).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
 }

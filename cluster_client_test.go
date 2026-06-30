@@ -847,3 +847,11 @@ func TestClusterClient_smartPick(t *testing.T) {
 	}
 	require.Len(t, clients, expectedOwnerCount)
 }
+
+func TestWithRoutingTableFetchInterval_Option(t *testing.T) {
+	cfg := &clusterClientConfig{}
+	opt := WithRoutingTableFetchInterval(3 * time.Second)
+	opt(cfg)
+
+	require.Equal(t, 3*time.Second, cfg.routingTableFetchInterval)
+}

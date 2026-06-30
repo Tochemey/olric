@@ -413,3 +413,101 @@ func TestDMap_plockLeaseCommandHandler(t *testing.T) {
 	err = dm.Unlock(ctx, key, token)
 	require.NoError(t, err)
 }
+
+func TestDMap_unlockCommandHandler_InvalidToken(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	// "zz" is not a valid hex string so the handler's hex.DecodeString fails.
+	cmd := protocol.NewUnlock("lock.test", "lock.test.foo", "zz").Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_lockLeaseCommandHandler_InvalidToken(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	cmd := protocol.NewLockLease("lock.test", "lock.test.foo", "zz", 10).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_plockLeaseCommandHandler_InvalidToken(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	cmd := protocol.NewPLockLease("lock.test", "lock.test.foo", "zz", 2000).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_lockCommandHandler_ErrLockNotAcquired(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+
+	// First lock succeeds.
+	cmd := protocol.NewLock("lock.test", "lock.test.foo", 0.5).Command(s.ctx)
+	err := rc.Process(s.ctx, cmd)
+	require.NoError(t, err)
+	_, err = cmd.Bytes()
+	require.NoError(t, err)
+
+	// Second lock on the same key with a short deadline cannot be acquired,
+	// so the handler reports an error.
+	cmd2 := protocol.NewLock("lock.test", "lock.test.foo", 0.2).Command(s.ctx)
+	err = rc.Process(s.ctx, cmd2)
+	if err == nil {
+		err = cmd2.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_lockLeaseCommandHandler_ErrNoSuchLock(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	// Valid hex token but the lock does not exist => Lease returns ErrNoSuchLock.
+	token := "00000000000000000000000000000000"
+	cmd := protocol.NewLockLease("lock.test", "missing", token, 10).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_plockLeaseCommandHandler_ErrNoSuchLock(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	token := "00000000000000000000000000000000"
+	cmd := protocol.NewPLockLease("lock.test", "missing", token, 2000).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}

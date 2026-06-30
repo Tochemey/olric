@@ -115,3 +115,32 @@ func TestDMap_Expire_pexpireCommandHandler(t *testing.T) {
 	_, _, err = dm.Get(ctx, key)
 	require.ErrorIs(t, err, ErrKeyNotFound)
 }
+
+func TestDMap_expireCommandHandler_ErrKeyNotFound(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	// Expire only updates TTL, so expiring a missing key returns an error.
+	cmd := protocol.NewExpire("expire.test", "missing", time.Second).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_pexpireCommandHandler_ErrKeyNotFound(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	cmd := protocol.NewPExpire("pexpire.test", "missing", time.Millisecond).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}

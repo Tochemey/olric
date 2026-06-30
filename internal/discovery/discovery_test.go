@@ -18,6 +18,7 @@
 package discovery
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -281,4 +282,132 @@ loop:
 
 	require.Contains(t, members, net.JoinHostPort(d2.config.MemberlistConfig.BindAddr, strconv.Itoa(d2.config.MemberlistConfig.BindPort)))
 	require.Contains(t, members, net.JoinHostPort(d3.config.MemberlistConfig.BindAddr, strconv.Itoa(d3.config.MemberlistConfig.BindPort)))
+}
+
+// TestDiscovery_Rejoin verifies that Rejoin re-contacts the supplied peers.
+func TestDiscovery_Rejoin(t *testing.T) {
+	c := newTestCluster(t)
+	d1 := c.addNewMember(t)
+	d2 := c.addNewMember(t)
+
+	addr := net.JoinHostPort(
+		d2.config.MemberlistConfig.BindAddr,
+		strconv.Itoa(d2.config.MemberlistConfig.BindPort),
+	)
+
+	n, err := d1.Rejoin([]string{addr})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
+// TestDiscovery_ShutdownIsIdempotent confirms that calling Shutdown more than
+// once is safe and returns without error.
+func TestDiscovery_ShutdownIsIdempotent(t *testing.T) {
+	c := testutil.NewConfig()
+	f := testutil.NewFlogger(c)
+	d := New(f, c)
+
+	require.NoError(t, d.Start())
+	require.NoError(t, d.Shutdown())
+	// The second call must hit the already-cancelled fast path.
+	require.NoError(t, d.Shutdown())
+}
+
+// TestDiscovery_ShutdownWithServiceDiscovery makes sure that the service
+// discovery plugin is deregistered and closed when the node shuts down.
+func TestDiscovery_ShutdownWithServiceDiscovery(t *testing.T) {
+	c := testutil.NewConfig()
+	sd := &dummyServiceDiscovery{}
+	c.ServiceDiscovery = map[string]interface{}{
+		"plugin": sd,
+	}
+
+	f := testutil.NewFlogger(c)
+	d := New(f, c)
+
+	require.NoError(t, d.Start())
+	require.True(t, sd.register)
+
+	require.NoError(t, d.Shutdown())
+	require.True(t, sd.deregister)
+	require.True(t, sd.closed)
+}
+
+// erroringServiceDiscovery is a ServiceDiscovery whose SetConfig and Initialize
+// methods can be made to fail on demand.
+type erroringServiceDiscovery struct {
+	dummyServiceDiscovery
+	setConfigErr error
+	initErr      error
+}
+
+func (d *erroringServiceDiscovery) SetConfig(_ map[string]interface{}) error {
+	return d.setConfigErr
+}
+
+func (d *erroringServiceDiscovery) Initialize() error {
+	return d.initErr
+}
+
+var _ service_discovery.ServiceDiscovery = (*erroringServiceDiscovery)(nil)
+
+// TestDiscovery_loadServiceDiscoveryPlugin_Errors covers the error branches of
+// loadServiceDiscoveryPlugin.
+func TestDiscovery_loadServiceDiscoveryPlugin_Errors(t *testing.T) {
+	t.Run("missing path", func(t *testing.T) {
+		c := testutil.NewConfig()
+		c.ServiceDiscovery = map[string]interface{}{
+			"provider": "dummy",
+		}
+		d := New(testutil.NewFlogger(c), c)
+		err := d.loadServiceDiscoveryPlugin()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "plugin path could not be found")
+	})
+
+	t.Run("bad plugin path", func(t *testing.T) {
+		c := testutil.NewConfig()
+		c.ServiceDiscovery = map[string]interface{}{
+			"path": "/this/path/does/not/exist/plugin.so",
+		}
+		d := New(testutil.NewFlogger(c), c)
+		err := d.loadServiceDiscoveryPlugin()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to open plugin")
+	})
+
+	t.Run("wrong plugin type", func(t *testing.T) {
+		c := testutil.NewConfig()
+		c.ServiceDiscovery = map[string]interface{}{
+			"plugin": "not-a-service-discovery",
+		}
+		d := New(testutil.NewFlogger(c), c)
+		err := d.loadServiceDiscoveryPlugin()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "is not a ServiceDiscovery interface")
+	})
+
+	t.Run("set config error", func(t *testing.T) {
+		c := testutil.NewConfig()
+		sd := &erroringServiceDiscovery{setConfigErr: errors.New("set config failed")}
+		c.ServiceDiscovery = map[string]interface{}{
+			"plugin": sd,
+		}
+		d := New(testutil.NewFlogger(c), c)
+		err := d.loadServiceDiscoveryPlugin()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "set config failed")
+	})
+
+	t.Run("initialize error", func(t *testing.T) {
+		c := testutil.NewConfig()
+		sd := &erroringServiceDiscovery{initErr: errors.New("initialize failed")}
+		c.ServiceDiscovery = map[string]interface{}{
+			"plugin": sd,
+		}
+		d := New(testutil.NewFlogger(c), c)
+		err := d.loadServiceDiscoveryPlugin()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "initialize failed")
+	})
 }

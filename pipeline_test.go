@@ -565,3 +565,115 @@ func TestDMapPipeline_setOrGetClusterClient(t *testing.T) {
 
 	require.NotNil(t, dm.(*EmbeddedDMap).clusterClient)
 }
+
+func TestPipelineStringValue_UnexpectedCmdType(t *testing.T) {
+	// A *redis.StringCmd is not the expected *redis.Cmd type.
+	cmd := redis.NewStringCmd(context.Background(), "dm.get", "mydmap", "key")
+	_, _, err := pipelineStringValue(cmd)
+	require.ErrorIs(t, err, ErrUnexpectedPipelineCmdType)
+}
+
+func TestPipelineStringValue_UnexpectedValueType(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.get", "mydmap", "key")
+	cmd.SetVal(int64(123)) // not a string
+	_, _, err := pipelineStringValue(cmd)
+	require.ErrorIs(t, err, ErrUnexpectedPipelineValueType)
+}
+
+func TestPipelineStringValue_OK(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.get", "mydmap", "key")
+	cmd.SetVal("hello")
+	value, nilValue, err := pipelineStringValue(cmd)
+	require.NoError(t, err)
+	require.False(t, nilValue)
+	require.Equal(t, "hello", value)
+}
+
+// executedPipeline builds a result map keyed at partition 0 holding the given
+// command and returns a pipeline whose ctx is already canceled (i.e. Exec has
+// completed) so that Result() reads the response instead of returning ErrNotReady.
+func executedPipeline(cmd redis.Cmder) (*DMapPipeline, context.Context) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dp := &DMapPipeline{
+		result: map[uint64][]redis.Cmder{0: {cmd}},
+	}
+	return dp, ctx
+}
+
+func TestFutureDelete_Result_Error(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.del", "mydmap", "key")
+	cmd.SetErr(redis.Nil)
+	dp, ctx := executedPipeline(cmd)
+
+	f := &FutureDelete{dp: dp, ctx: ctx, closedCtx: context.Background()}
+	num, err := f.Result()
+	require.ErrorIs(t, err, ErrKeyNotFound)
+	require.Equal(t, 0, num)
+}
+
+func TestFutureIncr_Result_Error(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.incr", "mydmap", "key")
+	cmd.SetErr(redis.Nil)
+	dp, ctx := executedPipeline(cmd)
+
+	f := &FutureIncr{dp: dp, ctx: ctx, closedCtx: context.Background()}
+	num, err := f.Result()
+	require.ErrorIs(t, err, ErrKeyNotFound)
+	require.Equal(t, 0, num)
+}
+
+func TestFutureDecr_Result_Error(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.decr", "mydmap", "key")
+	cmd.SetErr(redis.Nil)
+	dp, ctx := executedPipeline(cmd)
+
+	f := &FutureDecr{dp: dp, ctx: ctx, closedCtx: context.Background()}
+	num, err := f.Result()
+	require.ErrorIs(t, err, ErrKeyNotFound)
+	require.Equal(t, 0, num)
+}
+
+func TestFutureIncrByFloat_Result_Error(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.incrbyfloat", "mydmap", "key")
+	cmd.SetErr(redis.Nil)
+	dp, ctx := executedPipeline(cmd)
+
+	f := &FutureIncrByFloat{dp: dp, ctx: ctx, closedCtx: context.Background()}
+	val, err := f.Result()
+	require.ErrorIs(t, err, ErrKeyNotFound)
+	require.Equal(t, float64(0), val)
+}
+
+func TestFutureIncrByFloat_Result_NilValue(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.incrbyfloat", "mydmap", "key")
+	cmd.SetVal(nil)
+	dp, ctx := executedPipeline(cmd)
+
+	f := &FutureIncrByFloat{dp: dp, ctx: ctx, closedCtx: context.Background()}
+	val, err := f.Result()
+	require.ErrorIs(t, err, ErrKeyNotFound)
+	require.Equal(t, float64(0), val)
+}
+
+func TestFutureIncrByFloat_Result_OK(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.incrbyfloat", "mydmap", "key")
+	cmd.SetVal("3.14")
+	dp, ctx := executedPipeline(cmd)
+
+	f := &FutureIncrByFloat{dp: dp, ctx: ctx, closedCtx: context.Background()}
+	val, err := f.Result()
+	require.NoError(t, err)
+	require.InDelta(t, 3.14, val, 0.0001)
+}
+
+func TestFutureDelete_Result_OK(t *testing.T) {
+	cmd := redis.NewCmd(context.Background(), "dm.del", "mydmap", "key")
+	cmd.SetVal(int64(1))
+	dp, ctx := executedPipeline(cmd)
+
+	f := &FutureDelete{dp: dp, ctx: ctx, closedCtx: context.Background()}
+	num, err := f.Result()
+	require.NoError(t, err)
+	require.Equal(t, 1, num)
+}

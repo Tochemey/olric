@@ -387,3 +387,8 @@ func (mt *myType) MarshalBinary() ([]byte, error) {
 func (mt *myType) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, &mt)
 }
+
+func TestGetResponse_Partition(t *testing.T) {
+	gr := &GetResponse{partition: 99}
+	require.Equal(t, uint64(99), gr.Partition())
+}

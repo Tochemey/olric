@@ -38,3 +38,10 @@ func TestConfig_DMap(t *testing.T) {
 	require.Equal(t, EvictionPolicy("NONE"), d.EvictionPolicy)
 	require.NotNil(t, d.Engine)
 }
+
+func TestDMap_Validate_ErrorPropagation(t *testing.T) {
+	// A sanitized DMap has a non-nil Engine with a valid Config and validates.
+	dm := &DMap{}
+	require.NoError(t, dm.Sanitize())
+	require.NoError(t, dm.Validate())
+}

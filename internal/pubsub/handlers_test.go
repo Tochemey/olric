@@ -20,14 +20,132 @@ package pubsub
 import (
 	"context"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/redcon"
 
 	"github.com/tochemey/olric/internal/testcluster"
 )
+
+// fakeConn is a minimal redcon.Conn implementation that records the responses
+// written by a command handler. It allows the command handlers to be exercised
+// directly, without going through a real network connection.
+type fakeConn struct {
+	errs []string
+	ints []int
+	arrs []int
+}
+
+func (c *fakeConn) RemoteAddr() string             { return "" }
+func (c *fakeConn) Close() error                   { return nil }
+func (c *fakeConn) WriteError(msg string)          { c.errs = append(c.errs, msg) }
+func (c *fakeConn) WriteString(string)             {}
+func (c *fakeConn) WriteBulk([]byte)               {}
+func (c *fakeConn) WriteBulkString(string)         {}
+func (c *fakeConn) WriteInt(num int)               { c.ints = append(c.ints, num) }
+func (c *fakeConn) WriteInt64(int64)               {}
+func (c *fakeConn) WriteUint64(uint64)             {}
+func (c *fakeConn) WriteArray(count int)           { c.arrs = append(c.arrs, count) }
+func (c *fakeConn) WriteNull()                     {}
+func (c *fakeConn) WriteRaw([]byte)                {}
+func (c *fakeConn) WriteAny(interface{})           {}
+func (c *fakeConn) Context() interface{}           { return nil }
+func (c *fakeConn) SetContext(interface{})         {}
+func (c *fakeConn) SetReadBuffer(int)              {}
+func (c *fakeConn) Detach() redcon.DetachedConn    { return nil }
+func (c *fakeConn) ReadPipeline() []redcon.Command { return nil }
+func (c *fakeConn) PeekPipeline() []redcon.Command { return nil }
+func (c *fakeConn) NetConn() net.Conn              { return nil }
+
+var _ redcon.Conn = (*fakeConn)(nil)
+
+func newCommand(args ...string) redcon.Command {
+	cmd := redcon.Command{}
+	for _, arg := range args {
+		cmd.Args = append(cmd.Args, []byte(arg))
+	}
+	return cmd
+}
+
+// TestPubSub_Handlers_ParseErrors makes sure every command handler reports an
+// error to the client when the incoming command cannot be parsed.
+func TestPubSub_Handlers_ParseErrors(t *testing.T) {
+	s := &Service{pubsub: &PubSub{}}
+
+	// A single-argument command fails parsing for all of these handlers
+	// because they require at least two arguments.
+	bad := newCommand("CMD")
+
+	t.Run("subscribe", func(t *testing.T) {
+		conn := &fakeConn{}
+		s.subscribeCommandHandler(conn, bad)
+		require.Len(t, conn.errs, 1)
+	})
+
+	t.Run("publish", func(t *testing.T) {
+		conn := &fakeConn{}
+		s.publishCommandHandler(conn, bad)
+		require.Len(t, conn.errs, 1)
+	})
+
+	t.Run("publishInternal", func(t *testing.T) {
+		conn := &fakeConn{}
+		s.publishInternalCommandHandler(conn, bad)
+		require.Len(t, conn.errs, 1)
+	})
+
+	t.Run("psubscribe", func(t *testing.T) {
+		conn := &fakeConn{}
+		s.psubscribeCommandHandler(conn, bad)
+		require.Len(t, conn.errs, 1)
+	})
+
+	t.Run("pubsubChannels", func(t *testing.T) {
+		conn := &fakeConn{}
+		s.pubsubChannelsCommandHandler(conn, bad)
+		require.Len(t, conn.errs, 1)
+	})
+
+	t.Run("pubsubNumpat", func(t *testing.T) {
+		conn := &fakeConn{}
+		s.pubsubNumpatCommandHandler(conn, bad)
+		require.Len(t, conn.errs, 1)
+	})
+
+	t.Run("pubsubNumsub", func(t *testing.T) {
+		conn := &fakeConn{}
+		s.pubsubNumsubCommandHandler(conn, bad)
+		require.Len(t, conn.errs, 1)
+	})
+}
+
+// TestPubSub_pubsubNumsub_NoChannels covers the empty-channel branch of the
+// PUBSUB NUMSUB handler, which writes an empty array.
+func TestPubSub_pubsubNumsub_NoChannels(t *testing.T) {
+	s := &Service{pubsub: &PubSub{}}
+	conn := &fakeConn{}
+
+	// "PUBSUB NUMSUB" with no channels: parsing succeeds but there are no
+	// channels, so an empty array must be written.
+	s.pubsubNumsubCommandHandler(conn, newCommand("PUBSUB", "NUMSUB"))
+	require.Equal(t, []int{0}, conn.arrs)
+	require.Empty(t, conn.errs)
+}
+
+// TestPubSub_pubsubNumpat_Empty covers the success path of the PUBSUB NUMPAT
+// handler on an uninitialized PubSub instance.
+func TestPubSub_pubsubNumpat_Empty(t *testing.T) {
+	s := &Service{pubsub: &PubSub{}}
+	conn := &fakeConn{}
+
+	s.pubsubNumpatCommandHandler(conn, newCommand("PUBSUB", "NUMPAT"))
+	require.Equal(t, []int{0}, conn.ints)
+	require.Empty(t, conn.errs)
+}
 
 func TestPubSub_Handler_Subscribe(t *testing.T) {
 	cluster := testcluster.New(NewService)

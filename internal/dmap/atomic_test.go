@@ -32,6 +32,7 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/resp"
 	"github.com/tochemey/olric/internal/testcluster"
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func TestDMap_loadCurrentAtomicInt(t *testing.T) {
@@ -435,4 +436,170 @@ func TestDMap_incrByFloatCommandHandler(t *testing.T) {
 	err = resp.Scan(value, v)
 	require.NoError(t, err)
 	require.Equal(t, 120.0000000000002, *v)
+}
+
+func encodeVal(t *testing.T, v any) []byte {
+	t.Helper()
+	buf := bytes.NewBuffer(nil)
+	require.NoError(t, resp.New(buf).Encode(v))
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
+	return out
+}
+
+func TestDMap_Incr_NonNumericValue(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	// Store a value that cannot be parsed as an integer. loadCurrentAtomicInt
+	// should treat it as zero and the increment should still succeed.
+	err = dm.Put(ctx, "counter", "not-a-number", nil)
+	require.NoError(t, err)
+
+	latest, err := dm.Incr(ctx, "counter", 5)
+	require.NoError(t, err)
+	require.Equal(t, 5, latest)
+}
+
+func TestDMap_IncrByFloat_ParseError(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	// Store a value that cannot be parsed as a float. IncrByFloat must fail.
+	err = dm.Put(ctx, "fcounter", "not-a-float", nil)
+	require.NoError(t, err)
+
+	_, err = dm.IncrByFloat(ctx, "fcounter", 1.5)
+	require.Error(t, err)
+}
+
+func TestDMap_GetPut_NilValue(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	// A nil value exercises the value==nil branch which substitutes an empty
+	// struct. That value is not encodable, so GetPut returns an error.
+	_, err = dm.GetPut(ctx, "k", nil)
+	require.Error(t, err)
+
+	// First GetPut on a missing key returns a nil old entry.
+	old, err := dm.GetPut(ctx, "k2", "first")
+	require.NoError(t, err)
+	require.Nil(t, old)
+
+	// Second GetPut returns the previously stored entry.
+	old, err = dm.GetPut(ctx, "k2", "second")
+	require.NoError(t, err)
+	require.NotNil(t, old)
+}
+
+func TestDMap_incrByFloatCommandHandler_ParseError(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	err = dm.Put(ctx, "fkey", "not-a-float", nil)
+	require.NoError(t, err)
+
+	cmd := protocol.NewIncrByFloat("mydmap", "fkey", 1.2).Command(s.ctx)
+	rc := s.client.Get(s.rt.This().String())
+	err = rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_getPutCommandHandler_RawAndNull(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+
+	// First GetPut: no previous value, the handler writes a null reply.
+	cmd := protocol.NewGetPut("mydmap", "mykey", encodeVal(t, 1)).Command(s.ctx)
+	err := rc.Process(s.ctx, cmd)
+	require.ErrorIs(t, err, redis.Nil)
+
+	// Second GetPut with Raw set: handler returns the previous entry encoded.
+	cmd = protocol.NewGetPut("mydmap", "mykey", encodeVal(t, 2)).SetRaw().Command(s.ctx)
+	err = rc.Process(s.ctx, cmd)
+	require.NoError(t, err)
+	value, err := cmd.Bytes()
+	require.NoError(t, err)
+	require.NotEmpty(t, value)
+}
+
+func TestDMap_incrCommandHandler_WriteQuorumError(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	c := testutil.NewConfig()
+	c.ReplicaCount = 2
+	c.WriteQuorum = 2
+	e := testcluster.NewEnvironment(c)
+	s := cluster.AddMember(e).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+	cmd := protocol.NewIncr("mydmap", "counter", 1).Command(s.ctx)
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_decrCommandHandler_WriteQuorumError(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	c := testutil.NewConfig()
+	c.ReplicaCount = 2
+	c.WriteQuorum = 2
+	e := testcluster.NewEnvironment(c)
+	s := cluster.AddMember(e).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+	cmd := protocol.NewDecr("mydmap", "counter", 1).Command(s.ctx)
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
+}
+
+func TestDMap_getPutCommandHandler_WriteQuorumError(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	c := testutil.NewConfig()
+	c.ReplicaCount = 2
+	c.WriteQuorum = 2
+	e := testcluster.NewEnvironment(c)
+	s := cluster.AddMember(e).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+	cmd := protocol.NewGetPut("mydmap", "mykey", encodeVal(t, 1)).Command(s.ctx)
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.Error(t, err)
 }

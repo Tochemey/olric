@@ -346,3 +346,44 @@ func TestDMap_Delete_Compaction(t *testing.T) {
 	}
 	checkEmptyStorageEngine(t, s)
 }
+
+func TestDMap_delEntryCommandHandler_Replica(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+
+	// DelEntry with the replica flag deletes from the BACKUP partition kind.
+	cmd := protocol.NewDelEntry("mydmap", "missing").SetReplica().Command(s.ctx)
+	err := rc.Process(s.ctx, cmd)
+	if err == nil {
+		err = cmd.Err()
+	}
+	require.NoError(t, err)
+}
+
+func TestDMap_delCommandHandler(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		require.NoError(t, dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i), nil))
+	}
+
+	keys := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		keys = append(keys, testutil.ToKey(i))
+	}
+
+	rc := s.client.Get(s.rt.This().String())
+	cmd := protocol.NewDel("mydmap", keys...).Command(s.ctx)
+	err = rc.Process(s.ctx, cmd)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Err())
+}

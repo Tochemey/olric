@@ -166,3 +166,126 @@ func TestTSLServer_RESP(t *testing.T) {
 
 	respEcho(t, srv, rdb)
 }
+
+func newTestLogger() *flog.Logger {
+	l := log.New(os.Stdout, "server-test: ", log.LstdFlags)
+	fl := flog.New(l)
+	fl.SetLevel(6)
+	fl.ShowLineNumber(1)
+	return fl
+}
+
+func TestServer_HandlerHandleFunc_NilHandler_Panics(t *testing.T) {
+	c := &Config{
+		BindAddr:        "127.0.0.1",
+		BindPort:        0,
+		KeepAlivePeriod: time.Second,
+	}
+	s := New(c, newTestLogger())
+
+	require.PanicsWithValue(t, "server: nil handler", func() {
+		s.ServeMux().HandleFunc("ping", nil)
+	})
+}
+
+func TestServer_Shutdown_NeverStarted(t *testing.T) {
+	c := &Config{
+		BindAddr:        "127.0.0.1",
+		BindPort:        0,
+		KeepAlivePeriod: time.Second,
+	}
+	s := New(c, newTestLogger())
+
+	// The server was never started, so server is nil and Shutdown must
+	// simply return nil.
+	require.NoError(t, s.Shutdown(context.Background()))
+}
+
+func TestServer_Shutdown_AlreadyClosed(t *testing.T) {
+	bindPort, err := getFreePort()
+	require.NoError(t, err)
+
+	c := &Config{
+		BindAddr:        "127.0.0.1",
+		BindPort:        bindPort,
+		KeepAlivePeriod: time.Second,
+	}
+	s := New(c, newTestLogger())
+
+	go func() {
+		_ = s.ListenAndServe()
+	}()
+
+	<-s.StartedCtx.Done()
+
+	require.NoError(t, s.Shutdown(context.Background()))
+	// The second call hits the already-closed fast path.
+	require.NoError(t, s.Shutdown(context.Background()))
+}
+
+func TestServer_SetPreConditionFunc_AfterStart(t *testing.T) {
+	s := newServer(t)
+	<-s.StartedCtx.Done()
+
+	// After the server has started, SetPreConditionFunc must hit the
+	// already-started fast path and return without overwriting the
+	// precondition. The server started with a nil precondition, so it must
+	// remain nil.
+	s.SetPreConditionFunc(func(conn redcon.Conn, cmd redcon.Command) bool {
+		return false
+	})
+	require.Nil(t, s.wmux.precond)
+}
+
+func TestServer_ServeMux_ReturnsWrapper(t *testing.T) {
+	c := &Config{
+		BindAddr:        "127.0.0.1",
+		BindPort:        0,
+		KeepAlivePeriod: time.Second,
+	}
+	s := New(c, newTestLogger())
+	require.NotNil(t, s.ServeMux())
+	require.Same(t, s.wmux, s.ServeMux())
+}
+
+func TestServer_ServeRESP_UnknownCommand(t *testing.T) {
+	s := newServer(t)
+	<-s.StartedCtx.Done()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: net.JoinHostPort(s.config.BindAddr, strconv.Itoa(s.config.BindPort)),
+	})
+
+	ctx := context.Background()
+	cmd := redis.NewStringCmd(ctx, "thiscommanddoesnotexist")
+	err := rdb.Process(ctx, cmd)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown command")
+}
+
+func TestServer_ServeRESP_PubSub_WrongArgs(t *testing.T) {
+	s := newServer(t)
+	<-s.StartedCtx.Done()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: net.JoinHostPort(s.config.BindAddr, strconv.Itoa(s.config.BindPort)),
+	})
+
+	ctx := context.Background()
+	// "pubsub" with no subcommand triggers the wrong-number-of-arguments branch.
+	cmd := redis.NewStringCmd(ctx, "pubsub")
+	err := rdb.Process(ctx, cmd)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "wrong number of arguments")
+}
+
+func TestServer_ListenAndServe_BadAddr(t *testing.T) {
+	c := &Config{
+		BindAddr:        "256.256.256.256",
+		BindPort:        0,
+		KeepAlivePeriod: time.Second,
+	}
+	s := New(c, newTestLogger())
+	err := s.ListenAndServe()
+	require.Error(t, err)
+}

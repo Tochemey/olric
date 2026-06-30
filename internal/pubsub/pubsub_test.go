@@ -29,6 +29,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
+
+	"github.com/tochemey/olric/internal/testutil"
 )
 
 func testPubSubServer(addr string, done chan bool) {
@@ -216,4 +218,106 @@ func TestPubSub(t *testing.T) {
 	<-done
 	// stop the timeout
 	final <- true
+}
+
+// startPubSubServer starts a redcon server backed by a PubSub instance on an
+// ephemeral port. Once a connection issues a (P)SUBSCRIBE the connection is
+// detached and driven by PubSub.bgrunner, which is what we want to exercise.
+func startPubSubServer(t *testing.T) string {
+	t.Helper()
+
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	ps := &PubSub{}
+	handler := func(conn redcon.Conn, cmd redcon.Command) {
+		switch strings.ToLower(string(cmd.Args[0])) {
+		case "subscribe":
+			for i := 1; i < len(cmd.Args); i++ {
+				ps.Subscribe(conn, string(cmd.Args[i]))
+			}
+		case "psubscribe":
+			for i := 1; i < len(cmd.Args); i++ {
+				ps.Psubscribe(conn, string(cmd.Args[i]))
+			}
+		case "publish":
+			conn.WriteInt(ps.Publish(string(cmd.Args[1]), string(cmd.Args[2])))
+		default:
+			conn.WriteError("ERR unknown command")
+		}
+	}
+
+	srv := redcon.NewServer(addr, handler, nil, nil)
+	signal := make(chan error)
+	go func() {
+		_ = srv.ListenServeAndSignal(signal)
+	}()
+	require.NoError(t, <-signal)
+	t.Cleanup(func() {
+		_ = srv.Close()
+	})
+
+	return addr
+}
+
+// TestPubSub_bgrunner exercises the various command branches handled by the
+// detached-connection background runner: ping, quit, unsubscribe, punsubscribe,
+// wrong-argument handling and unknown commands.
+func TestPubSub_bgrunner(t *testing.T) {
+	addr := startPubSubServer(t)
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Drain everything the server sends so the detached connection never
+	// blocks on a full write buffer.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		rd := bufio.NewReader(conn)
+		buf := make([]byte, 4096)
+		for {
+			if _, err := rd.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	write := func(s string) {
+		_, err := fmt.Fprint(conn, s)
+		require.NoError(t, err)
+		// Give bgrunner a moment to process the command in order.
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Subscribe so the connection is detached and bgrunner takes over.
+	write("subscribe foo\r\n")
+	// PING with no argument.
+	write("ping\r\n")
+	// PING with a message.
+	write("ping hello\r\n")
+	// PING with too many arguments -> error branch.
+	write("ping a b c\r\n")
+	// SUBSCRIBE with no channel -> wrong number of arguments branch.
+	write("subscribe\r\n")
+	// PSUBSCRIBE through the detached runner.
+	write("psubscribe pat*\r\n")
+	// Unsubscribe a specific channel.
+	write("unsubscribe foo\r\n")
+	// Unsubscribe all (no plain subscriptions remain -> nil entry branch).
+	write("unsubscribe\r\n")
+	// Punsubscribe all (removes the pattern subscription).
+	write("punsubscribe\r\n")
+	// Unknown command -> default error branch.
+	write("garbage\r\n")
+	// Quit closes the connection.
+	write("quit\r\n")
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection was not closed by the server after QUIT")
+	}
 }
