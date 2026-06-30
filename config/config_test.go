@@ -218,6 +218,17 @@ func TestConfig_Validate_EvictionBudgets(t *testing.T) {
 				},
 				errContains: `DMaps.Custom["mycache"]`,
 			},
+			{
+				// A zero PartitionCount must fall back to DefaultPartitionCount
+				// for the budget check rather than skip it or divide by zero.
+				name: "zero partition count falls back to default",
+				mutate: func(c *Config) {
+					c.DMaps.EvictionPolicy = LRUEviction
+					c.DMaps.MaxKeys = 100
+					c.PartitionCount = 0
+				},
+				errContains: "smaller than PartitionCount",
+			},
 		}
 
 		for _, tt := range tests {

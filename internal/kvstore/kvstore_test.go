@@ -664,6 +664,23 @@ func TestKVStore_PrepareTableSize(t *testing.T) {
 	})
 }
 
+func TestKVStore_DefaultTableSize(t *testing.T) {
+	require.Equal(t, defaultTableSize, DefaultTableSize())
+}
+
+func TestKVStore_PrepareTableSize_Exported(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		got, err := PrepareTableSize(int(4096))
+		require.NoError(t, err)
+		require.Equal(t, uint64(4096), got)
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		_, err := PrepareTableSize("bad")
+		require.Error(t, err)
+	})
+}
+
 func TestKVStore_PutRaw_ErrEntryTooLarge(t *testing.T) {
 	c := DefaultConfig()
 	c.Add("tableSize", 1024)
