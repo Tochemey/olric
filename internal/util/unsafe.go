@@ -1,3 +1,5 @@
+//go:build !appengine
+
 /*
  * Copyright 2018-2024 Burak Sezer
  * Copyright 2025-2026 Arsene Tochemey Gandote
@@ -14,9 +16,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-//go:build !appengine
-// +build !appengine
 
 package util
 
