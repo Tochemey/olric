@@ -29,3 +29,5 @@ playground/
 .gocache/
 .cache/
 .gomodcache/
+# Claude Code local configuration
+.claude/
