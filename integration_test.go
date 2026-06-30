@@ -751,9 +751,6 @@ func TestIntegration_ProactiveSync_RollingRestart(t *testing.T) {
 	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
 	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
 
-	t.Log("Wait for proactive sync: surviving node pushes data to new nodes")
-	<-time.After(30 * time.Second)
-
 	t.Log("Verify keys accessible via cluster client (use survivor as entry - routes to all)")
 	c2, err := NewClusterClient([]string{db1.name})
 	require.NoError(t, err)
@@ -763,19 +760,40 @@ func TestIntegration_ProactiveSync_RollingRestart(t *testing.T) {
 	dm2, err := c2.NewDMap("cache")
 	require.NoError(t, err)
 
-	accessible := 0
-	for i := range keyCount {
-		entry, err := dm2.Get(ctx, fmt.Sprintf("key-%d", i))
-		if err != nil {
-			continue
+	countAccessible := func() int {
+		accessible := 0
+		for i := range keyCount {
+			entry, err := dm2.Get(ctx, fmt.Sprintf("key-%d", i))
+			if err != nil {
+				continue
+			}
+			val, _ := entry.String()
+			if val == fmt.Sprintf("value-%d", i) {
+				accessible++
+			}
 		}
-		val, _ := entry.String()
-		if val == fmt.Sprintf("value-%d", i) {
-			accessible++
+		return accessible
+	}
+
+	// Proactive sync is eventually consistent: the surviving node pushes data to
+	// the replacement nodes over several balancer cycles while the routing table
+	// churns as the two new nodes join (each join changes the signature, which
+	// aborts in-flight balancer cycles). Reading once at a fixed instant can land
+	// mid-sync and catch a transient dip, so poll until enough keys are
+	// accessible and assert on the eventual state instead.
+	threshold := keyCount * 45 / 100
+	t.Log("Wait for proactive sync: surviving node pushes data to new nodes")
+	var accessible int
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		<-time.After(2 * time.Second)
+		accessible = countAccessible()
+		if accessible >= threshold || time.Now().After(deadline) {
+			break
 		}
 	}
 
-	require.GreaterOrEqual(t, accessible, keyCount*45/100,
+	require.GreaterOrEqual(t, accessible, threshold,
 		"At least 45%% of keys should be accessible after rolling restart via proactive sync; got %d/%d",
 		accessible, keyCount)
 
