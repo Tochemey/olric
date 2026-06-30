@@ -183,6 +183,99 @@ func TestConfig_Validate_Errors(t *testing.T) {
 	}
 }
 
+func TestConfig_Validate_EvictionBudgets(t *testing.T) {
+	const mib = 1 << 20
+
+	t.Run("errors", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			mutate      func(c *Config)
+			errContains string
+		}{
+			{
+				name: "MaxInuse per partition smaller than tableSize",
+				mutate: func(c *Config) {
+					c.DMaps.EvictionPolicy = LRUEviction
+					c.DMaps.MaxInuse = 256 * mib
+				},
+				errContains: "smaller than the storage engine tableSize",
+			},
+			{
+				name: "MaxKeys smaller than partition count",
+				mutate: func(c *Config) {
+					c.DMaps.EvictionPolicy = LRUEviction
+					c.DMaps.MaxKeys = 100
+				},
+				errContains: "smaller than PartitionCount",
+			},
+			{
+				name: "custom dmap with tight MaxInuse",
+				mutate: func(c *Config) {
+					c.DMaps.Custom["mycache"] = DMap{
+						EvictionPolicy: LRUEviction,
+						MaxInuse:       256 * mib,
+					}
+				},
+				errContains: `DMaps.Custom["mycache"]`,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				c := validSanitizedConfig(t)
+				tt.mutate(c)
+				err := c.Validate()
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errContains)
+			})
+		}
+	})
+
+	t.Run("valid", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(c *Config)
+		}{
+			{
+				name: "MaxInuse at the per-partition boundary",
+				mutate: func(c *Config) {
+					c.DMaps.EvictionPolicy = LRUEviction
+					c.DMaps.MaxInuse = int(c.PartitionCount) * mib
+				},
+			},
+			{
+				name: "small MaxInuse without LRU eviction",
+				mutate: func(c *Config) {
+					c.DMaps.MaxInuse = 256 * mib
+				},
+			},
+			{
+				name: "MaxInuse disabled",
+				mutate: func(c *Config) {
+					c.DMaps.EvictionPolicy = LRUEviction
+					c.DMaps.MaxKeys = int(c.PartitionCount)
+				},
+			},
+			{
+				name: "reduced partition count keeps small MaxInuse valid",
+				mutate: func(c *Config) {
+					c.DMaps.EvictionPolicy = LRUEviction
+					c.DMaps.MaxInuse = 256 * mib
+					c.PartitionCount = 64
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				c := validSanitizedConfig(t)
+				tt.mutate(c)
+				require.NoError(t, c.Validate())
+			})
+		}
+	})
+}
+
 func TestConfig_Validate_AllLogLevels(t *testing.T) {
 	for _, lvl := range []string{LogLevelDebug, LogLevelWarn, LogLevelInfo, LogLevelError} {
 		c := validSanitizedConfig(t)

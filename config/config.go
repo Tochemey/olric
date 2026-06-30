@@ -409,10 +409,69 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateEvictionBudgets(c.DMaps.EvictionPolicy, c.DMaps.MaxInuse, c.DMaps.MaxKeys, "DMaps"); err != nil {
+		return err
+	}
+
+	for name, custom := range c.DMaps.Custom {
+		label := fmt.Sprintf("DMaps.Custom[%q]", name)
+		if err := c.validateEvictionBudgets(custom.EvictionPolicy, custom.MaxInuse, custom.MaxKeys, label); err != nil {
+			return err
+		}
+	}
+
 	switch c.LogLevel {
 	case LogLevelDebug, LogLevelWarn, LogLevelInfo, LogLevelError:
 	default:
 		return fmt.Errorf("invalid LogLevel: %s", c.LogLevel)
+	}
+
+	return nil
+}
+
+// validateEvictionBudgets guards against a configuration footgun where LRU eviction
+// is enabled but the per-partition budget is too small for the storage engine to
+// operate without runaway allocated-memory growth.
+//
+// The kvstore engine allocates memory in fixed-size, append-only tables. Each
+// partition manages its own storage, so the effective per-partition budget is the
+// node-wide limit divided by the partition count. When that budget is smaller than
+// one storage table, or smaller than one key, eviction fires on nearly every write
+// and tables accumulate as garbage faster than compaction can reclaim them, so the
+// allocated memory grows far beyond the configured limit.
+//
+// PartitionCount is the conservative worst case: a single node owns every partition,
+// while larger clusters give each node a bigger per-partition budget. The validation
+// is skipped unless EvictionPolicy is LRU, since MaxInuse and MaxKeys have no effect
+// otherwise.
+func (c *Config) validateEvictionBudgets(policy EvictionPolicy, maxInuse, maxKeys int, label string) error {
+	if policy != LRUEviction {
+		return nil
+	}
+
+	partitionCount := int(c.PartitionCount)
+	if partitionCount == 0 {
+		partitionCount = DefaultPartitionCount
+	}
+
+	if maxInuse > 0 {
+		tableSize := int(c.DMaps.Engine.TableSize())
+		if perPartition := maxInuse / partitionCount; perPartition < tableSize {
+			return fmt.Errorf(
+				"%s: MaxInuse (%d bytes) split across PartitionCount (%d) gives %d bytes per partition, "+
+					"smaller than the storage engine tableSize (%d bytes); increase MaxInuse to at least "+
+					"PartitionCount*tableSize (%d bytes), reduce PartitionCount, or lower tableSize",
+				label, maxInuse, partitionCount, perPartition, tableSize, partitionCount*tableSize,
+			)
+		}
+	}
+
+	if maxKeys > 0 && maxKeys < partitionCount {
+		return fmt.Errorf(
+			"%s: MaxKeys (%d) is smaller than PartitionCount (%d), so each partition gets a zero key budget "+
+				"and evicts on every write; increase MaxKeys to at least PartitionCount (%d) or reduce PartitionCount",
+			label, maxKeys, partitionCount, partitionCount,
+		)
 	}
 
 	return nil

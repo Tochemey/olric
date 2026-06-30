@@ -47,6 +47,29 @@ func NewEngine() *Engine {
 	}
 }
 
+// TableSize returns the configured storage table size in bytes for this engine.
+// It reads the "tableSize" entry from Config, falling back to the engine default
+// when the entry is absent, of an unexpected type, or when the receiver or its
+// Config is nil. This mirrors how the kvstore engine resolves its table size, so
+// it is safe to call before Sanitize has populated defaults.
+func (s *Engine) TableSize() uint64 {
+	if s == nil || s.Config == nil {
+		return kvstore.DefaultTableSize()
+	}
+
+	raw, ok := s.Config["tableSize"]
+	if !ok {
+		return kvstore.DefaultTableSize()
+	}
+
+	size, err := kvstore.PrepareTableSize(raw)
+	if err != nil {
+		return kvstore.DefaultTableSize()
+	}
+
+	return size
+}
+
 // Validate finds errors in the current configuration.
 func (s *Engine) Validate() error {
 	if s.Config == nil {

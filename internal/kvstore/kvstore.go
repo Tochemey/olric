@@ -128,6 +128,19 @@ func requiredSizeForAnEntry(e storage.Entry) uint64 {
 	return uint64(len(e.Key()) + len(e.Value()) + table.MetadataLength)
 }
 
+// DefaultTableSize returns the default size, in bytes, allocated for a single
+// storage table by the kvstore engine.
+func DefaultTableSize() uint64 {
+	return defaultTableSize
+}
+
+// PrepareTableSize converts a raw "tableSize" configuration value of any supported
+// numeric type into a size in bytes. It returns an error if the value is not a
+// recognised numeric type.
+func PrepareTableSize(raw any) (uint64, error) {
+	return prepareTableSize(raw)
+}
+
 func prepareTableSize(raw any) (size uint64, err error) {
 	switch raw.(type) {
 	case uint:

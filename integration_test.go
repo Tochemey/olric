@@ -317,7 +317,13 @@ func TestIntegration_DMap_Cache_Eviction_LRU_MaxInuse(t *testing.T) {
 		c.WriteQuorum = 1
 		c.ReadQuorum = 1
 		c.LogOutput = io.Discard
-		c.DMaps.MaxInuse = 100 // bytes
+		// Shrink the storage table size so a tight per-partition MaxInuse budget
+		// still satisfies the per-partition budget guard. MaxInuse is set to
+		// PartitionCount*tableSize, the smallest value the guard permits.
+		const tableSize = 1024
+		c.DMaps.Engine = config.NewEngine()
+		c.DMaps.Engine.Config["tableSize"] = tableSize
+		c.DMaps.MaxInuse = config.DefaultPartitionCount * tableSize
 		c.DMaps.EvictionPolicy = "LRU"
 		require.NoError(t, c.Sanitize())
 		require.NoError(t, c.Validate())

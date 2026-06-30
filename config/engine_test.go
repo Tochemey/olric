@@ -47,3 +47,40 @@ func TestEngine_Sanitize_UnknownEngine(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unknown storage engine")
 }
+
+func TestEngine_TableSize(t *testing.T) {
+	const defaultTableSize = uint64(1 << 20)
+
+	t.Run("nil receiver falls back to default", func(t *testing.T) {
+		var e *Engine
+		require.Equal(t, defaultTableSize, e.TableSize())
+	})
+
+	t.Run("nil config falls back to default", func(t *testing.T) {
+		e := &Engine{}
+		require.Equal(t, defaultTableSize, e.TableSize())
+	})
+
+	t.Run("missing entry falls back to default", func(t *testing.T) {
+		e := NewEngine()
+		require.Equal(t, defaultTableSize, e.TableSize())
+	})
+
+	t.Run("unexpected type falls back to default", func(t *testing.T) {
+		e := NewEngine()
+		e.Config["tableSize"] = "not-a-number"
+		require.Equal(t, defaultTableSize, e.TableSize())
+	})
+
+	t.Run("configured value is coerced", func(t *testing.T) {
+		e := NewEngine()
+		e.Config["tableSize"] = 4096
+		require.Equal(t, uint64(4096), e.TableSize())
+	})
+
+	t.Run("sanitized default", func(t *testing.T) {
+		e := NewEngine()
+		require.NoError(t, e.Sanitize())
+		require.Equal(t, defaultTableSize, e.TableSize())
+	})
+}

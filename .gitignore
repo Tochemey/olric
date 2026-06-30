@@ -29,3 +29,4 @@ playground/
 .gocache/
 .cache/
 .gomodcache/
+.claude/
