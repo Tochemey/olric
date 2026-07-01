@@ -362,6 +362,71 @@ func TestPubSub_PubSubNumPat(t *testing.T) {
 	})
 }
 
+func TestPubSub_EmbeddedClient_DefaultAddress(t *testing.T) {
+	// Regression test for https://github.com/olric-data/olric/issues/244
+	//
+	// EmbeddedClient.NewPubSub without a ToAddress option used to call Pick()
+	// on the node's internal connection pool. That pool is populated lazily by
+	// intra-cluster traffic, so on a freshly joined non-coordinator member it
+	// was often empty and NewPubSub failed with "no available client found".
+	cluster := newTestCluster(t)
+	db1 := cluster.addMember(t)
+	db2 := cluster.addMember(t)
+
+	e := db2.NewEmbeddedClient()
+	ps, err := e.NewPubSub()
+	require.NoError(t, err)
+
+	// The default target must be the local node, not an arbitrary member.
+	require.Equal(t, db2.rt.This().String(), ps.rc.Options().Addr)
+
+	// A blank ToAddress must fall back to the local node too, instead of
+	// picking a random member from the connection pool.
+	for _, addr := range []string{"", " ", "\t", "\n", " \t\n "} {
+		ps, err = e.NewPubSub(ToAddress(addr))
+		require.NoError(t, err)
+		require.Equal(t, db2.rt.This().String(), ps.rc.Options().Addr)
+	}
+
+	// An explicit non-blank ToAddress must win over the local-node default.
+	ps1, err := e.NewPubSub(ToAddress(db1.rt.This().String()))
+	require.NoError(t, err)
+	require.Equal(t, db1.rt.This().String(), ps1.rc.Options().Addr)
+
+	pubsubTestRunner(t, ps, "subscribe", "my-channel")
+}
+
+func TestPubSub_EmbeddedClient_NotJoined(t *testing.T) {
+	// Before the node joins the cluster the local member is unknown, so
+	// NewPubSub without an explicit address must fail fast with a clear error
+	// instead of "no available client found".
+	db, err := New(testutil.NewConfig())
+	require.NoError(t, err)
+
+	_, err = db.NewEmbeddedClient().NewPubSub()
+	require.ErrorIs(t, err, ErrNotJoinedYet)
+}
+
+func TestPubSub_ClusterClient_NoAddress(t *testing.T) {
+	// ClusterClient seeds its connection pool with all known members at
+	// construction, so NewPubSub without a ToAddress must pick one of them.
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	ps, err := c.NewPubSub()
+	require.NoError(t, err)
+	require.Contains(t, c.client.Addresses(), ps.rc.Options().Addr)
+
+	pubsubTestRunner(t, ps, "subscribe", "my-channel")
+}
+
 func TestPubSub_Cluster(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		conf := autotls.Config{AutoTLS: true}

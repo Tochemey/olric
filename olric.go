@@ -68,6 +68,10 @@ var (
 	// ErrServerGone means that a cluster member is closed unexpectedly.
 	ErrServerGone = errors.New("server is gone")
 
+	// ErrNotJoinedYet means that the local node has not joined the cluster
+	// yet, so it cannot serve requests that depend on cluster membership.
+	ErrNotJoinedYet = errors.New("node has not joined the cluster yet")
+
 	// ErrKeyNotFound means that returned when a key could not be found.
 	ErrKeyNotFound = errors.New("key not found")
 

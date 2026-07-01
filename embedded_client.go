@@ -404,7 +404,22 @@ func (e *EmbeddedClient) Members(_ context.Context) ([]Member, error) {
 
 // NewPubSub returns a new PubSub client with the given options.
 func (e *EmbeddedClient) NewPubSub(options ...PubSubOption) (*PubSub, error) {
-	return newPubSub(e.db.client, options...)
+	// The embedded connection pool is populated lazily by intra-cluster
+	// traffic, so picking a random member can fail right after startup.
+	// Fall back to the local node when no address is given; a PUBLISH
+	// received by any node is relayed to every member.
+	return newPubSub(e.db.client, e.localNodeAddress, options...)
+}
+
+// localNodeAddress returns the address of the local cluster member. The join
+// check must come first: rt.This() is written during the cluster join, so
+// reading it earlier would race with Olric.Start. The join is always complete
+// by the time the Started callback fires.
+func (e *EmbeddedClient) localNodeAddress() (string, error) {
+	if !e.db.rt.IsJoined() {
+		return "", ErrNotJoinedYet
+	}
+	return e.db.rt.This().String(), nil
 }
 
 // NewEmbeddedClient creates and returns a new EmbeddedClient instance.

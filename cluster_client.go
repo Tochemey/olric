@@ -675,7 +675,9 @@ func (cl *ClusterClient) Close(ctx context.Context) error {
 
 // NewPubSub returns a new PubSub client with the given options.
 func (cl *ClusterClient) NewPubSub(options ...PubSubOption) (*PubSub, error) {
-	return newPubSub(cl.client, options...)
+	// No default address: the ClusterClient pool is seeded with all known
+	// members at construction, so picking one at random is always possible.
+	return newPubSub(cl.client, nil, options...)
 }
 
 // NewDMap returns a new DMap client with the given options.

@@ -32,7 +32,12 @@ type PubSub struct {
 	client *server.Client
 }
 
-func newPubSub(client *server.Client, options ...PubSubOption) (*PubSub, error) {
+// newPubSub creates a PubSub client. The target node is resolved in order of
+// precedence: the ToAddress option, then the defaultAddr resolver, and as a
+// last resort a randomly picked member from the connection pool. defaultAddr
+// is only invoked when no usable address was given, so resolvers may depend
+// on state that explicit-address callers should never touch.
+func newPubSub(client *server.Client, defaultAddr func() (string, error), options ...PubSubOption) (*PubSub, error) {
 	var (
 		err error
 		rc  *redis.Client
@@ -42,7 +47,15 @@ func newPubSub(client *server.Client, options ...PubSubOption) (*PubSub, error) 
 		opt(&pc)
 	}
 
-	addr := strings.Trim(pc.Address, " ")
+	addr := strings.TrimSpace(pc.Address)
+	if addr == "" && defaultAddr != nil {
+		resolved, err := defaultAddr()
+		if err != nil {
+			return nil, err
+		}
+		addr = strings.TrimSpace(resolved)
+	}
+
 	if addr != "" {
 		rc = client.Get(addr)
 	} else {
