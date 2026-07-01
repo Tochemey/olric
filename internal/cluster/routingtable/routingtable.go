@@ -140,6 +140,18 @@ func (r *RoutingTable) This() discovery.Member {
 	return r.this
 }
 
+// IsJoined reports whether this node has completed the cluster join. Observing
+// the closed joined channel establishes a happens-before edge with the write
+// of r.this in Join, so This() is safe to read once IsJoined returns true.
+func (r *RoutingTable) IsJoined() bool {
+	select {
+	case <-r.joined:
+		return true
+	default:
+		return false
+	}
+}
+
 // setNumMembers assigns the current number of members in the cluster to a variable.
 func (r *RoutingTable) setNumMembers() {
 	// Calling NumMembers in every request is quite expensive.
