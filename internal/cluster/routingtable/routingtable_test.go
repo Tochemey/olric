@@ -123,6 +123,30 @@ func (t *testCluster) shutdown() error {
 	return t.errGr.Wait()
 }
 
+func TestRoutingTable_IsJoined(t *testing.T) {
+	c := testutil.NewConfig()
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+
+	// The join has not been attempted yet.
+	require.False(t, rt.IsJoined())
+
+	require.NoError(t, rt.Join())
+	require.True(t, rt.IsJoined())
+
+	require.NoError(t, rt.Start())
+	defer func() {
+		require.NoError(t, rt.Shutdown(context.Background()))
+		require.NoError(t, srv.Shutdown(context.Background()))
+	}()
+
+	require.True(t, rt.IsJoined())
+}
+
 func TestRoutingTable_SingleNode(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster()

@@ -27,6 +27,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/internal/checkpoint"
+	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
 )
 
@@ -397,6 +399,10 @@ func TestPubSub_EmbeddedClient_DefaultAddress(t *testing.T) {
 }
 
 func TestPubSub_EmbeddedClient_NotJoined(t *testing.T) {
+	// This instance is never started, so its checkpoints would otherwise leak
+	// into the process-global counters and break subsequent tests.
+	checkpoint.Reset()
+
 	// Before the node joins the cluster the local member is unknown, so
 	// NewPubSub without an explicit address must fail fast with a clear error
 	// instead of "no available client found".
@@ -405,6 +411,49 @@ func TestPubSub_EmbeddedClient_NotJoined(t *testing.T) {
 
 	_, err = db.NewEmbeddedClient().NewPubSub()
 	require.ErrorIs(t, err, ErrNotJoinedYet)
+}
+
+func TestPubSub_newPubSub_AddressResolution(t *testing.T) {
+	// A client with an empty connection pool; redis clients are created
+	// lazily, so no server is required to test address resolution.
+	client := server.NewClient(nil)
+
+	t.Run("empty pool and no default resolver", func(t *testing.T) {
+		_, err := newPubSub(client, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("resolver error is propagated", func(t *testing.T) {
+		_, err := newPubSub(client, func() (string, error) {
+			return "", ErrNotJoinedYet
+		})
+		require.ErrorIs(t, err, ErrNotJoinedYet)
+	})
+
+	t.Run("resolver provides the default address", func(t *testing.T) {
+		ps, err := newPubSub(client, func() (string, error) {
+			return "127.0.0.1:3320", nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, "127.0.0.1:3320", ps.rc.Options().Addr)
+	})
+
+	t.Run("explicit address wins over the resolver", func(t *testing.T) {
+		ps, err := newPubSub(client, func() (string, error) {
+			return "127.0.0.1:3320", nil
+		}, ToAddress("127.0.0.1:6060"))
+		require.NoError(t, err)
+		require.Equal(t, "127.0.0.1:6060", ps.rc.Options().Addr)
+	})
+
+	t.Run("blank resolver result falls back to pick", func(t *testing.T) {
+		// The pool has been populated by the subtests above.
+		ps, err := newPubSub(client, func() (string, error) {
+			return " \t\n", nil
+		})
+		require.NoError(t, err)
+		require.Contains(t, client.Addresses(), ps.rc.Options().Addr)
+	})
 }
 
 func TestPubSub_ClusterClient_NoAddress(t *testing.T) {
