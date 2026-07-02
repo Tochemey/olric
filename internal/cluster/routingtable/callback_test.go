@@ -41,3 +41,22 @@ func TestRoutingTable_Callback(t *testing.T) {
 		t.Fatalf("Expected number: 1. Got: %v", modified)
 	}
 }
+
+func TestRoutingTable_Callback_CanceledContext(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+	var num int32
+	rt.AddCallback(func() {
+		atomic.AddInt32(&num, 1)
+	})
+
+	// Cancel the routing table context: runCallbacks must return without
+	// invoking any callback.
+	rt.cancel()
+	rt.wg.Add(1)
+	rt.runCallbacks()
+
+	if modified := atomic.LoadInt32(&num); modified != 0 {
+		t.Fatalf("Expected no callback run. Got: %v", modified)
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1270,4 +1271,207 @@ func TestCheckBootstrap_Timeout(t *testing.T) {
 	require.False(t, rt.IsBootstrapped())
 	err = rt.CheckBootstrap()
 	require.Error(t, err)
+}
+
+func TestCheckBootstrap_BootstrappedLater(t *testing.T) {
+	c := testutil.NewConfig()
+	c.BootstrapTimeout = 5 * time.Second
+
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	defer func() {
+		require.NoError(t, srv.Shutdown(context.Background()))
+	}()
+
+	// The coordinator bootstraps the node while CheckBootstrap is polling.
+	go func() {
+		<-time.After(300 * time.Millisecond)
+		rt.markBootstrapped()
+	}()
+
+	require.NoError(t, rt.CheckBootstrap())
+}
+
+func TestRoutingTable_Start_NotJoined(t *testing.T) {
+	c := testutil.NewConfig()
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	defer func() {
+		require.NoError(t, srv.Shutdown(context.Background()))
+	}()
+
+	require.ErrorIs(t, rt.Start(), ErrNotJoinedYet)
+}
+
+func TestRoutingTable_Join_DiscoveryStartError(t *testing.T) {
+	c := testutil.NewConfig()
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+
+	// Occupy the memberlist TCP port: discovery cannot start.
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, ln.Close())
+	}()
+
+	c.MemberlistConfig.BindPort = port
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	defer func() {
+		require.NoError(t, srv.Shutdown(context.Background()))
+	}()
+
+	require.Error(t, rt.Join())
+}
+
+func TestRoutingTable_Start_BootstrapError(t *testing.T) {
+	c := testutil.NewConfig()
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	// The Olric server is intentionally NOT started: the coordinator cannot
+	// push the initial routing table to itself.
+	srv := testutil.NewServer(c)
+	e := environment.New()
+	e.Set("config", c)
+	e.Set("logger", testutil.NewFlogger(c))
+	e.Set("primary", partitions.New(c.PartitionCount, partitions.PRIMARY))
+	e.Set("backup", partitions.New(c.PartitionCount, partitions.BACKUP))
+	e.Set("client", server.NewClient(c.Client))
+	e.Set("server", srv)
+	rt := New(e)
+
+	require.NoError(t, rt.Join())
+	require.Error(t, rt.Start())
+	require.NoError(t, rt.Shutdown(context.Background()))
+}
+
+func TestRoutingTable_Start_CanceledWhileWaitingQuorum(t *testing.T) {
+	c := testutil.NewConfig()
+	c.MemberCountQuorum = 3
+
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	require.NoError(t, rt.Join())
+
+	// A single node can never satisfy a quorum of three members. Cancel the
+	// routing table context while Start is waiting for the quorum.
+	go func() {
+		<-time.After(250 * time.Millisecond)
+		rt.cancel()
+	}()
+
+	require.Error(t, rt.Start())
+
+	require.NoError(t, rt.discovery.Shutdown())
+	require.NoError(t, srv.Shutdown(context.Background()))
+}
+
+func TestRoutingTable_Shutdown_ContextExpired(t *testing.T) {
+	c := testutil.NewConfig()
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	require.NoError(t, rt.Join())
+	require.NoError(t, rt.Start())
+
+	// Occupy the wait group: Shutdown cannot finish before its context expires.
+	release := make(chan struct{})
+	rt.wg.Add(1)
+	go func() {
+		defer rt.wg.Done()
+		<-release
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	require.Error(t, rt.Shutdown(ctx))
+
+	close(release)
+	require.NoError(t, srv.Shutdown(context.Background()))
+}
+
+func TestRoutingTable_PushPeriodically(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	c := testutil.NewConfig()
+	c.RoutingTablePushInterval = 50 * time.Millisecond
+	rt, err := cluster.addNode(c)
+	require.NoError(t, err)
+
+	// Let the periodic push tick a few times.
+	<-time.After(300 * time.Millisecond)
+	require.True(t, rt.IsBootstrapped())
+}
+
+func TestProcessClusterEvent_EdgeCases(t *testing.T) {
+	c := testutil.NewConfig()
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	defer func() {
+		require.NoError(t, srv.Shutdown(context.Background()))
+	}()
+
+	meta, err := discovery.NewMember(testutil.NewConfig()).Encode()
+	require.NoError(t, err)
+
+	// A NodeLeave event for a member that was never registered is ignored.
+	rt.processClusterEvent(&discovery.ClusterEvent{
+		Event:    memberlist.NodeLeave,
+		NodeName: "127.0.0.1:9999",
+		NodeMeta: meta,
+	})
+	require.Zero(t, rt.Members().Length())
+
+	// Events of an unknown type are ignored as well.
+	rt.processClusterEvent(&discovery.ClusterEvent{
+		Event:    memberlist.NodeEventType(42),
+		NodeMeta: meta,
+	})
+	require.Zero(t, rt.Members().Length())
+}
+
+func TestRoutingTable_ProactiveSyncOnJoin(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	newCfg := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.EnableProactiveSyncOnJoin = true
+		return c
+	}
+
+	rt1, err := cluster.addNode(newCfg())
+	require.NoError(t, err)
+
+	var calls int32
+	rt1.AddCallback(func() {
+		atomic.AddInt32(&calls, 1)
+	})
+
+	_, err = cluster.addNode(newCfg())
+	require.NoError(t, err)
+
+	err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if atomic.LoadInt32(&calls) == 0 {
+			return errors.New("routing table callbacks did not run")
+		}
+		return nil
+	})
+	require.NoError(t, err)
 }

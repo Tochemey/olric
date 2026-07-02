@@ -18,19 +18,29 @@
 package olric
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/hasher"
+	"github.com/tochemey/olric/internal/cluster/partitions"
+	"github.com/tochemey/olric/internal/kvstore/entry"
+	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/storage"
 	"github.com/tochemey/olric/stats"
 )
 
@@ -855,4 +865,374 @@ func TestWithRoutingTableFetchInterval_Option(t *testing.T) {
 	opt(cfg)
 
 	require.Equal(t, 3*time.Second, cfg.routingTableFetchInterval)
+}
+// getDeadAddr returns an address on the loopback interface that refuses
+// connections: it binds an ephemeral port and closes the listener right away.
+func getDeadAddr(t *testing.T) string {
+	t.Helper()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+	return addr
+}
+
+// newFastFailClientConfig returns a sanitized client configuration without
+// retries, so commands sent to dead nodes fail immediately.
+func newFastFailClientConfig(t *testing.T) *config.Client {
+	t.Helper()
+
+	cc := &config.Client{
+		MaxRetries:  -1,
+		DialTimeout: time.Second,
+	}
+	require.NoError(t, cc.Sanitize())
+	require.NoError(t, cc.Validate())
+	return cc
+}
+
+// setDefaultHashFunc makes sure the partitions package has a hash function.
+// It is normally set by NewClusterClient or the Olric node itself; tests that
+// build ClusterClient values manually need to set it explicitly.
+func setDefaultHashFunc(t *testing.T) {
+	t.Helper()
+	partitions.SetHashFunc(hasher.NewDefaultHasher())
+}
+
+// newStaticRoutingTable builds a routing table where every partition is owned
+// by the given address.
+func newStaticRoutingTable(partitionCount uint64, owner string) RoutingTable {
+	rt := RoutingTable{}
+	for partID := uint64(0); partID < partitionCount; partID++ {
+		rt[partID] = Route{PrimaryOwners: []string{owner}}
+	}
+	return rt
+}
+
+// newDeadClusterClient returns a ClusterClient and a ClusterDMap that are wired
+// to a TCP endpoint that refuses connections.
+func newDeadClusterClient(t *testing.T) (*ClusterClient, *ClusterDMap, string) {
+	t.Helper()
+	setDefaultHashFunc(t)
+
+	deadAddr := getDeadAddr(t)
+	c := server.NewClient(newFastFailClientConfig(t))
+	// Register the dead address, Pick will always return it.
+	c.Get(deadAddr)
+
+	cl := &ClusterClient{
+		client:         c,
+		config:         &clusterClientConfig{routingTableFetchInterval: time.Minute},
+		logger:         log.New(&bytes.Buffer{}, "", 0),
+		partitionCount: 7,
+	}
+	cl.ctx, cl.cancel = context.WithCancel(context.Background())
+	cl.routingTable.Store(newStaticRoutingTable(cl.partitionCount, deadAddr))
+
+	dm := &ClusterDMap{
+		name:          "mydmap",
+		newEntry:      func() storage.Entry { return entry.New() },
+		config:        &dmapConfig{},
+		client:        c,
+		clusterClient: cl,
+	}
+	return cl, dm, deadAddr
+}
+
+func TestClusterClient_clientByPartID_Errors(t *testing.T) {
+	t.Run("routing table is empty", func(t *testing.T) {
+		cl := &ClusterClient{}
+		_, err := cl.clientByPartID(0)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "routing table is empty")
+	})
+
+	t.Run("routing table is corrupt", func(t *testing.T) {
+		cl := &ClusterClient{}
+		cl.routingTable.Store("this-is-not-a-routing-table")
+		_, err := cl.clientByPartID(0)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "routing table is corrupt")
+	})
+
+	t.Run("empty primary owners", func(t *testing.T) {
+		cl := &ClusterClient{client: server.NewClient(newFastFailClientConfig(t))}
+		cl.routingTable.Store(RoutingTable{})
+		_, err := cl.clientByPartID(0)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "primary owners list for 0 is empty")
+	})
+}
+
+func TestClusterDMap_smartPick_Error_Propagation(t *testing.T) {
+	setDefaultHashFunc(t)
+
+	// A ClusterClient without a routing table makes smartPick fail for all
+	// DMap operations that route requests to partition owners.
+	cl := &ClusterClient{partitionCount: 7}
+	dm := &ClusterDMap{
+		name:          "mydmap",
+		newEntry:      func() storage.Entry { return entry.New() },
+		config:        &dmapConfig{},
+		client:        server.NewClient(newFastFailClientConfig(t)),
+		clusterClient: cl,
+	}
+
+	ctx := context.Background()
+
+	err := dm.Put(ctx, "mykey", "myvalue")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "routing table is empty")
+
+	_, err = dm.Get(ctx, "mykey")
+	require.Error(t, err)
+
+	_, err = dm.Incr(ctx, "mykey", 1)
+	require.Error(t, err)
+
+	_, err = dm.Decr(ctx, "mykey", 1)
+	require.Error(t, err)
+
+	_, err = dm.GetPut(ctx, "mykey", "myvalue")
+	require.Error(t, err)
+
+	_, err = dm.IncrByFloat(ctx, "mykey", 1.2)
+	require.Error(t, err)
+
+	err = dm.Expire(ctx, "mykey", time.Second)
+	require.Error(t, err)
+
+	_, err = dm.Lock(ctx, "mykey", time.Second)
+	require.Error(t, err)
+
+	_, err = dm.LockWithTimeout(ctx, "mykey", time.Second, time.Second)
+	require.Error(t, err)
+
+	lctx := &ClusterLockContext{key: "mykey", token: "token", dm: dm}
+	err = lctx.Unlock(ctx)
+	require.Error(t, err)
+
+	err = lctx.Lease(ctx, time.Second)
+	require.Error(t, err)
+}
+
+func TestClusterDMap_Encode_Errors(t *testing.T) {
+	setDefaultHashFunc(t)
+
+	// smartPick succeeds (clients are created lazily, no connection is made)
+	// but encoding an unsupported value type fails.
+	c := server.NewClient(newFastFailClientConfig(t))
+	cl := &ClusterClient{client: c, partitionCount: 7}
+	cl.routingTable.Store(newStaticRoutingTable(cl.partitionCount, "127.0.0.1:0"))
+	dm := &ClusterDMap{
+		name:          "mydmap",
+		newEntry:      func() storage.Entry { return entry.New() },
+		config:        &dmapConfig{},
+		client:        c,
+		clusterClient: cl,
+	}
+
+	type unsupported struct{ A int }
+	ctx := context.Background()
+
+	err := dm.Put(ctx, "mykey", unsupported{A: 1})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "can't marshal")
+
+	_, err = dm.GetPut(ctx, "mykey", unsupported{A: 1})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "can't marshal")
+}
+
+func TestClusterClient_DeadNode_Errors(t *testing.T) {
+	cl, dm, deadAddr := newDeadClusterClient(t)
+	ctx := context.Background()
+
+	err := dm.Put(ctx, "mykey", "myvalue")
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.Get(ctx, "mykey")
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.Delete(ctx, "mykey")
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.Incr(ctx, "mykey", 1)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.Decr(ctx, "mykey", 1)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.GetPut(ctx, "mykey", "myvalue")
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.IncrByFloat(ctx, "mykey", 1.2)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	err = dm.Expire(ctx, "mykey", time.Second)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.Lock(ctx, "mykey", time.Second)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.LockWithTimeout(ctx, "mykey", time.Second, time.Second)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	lctx := &ClusterLockContext{key: "mykey", token: "token", dm: dm}
+	err = lctx.Unlock(ctx)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	err = lctx.Lease(ctx, time.Second)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	err = dm.Destroy(ctx)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = dm.Scan(ctx)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = cl.Ping(ctx, deadAddr, "hello")
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = cl.RoutingTable(ctx)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = cl.Stats(ctx, deadAddr)
+	require.ErrorIs(t, err, ErrConnRefused)
+
+	_, err = cl.Members(ctx)
+	require.ErrorIs(t, err, ErrConnRefused)
+}
+
+func TestClusterClient_Pick_Errors(t *testing.T) {
+	// A server.Client without registered addresses makes Pick fail.
+	c := server.NewClient(newFastFailClientConfig(t))
+	cl := &ClusterClient{client: c, partitionCount: 7}
+	dm := &ClusterDMap{
+		name:          "mydmap",
+		newEntry:      func() storage.Entry { return entry.New() },
+		config:        &dmapConfig{},
+		client:        c,
+		clusterClient: cl,
+	}
+
+	ctx := context.Background()
+
+	_, err := dm.Delete(ctx, "mykey")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no available client")
+
+	err = dm.Destroy(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no available client")
+
+	_, err = cl.RoutingTable(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no available client")
+
+	_, err = cl.Members(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no available client")
+
+	err = cl.RefreshMetadata(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no available client")
+
+	err = cl.fetchRoutingTable()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "error while loading the routing table")
+}
+
+func TestClusterDMap_makeGetResponse_Error(t *testing.T) {
+	dm := &ClusterDMap{
+		name:     "mydmap",
+		newEntry: func() storage.Entry { return entry.New() },
+	}
+
+	cmd := redis.NewStringCmd(context.Background())
+	cmd.SetErr(errors.New("something went wrong"))
+
+	_, err := dm.makeGetResponse(cmd)
+	require.Error(t, err)
+}
+
+func TestClusterClient_Close_Twice(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db.name})
+	require.NoError(t, err)
+
+	require.NoError(t, c.Close(ctx))
+	// The second call is a no-op: the context is already canceled.
+	require.NoError(t, c.Close(ctx))
+}
+
+func TestClusterClient_NewDMap_WithOptions(t *testing.T) {
+	cl := &ClusterClient{client: server.NewClient(newFastFailClientConfig(t))}
+	dm, err := cl.NewDMap("mydmap", StorageEntryImplementation(func() storage.Entry {
+		return entry.New()
+	}))
+	require.NoError(t, err)
+	require.Equal(t, "mydmap", dm.Name())
+}
+
+// safeBuffer is a goroutine-safe bytes.Buffer used to capture log output.
+type safeBuffer struct {
+	mtx sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+	return s.buf.String()
+}
+
+func TestClusterClient_fetchRoutingTablePeriodically_Error(t *testing.T) {
+	buf := &safeBuffer{}
+	cl := &ClusterClient{
+		// No registered addresses: fetching the routing table always fails.
+		client: server.NewClient(newFastFailClientConfig(t)),
+		config: &clusterClientConfig{routingTableFetchInterval: time.Millisecond},
+		logger: log.New(buf, "", 0),
+	}
+	cl.ctx, cl.cancel = context.WithCancel(context.Background())
+
+	cl.wg.Add(1)
+	go cl.fetchRoutingTablePeriodically()
+
+	err := testutil.TryWithInterval(50, 10*time.Millisecond, func() error {
+		if !strings.Contains(buf.String(), "[ERROR] Failed to fetch the latest version of the routing table") {
+			return errors.New("no error logged yet")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	cl.cancel()
+	cl.wg.Wait()
+}
+
+func TestNewClusterClient_Errors(t *testing.T) {
+	t.Run("empty addresses", func(t *testing.T) {
+		_, err := NewClusterClient([]string{})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "addresses cannot be empty")
+	})
+
+	t.Run("member discovery fails", func(t *testing.T) {
+		deadAddr := getDeadAddr(t)
+		_, err := NewClusterClient([]string{deadAddr}, WithConfig(newFastFailClientConfig(t)))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "error while discovering the cluster members")
+	})
 }

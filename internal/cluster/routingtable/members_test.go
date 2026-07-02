@@ -98,3 +98,18 @@ func TestMembers_Range(t *testing.T) {
 		return true
 	})
 }
+
+func TestMembers_Range_StopsEarly(t *testing.T) {
+	m := newMembers()
+	m.Add(discovery.Member{Name: "localhost:3320", ID: 1})
+	m.Add(discovery.Member{Name: "localhost:3321", ID: 2})
+
+	var visited int
+	m.Range(func(id uint64, member discovery.Member) bool {
+		visited++
+		return false
+	})
+	if visited != 1 {
+		t.Fatalf("Expected Range to stop after the first member. Visited: %d", visited)
+	}
+}

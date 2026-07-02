@@ -18,10 +18,17 @@
 package routingtable
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/redcon"
+	"github.com/vmihailenco/msgpack/v5"
 
+	"github.com/tochemey/olric/internal/discovery"
+	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
 )
 
@@ -57,4 +64,93 @@ func TestPartitionsPendingReceive_WithData(t *testing.T) {
 	for _, id := range pending {
 		require.NotEqual(t, uint64(0), id)
 	}
+}
+
+func TestPartitionsPendingReceive_BackupOwner(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	// Give every primary partition some data: the primary branch no longer
+	// reports them as pending.
+	for partID := uint64(0); partID < rt.config.PartitionCount; partID++ {
+		frag := mockfragment.New()
+		frag.Fill()
+		rt.primary.PartitionByID(partID).Map().Store("dmap.test", frag)
+	}
+
+	// This node is a backup owner for partition 2 but holds no backup data.
+	rt.backup.PartitionByID(2).SetOwners([]discovery.Member{rt.This()})
+
+	pending := rt.partitionsPendingReceive()
+	require.Equal(t, []uint64{2}, pending)
+}
+
+func TestPrepareLeftOverDataReport_Backup(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	frag := mockfragment.New()
+	frag.Fill()
+	rt.backup.PartitionByID(3).Map().Store("dmap.test", frag)
+
+	data, err := rt.prepareLeftOverDataReport()
+	require.NoError(t, err)
+
+	report := leftOverDataReport{}
+	require.NoError(t, msgpack.Unmarshal(data, &report))
+	require.Contains(t, report.Backups, uint64(3))
+}
+
+func TestUpdateRoutingTableOnMember_InvalidReport(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	// A fake member that responds with a payload that cannot be decoded as
+	// a left-over data report.
+	fakeCfg := testutil.NewConfig()
+	fakeSrv := testutil.NewServer(fakeCfg)
+	fakeSrv.ServeMux().HandleFunc(protocol.Internal.UpdateRouting, func(conn redcon.Conn, cmd redcon.Command) {
+		conn.WriteBulkString("this is not msgpack")
+	})
+	go func() {
+		if err := fakeSrv.ListenAndServe(); err != nil {
+			panic(fmt.Sprintf("ListenAndServe returned an error: %v", err))
+		}
+	}()
+	<-fakeSrv.StartedCtx.Done()
+	defer func() {
+		require.NoError(t, fakeSrv.Shutdown(context.Background()))
+	}()
+
+	data, _, err := rt.buildRoutingTablePayload()
+	require.NoError(t, err)
+
+	fakeMember := discovery.Member{Name: fakeCfg.MemberlistConfig.Name}
+	_, err = rt.updateRoutingTableOnMember(data, fakeMember)
+	require.Error(t, err)
+}
+
+func TestUpdateRoutingTableOnCluster_Canceled(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	data, _, err := rt.buildRoutingTablePayload()
+	require.NoError(t, err)
+
+	// Cancel the routing table context: the semaphore cannot be acquired.
+	rt.cancel()
+	_, err = rt.updateRoutingTableOnCluster(data)
+	require.Error(t, err)
 }

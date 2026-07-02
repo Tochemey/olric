@@ -162,3 +162,32 @@ func TestRoutingTable_publishRebalanceCompleteEvent(t *testing.T) {
 	<-ctx.Done()
 	require.ErrorIs(t, context.Canceled, ctx.Err())
 }
+
+func TestRoutingTable_publishRebalanceCompleteEvent_Canceled(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	// The node is shutting down: nothing must be published.
+	rt.cancel()
+	rt.wg.Add(1)
+	rt.publishRebalanceCompleteEvent(42)
+}
+
+func TestRoutingTable_publishRebalanceCompleteEvent_CanceledDuringPublish(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	c := testutil.NewConfig()
+	rt, err := cluster.addNode(c)
+	require.NoError(t, err)
+
+	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+		// Cancel the routing table context before failing the publish: the
+		// error must be swallowed silently because the node is shutting down.
+		rt.cancel()
+		conn.WriteError("ERR publish failed")
+	})
+
+	rt.wg.Add(1)
+	rt.publishRebalanceCompleteEvent(42)
+}

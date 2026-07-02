@@ -25,9 +25,41 @@ import (
 	"github.com/kapetan-io/tackle/autotls"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
 )
+
+func TestProcessLeftOverDataReports_EnsuresOwnership(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	require.True(t, rt.IsBootstrapped())
+
+	leftOver := discovery.Member{Name: "127.0.0.1:9999", ID: 987654, Birthdate: 1}
+	reports := map[discovery.Member]*leftOverDataReport{
+		leftOver: {Partitions: []uint64{0}, Backups: []uint64{1}},
+	}
+	rt.processLeftOverDataReports(reports)
+
+	// The member with left-over data is prepended to the owners list while
+	// the current owner keeps the partition.
+	primary := rt.primary.PartitionByID(0)
+	require.Len(t, primary.Owners(), 2)
+	require.Equal(t, leftOver.ID, primary.Owners()[0].ID)
+	require.Equal(t, rt.This().ID, primary.Owner().ID)
+
+	backup := rt.backup.PartitionByID(1)
+	require.Len(t, backup.Owners(), 1)
+	require.Equal(t, leftOver.ID, backup.Owners()[0].ID)
+
+	// Processing the same report again must not duplicate the ownership.
+	rt.processLeftOverDataReports(reports)
+	require.Len(t, rt.primary.PartitionByID(0).Owners(), 2)
+	require.Len(t, rt.backup.PartitionByID(1).Owners(), 1)
+}
 
 func TestRoutingTable_LeftOverData(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {

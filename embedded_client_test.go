@@ -28,7 +28,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/tochemey/olric/internal/checkpoint"
+	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/storage"
 )
 
 func TestEmbeddedClient_NewDMap(t *testing.T) {
@@ -993,4 +996,146 @@ func TestEmbeddedDMap_Name(t *testing.T) {
 func TestEmbeddedClient_RefreshMetadata(t *testing.T) {
 	e := &EmbeddedClient{}
 	require.NoError(t, e.RefreshMetadata(context.TODO()))
+}
+func TestEmbeddedDMap_setOrGetClusterClient(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	dmc, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+	dm := dmc.(*EmbeddedDMap)
+
+	// Call it concurrently. Exactly one goroutine creates the cluster client,
+	// the others hit either the fast path or the second nil-check under the
+	// write lock.
+	var errGr errgroup.Group
+	for i := 0; i < 20; i++ {
+		errGr.Go(func() error {
+			_, err := dm.setOrGetClusterClient()
+			return err
+		})
+	}
+	require.NoError(t, errGr.Wait())
+	require.NotNil(t, dm.clusterClient)
+	defer func() {
+		require.NoError(t, dm.clusterClient.Close(context.Background()))
+	}()
+
+	// The cached cluster client is returned on subsequent calls.
+	cc, err := dm.setOrGetClusterClient()
+	require.NoError(t, err)
+	require.Equal(t, dm.clusterClient, cc)
+
+	// Pipeline reuses the cached cluster client as well.
+	pipe, err := dm.Pipeline()
+	require.NoError(t, err)
+	pipe.Close()
+}
+
+func TestEmbeddedClient_Errors_After_Shutdown(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	dmc, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+	dm := dmc.(*EmbeddedDMap)
+
+	// Shut down the node. The cleanup registered by newTestCluster tolerates
+	// double Shutdown calls.
+	require.NoError(t, db.Shutdown(context.Background()))
+
+	ctx := context.Background()
+
+	// setOrGetClusterClient cannot create a new cluster client because the
+	// local node does not accept connections anymore.
+	_, err = dm.Pipeline()
+	require.Error(t, err)
+
+	// Scan creates its own cluster client and fails for the same reason.
+	_, err = dm.Scan(ctx)
+	require.Error(t, err)
+}
+
+func TestEmbeddedClient_Errors_Not_Started(t *testing.T) {
+	// This instance is never started, so its checkpoints would otherwise leak
+	// into the process-global counters and break subsequent tests.
+	checkpoint.Reset()
+	t.Cleanup(checkpoint.Reset)
+
+	// A node that has been created but not started cannot satisfy the member
+	// count quorum, so it is not operable.
+	c := testutil.NewConfig()
+	db, err := New(c)
+	require.NoError(t, err)
+	require.NotNil(t, db)
+
+	e := db.NewEmbeddedClient()
+
+	_, err = e.Stats(context.Background(), "127.0.0.1:3320")
+	require.ErrorIs(t, err, ErrClusterQuorum)
+
+	_, err = e.NewDMap("mydmap")
+	require.Error(t, err)
+}
+
+func TestEmbeddedClient_NewDMap_WithOptions(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	dm, err := e.NewDMap("mydmap", StorageEntryImplementation(func() storage.Entry {
+		return entry.New()
+	}))
+	require.NoError(t, err)
+	require.Equal(t, "mydmap", dm.Name())
+}
+
+func TestEmbeddedClient_DMap_GetPut_Error(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	dm, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	type unsupported struct{ A int }
+	_, err = dm.GetPut(context.Background(), "mykey", unsupported{A: 1})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "can't marshal")
+}
+
+func TestEmbeddedClient_Stats_Remote_CollectRuntime(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+	db2 := cluster.addMember(t)
+
+	<-time.After(250 * time.Millisecond)
+
+	e := db.NewEmbeddedClient()
+	s, err := e.Stats(context.Background(), db2.rt.This().String(), CollectRuntime())
+	require.NoError(t, err)
+	require.NotNil(t, s.Runtime)
+	require.Equal(t, db2.rt.This().String(), s.Member.String())
+}
+
+func TestEmbeddedClient_Stats_DeadAddress(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	deadAddr := getDeadAddr(t)
+	e := db.NewEmbeddedClient()
+	_, err := e.Stats(context.Background(), deadAddr)
+	require.ErrorIs(t, err, ErrConnRefused)
+}
+
+func TestEmbeddedClient_Ping_Error(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	deadAddr := getDeadAddr(t)
+	e := db.NewEmbeddedClient()
+	_, err := e.Ping(context.Background(), deadAddr, "")
+	require.Error(t, err)
 }

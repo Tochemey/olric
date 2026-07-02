@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/memberlist"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
@@ -118,4 +119,145 @@ func TestRoutingTable_bootstrapStartsRebalanceEpoch(t *testing.T) {
 	completed := rt.rebalanceState.completed
 	rt.rebalanceMtx.Unlock()
 	require.True(t, completed)
+}
+
+func TestRebalanceReasonFromEvent(t *testing.T) {
+	c := testutil.NewConfig()
+	member := discovery.NewMember(c)
+	meta, err := member.Encode()
+	require.NoError(t, err)
+
+	reason, node := rebalanceReasonFromEvent(&discovery.ClusterEvent{Event: memberlist.NodeJoin, NodeMeta: meta})
+	require.Equal(t, rebalanceReasonNodeJoin, reason)
+	require.Equal(t, member.String(), node)
+
+	reason, node = rebalanceReasonFromEvent(&discovery.ClusterEvent{Event: memberlist.NodeLeave, NodeMeta: meta})
+	require.Equal(t, rebalanceReasonNodeLeft, reason)
+	require.Equal(t, member.String(), node)
+
+	reason, node = rebalanceReasonFromEvent(&discovery.ClusterEvent{Event: memberlist.NodeUpdate, NodeMeta: meta})
+	require.Equal(t, rebalanceReasonNodeUpdate, reason)
+	require.Equal(t, member.String(), node)
+
+	reason, node = rebalanceReasonFromEvent(&discovery.ClusterEvent{Event: memberlist.NodeEventType(42), NodeMeta: meta})
+	require.Equal(t, rebalanceReasonUnknown, reason)
+	require.Equal(t, "", node)
+}
+
+func TestStartRebalanceEpoch_EarlyReturns(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	// A zero epoch is ignored.
+	rt.startRebalanceEpoch(0, rebalanceReasonManual, "")
+	epoch, pending, _, _ := rt.getRebalanceState()
+	require.Zero(t, epoch)
+	require.Zero(t, pending)
+
+	// Without any known members there is nothing to track.
+	rt.startRebalanceEpoch(42, rebalanceReasonManual, "")
+	epoch, pending, _, _ = rt.getRebalanceState()
+	require.Zero(t, epoch)
+	require.Zero(t, pending)
+}
+
+func TestHandleRebalanceAck_EdgeCases(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	// No active epoch.
+	require.False(t, rt.handleRebalanceAck(5, 1))
+
+	rt.rebalanceMtx.Lock()
+	rt.rebalanceState = rebalanceState{
+		epoch:   5,
+		pending: map[uint64]struct{}{1: {}},
+		acked:   map[uint64]struct{}{},
+	}
+	rt.rebalanceMtx.Unlock()
+
+	// Mismatched epoch.
+	require.False(t, rt.handleRebalanceAck(6, 1))
+
+	// A member that is not in the pending set is acknowledged as a no-op.
+	require.True(t, rt.handleRebalanceAck(5, 99))
+
+	// The first ack is recorded. The member is not in the members list, so
+	// the epoch cannot complete yet.
+	require.True(t, rt.handleRebalanceAck(5, 1))
+	// A duplicate ack is idempotent.
+	require.True(t, rt.handleRebalanceAck(5, 1))
+
+	// A completed epoch always reports true.
+	rt.rebalanceMtx.Lock()
+	rt.rebalanceState.completed = true
+	rt.rebalanceMtx.Unlock()
+	require.True(t, rt.handleRebalanceAck(5, 1))
+}
+
+func TestCheckRebalanceCompletionLocked_EarlyReturn(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	// No active epoch: the check is a no-op.
+	rt.rebalanceMtx.Lock()
+	rt.checkRebalanceCompletionLocked()
+	completed := rt.rebalanceState.completed
+	rt.rebalanceMtx.Unlock()
+	require.False(t, completed)
+}
+
+func TestCheckRebalanceCompletionLocked_SkipsEventOnShutdown(t *testing.T) {
+	c := testutil.NewConfig()
+	c.EnableClusterEventsChannel = true
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	peerCfg := testutil.NewConfig()
+	peerCfg.MemberlistConfig.Name = "127.0.0.1:9999"
+	peer := discovery.NewMember(peerCfg)
+
+	rt.Members().Lock()
+	rt.Members().Add(peer)
+	rt.Members().Unlock()
+
+	// The node is shutting down: completion is recorded but the rebalance
+	// completion event must not be published.
+	rt.cancel()
+
+	rt.rebalanceMtx.Lock()
+	rt.rebalanceState = rebalanceState{
+		epoch:   7,
+		pending: map[uint64]struct{}{peer.ID: {}},
+		acked:   map[uint64]struct{}{peer.ID: {}},
+	}
+	rt.checkRebalanceCompletionLocked()
+	completed := rt.rebalanceState.completed
+	rt.rebalanceMtx.Unlock()
+
+	require.True(t, completed)
+}
+
+func TestSendRebalanceAck_ZeroEpoch(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+	require.NoError(t, rt.SendRebalanceAck(0))
+}
+
+func TestSendRebalanceAck_ProcessError(t *testing.T) {
+	c := testutil.NewConfig()
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	require.NoError(t, rt.Join())
+	require.NoError(t, rt.Start())
+	defer func() {
+		require.NoError(t, rt.Shutdown(context.Background()))
+	}()
+
+	// Stop the TCP server: the ack cannot be delivered to the coordinator.
+	require.NoError(t, srv.Shutdown(context.Background()))
+	require.Error(t, rt.SendRebalanceAck(42))
 }
