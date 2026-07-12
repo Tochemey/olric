@@ -18,7 +18,7 @@
 package table
 
 import (
-	"github.com/RoaringBitmap/roaring/roaring64"
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/vmihailenco/msgpack/v5"
 )
 

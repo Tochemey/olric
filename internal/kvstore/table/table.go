@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/RoaringBitmap/roaring/roaring64"
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	"github.com/pkg/errors"
 
 	"github.com/tochemey/olric/pkg/storage"
