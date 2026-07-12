@@ -34,7 +34,6 @@ type EmbeddedIterator struct {
 	client          *EmbeddedClient
 	dm              *dmap.DMap
 	clusterIterator *ClusterIterator
-	ctx             context.Context
 }
 
 func (e *EmbeddedIterator) scanOnOwners() error {
@@ -101,7 +100,11 @@ func (e *EmbeddedIterator) Key() string {
 // Close stops the iteration and releases allocated resources.
 func (e *EmbeddedIterator) Close() {
 	e.clusterIterator.Close()
-	if err := e.clusterClient.Close(e.ctx); err != nil {
-		panic(err)
+	// The internal cluster client is owned by the iterator, so its teardown
+	// must not depend on the caller's scan context, which is routinely
+	// canceled before Close runs. Failing to tear down a connection pool is
+	// not a fatal condition either way: Close never panics.
+	if err := e.clusterClient.Close(context.Background()); err != nil {
+		e.client.db.log.V(2).Printf("[ERROR] Failed to close the embedded iterator's cluster client: %v", err)
 	}
 }

@@ -55,17 +55,23 @@ type ClusterIterator struct {
 	cancel         context.CancelFunc
 }
 
-func (i *ClusterIterator) loadRoute() {
+// loadRoute loads the current partition's route from the routing table. It
+// reports false when the partition is missing (e.g. a transiently incomplete
+// table during a coordinator change): the library must never panic mid-scan,
+// so callers treat that as the end of the iteration.
+func (i *ClusterIterator) loadRoute() bool {
 	i.routingTableMtx.Lock()
 	defer i.routingTableMtx.Unlock()
 
 	route, ok := i.routingTable[i.partID]
 	if !ok {
-		panic("partID: could not be found in the routing table")
+		i.logger.Printf("[ERROR] PartID: %d could not be found in the routing table", i.partID)
+		return false
 	}
 	// Make an explicit copy to avoid pointer aliasing issues
 	routeCopy := route
 	i.route = &routeCopy
+	return true
 }
 
 func (i *ClusterIterator) updateCursor(owner string, cursor uint64) {
@@ -201,10 +207,10 @@ func (i *ClusterIterator) fetchData() error {
 	return i.scanner()
 }
 
-func (i *ClusterIterator) reset() {
+func (i *ClusterIterator) reset() bool {
 	i.partitionKeys = make(map[string]struct{})
 	i.resetPage()
-	i.loadRoute()
+	return i.loadRoute()
 }
 
 func (i *ClusterIterator) next() bool {
@@ -242,7 +248,10 @@ func (i *ClusterIterator) next() bool {
 		if i.partID >= partitionCount {
 			return false
 		}
-		i.reset()
+
+		if !i.reset() {
+			return false
+		}
 		return i.next()
 	}
 	i.pos = 1
