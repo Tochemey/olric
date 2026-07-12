@@ -232,6 +232,63 @@ LOOP:
 	return moved, false
 }
 
+// promoteBackupCopies merges this node's backup fragments into its primary
+// fragments for partitions it has become the primary owner of. After a node
+// failure, the survivor's backup fragment may hold the only copy of a
+// partition; without local promotion that sole copy stays in the backup
+// fragment, and backupCopies would relocate it (transfer + local drop) to the
+// newly assigned replica owner. If that node dies too, the data is destroyed
+// even though this node never failed. Promotion must therefore run before
+// backupCopies in every balancing cycle.
+//
+// The merge reuses the fragment-move machinery: the backup fragment is moved
+// to this node itself with the PRIMARY target kind, which routes it through
+// mergeFragments and its version-aware conflict resolution, then drops the
+// backup fragment.
+func (b *Balancer) promoteBackupCopies(sign uint64) (bool, bool) {
+	if b.config.ReplicaCount <= config.MinimumReplicaCount {
+		return false, false
+	}
+
+	var moved bool
+	for partID := uint64(0); partID < b.config.PartitionCount; partID++ {
+		if b.breakLoop(sign) {
+			return moved, true
+		}
+
+		primaryPart := b.primary.PartitionByID(partID)
+		if primaryPart.OwnerCount() == 0 || !primaryPart.Owner().CompareByName(b.rt.This()) {
+			continue
+		}
+
+		backupPart := b.backup.PartitionByID(partID)
+		length := backupPart.Length()
+		if length == 0 {
+			continue
+		}
+
+		b.log.V(2).Printf("[INFO] Promoting backup copy of PartID: %d to primary on %s", partID, b.rt.This())
+
+		// A fragment is transferred one storage table at a time, so drain the
+		// backup fragment completely before backupCopies may relocate what's
+		// left. Bail out if a cycle makes no progress (e.g. persistent move
+		// errors) to avoid spinning.
+		for length > 0 {
+			partitionMoved, aborted := b.movePartitionWithTargetKind(sign, backupPart, partitions.PRIMARY, b.rt.This())
+			moved = moved || partitionMoved
+			if aborted {
+				return moved, true
+			}
+			current := backupPart.Length()
+			if current >= length {
+				break
+			}
+			length = current
+		}
+	}
+	return moved, false
+}
+
 // pushPrimaryToBackups pushes primary partition data to backup owners that may
 // not yet have it (e.g. newly joined nodes). Enables proactive sync on node join.
 func (b *Balancer) pushPrimaryToBackups(sign uint64) (bool, bool) {
@@ -290,7 +347,13 @@ func (b *Balancer) triggerBalancer() {
 	}
 
 	sign := b.rt.Signature()
-	moved, aborted := b.primaryCopies(sign)
+	moved, aborted := b.promoteBackupCopies(sign)
+	if aborted {
+		return
+	}
+
+	primaryMoved, aborted := b.primaryCopies(sign)
+	moved = moved || primaryMoved
 	if aborted {
 		return
 	}
@@ -360,7 +423,13 @@ func (b *Balancer) BalanceEagerly() {
 	}
 
 	sign := b.rt.Signature()
-	moved, aborted := b.primaryCopies(sign)
+	moved, aborted := b.promoteBackupCopies(sign)
+	if aborted {
+		return
+	}
+
+	primaryMoved, aborted := b.primaryCopies(sign)
+	moved = moved || primaryMoved
 	if aborted {
 		return
 	}

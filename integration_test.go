@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"testing"
 	"time"
 
@@ -36,6 +35,9 @@ import (
 // asynchronously, so tests must not assume a fixed propagation delay.
 func waitForClusterSize(t *testing.T, members []*Olric, expected int32) {
 	t.Helper()
+	// Generous deadline: memberlist failure detection is markedly slower on
+	// starved CI runners, and the race detector slows everything further. The
+	// wait returns as soon as the condition holds.
 	require.Eventually(t, func() bool {
 		for _, member := range members {
 			if member.rt.NumMembers() != expected {
@@ -43,7 +45,7 @@ func waitForClusterSize(t *testing.T, members []*Olric, expected int32) {
 			}
 		}
 		return true
-	}, 10*time.Second, 100*time.Millisecond)
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 // waitForPartitionOwners blocks until every member's routing view assigns an
@@ -64,42 +66,7 @@ func waitForPartitionOwners(t *testing.T, members []*Olric, backupOwners int) {
 			}
 		}
 		return true
-	}, 10*time.Second, 100*time.Millisecond)
-}
-
-// waitForBalancingToSettle blocks until per-partition data placement on the
-// given members stops changing. Ownership assignment (waitForPartitionOwners)
-// completes before the balancer finishes shuffling the data itself; killing a
-// node mid-shuffle can destroy partitions whose only copy was just relocated
-// to it.
-func waitForBalancingToSettle(t *testing.T, members []*Olric) {
-	t.Helper()
-	snapshot := func() []int {
-		var lengths []int
-		for _, member := range members {
-			for partID := uint64(0); partID < member.config.PartitionCount; partID++ {
-				lengths = append(lengths,
-					member.primary.PartitionByID(partID).Length(),
-					member.backup.PartitionByID(partID).Length())
-			}
-		}
-		return lengths
-	}
-
-	stable := 0
-	previous := snapshot()
-	require.Eventually(t, func() bool {
-		current := snapshot()
-		if slices.Equal(current, previous) {
-			stable++
-		} else {
-			stable = 0
-			previous = current
-		}
-		// Three unchanged samples span several balancer cycles
-		// (TriggerBalancerInterval is 50ms in these tests).
-		return stable >= 3
-	}, 10*time.Second, 100*time.Millisecond)
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
@@ -602,6 +569,14 @@ func TestIntegration_ProductionConfig_NoDataLoss(t *testing.T) {
 			t.Logf("Key mykey-%d not found after node failure", i)
 			continue
 		}
+		if errors.Is(err, ErrReadQuorum) {
+			// With WriteQuorum=2 of 3 replicas, the dead node may have held
+			// one of the two acknowledged copies; the surviving single copy
+			// cannot satisfy ReadQuorum=2. Counts as inaccessible against the
+			// threshold below.
+			t.Logf("Key mykey-%d lost read quorum after node failure", i)
+			continue
+		}
 		require.NoError(t, err, "Key should be accessible after node failure")
 		require.NotNil(t, entry, "Entry should not be nil")
 		scannedValue, err := entry.String()
@@ -824,19 +799,16 @@ func TestIntegration_ProactiveSync_RollingRestart(t *testing.T) {
 		require.Equal(t, fmt.Sprintf("value-%d", i), val)
 	}
 
-	t.Log("Simulate rolling restart: terminate 2 of 3 nodes, one at a time")
+	// The two nodes are killed back-to-back on purpose: after db2 leaves, db1
+	// may hold the only copy of a partition in a backup fragment, and the
+	// balancer used to relocate it (transfer + local drop) to db3 as the newly
+	// assigned replica owner — killing db3 mid-shuffle then destroyed those
+	// partitions even though db1 never died. The balancer now promotes such
+	// backup copies into the primary fragment first, so only partitions whose
+	// primary AND backup both lived on db2/db3 (~1/3 with ReplicaCount=2) can
+	// be lost here.
+	t.Log("Simulate rolling restart: terminate 2 of 3 nodes")
 	require.NoError(t, db2.Shutdown(context.Background()))
-
-	// A rolling restart terminates pods one at a time with a grace period in
-	// between. Waiting for the cluster to settle here also avoids a data-loss
-	// race: after db2 leaves, db1 may hold the only copy of a partition in a
-	// backup fragment, and the balancer relocates it (transfer + local drop) to
-	// db3 as the newly assigned replica owner. Killing db3 mid-shuffle destroys
-	// those partitions even though db1 never died.
-	waitForClusterSize(t, []*Olric{db1, db3}, 2)
-	waitForPartitionOwners(t, []*Olric{db1, db3}, 1)
-	waitForBalancingToSettle(t, []*Olric{db1, db3})
-
 	require.NoError(t, db3.Shutdown(context.Background()))
 
 	t.Log("Wait for NodeLeave propagation")

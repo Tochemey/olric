@@ -83,10 +83,13 @@ func (s *Service) triggerCompaction() {
 	// process startup are not reflected.
 	numWorkers := runtime.NumCPU()
 	sem := semaphore.NewWeighted(int64(numWorkers))
+LOOP:
 	for partID := uint64(0); partID < s.config.PartitionCount; partID++ {
 		select {
 		case <-s.ctx.Done():
-			break
+			// The service is shutting down. A bare break would only leave the
+			// select; stop scheduling compaction for the remaining partitions.
+			break LOOP
 		default:
 		}
 

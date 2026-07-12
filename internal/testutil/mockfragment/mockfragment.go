@@ -20,6 +20,7 @@ package mockfragment
 import (
 	"crypto/rand"
 	"fmt"
+	"maps"
 	mrand "math/rand"
 	"sync"
 
@@ -92,7 +93,18 @@ func (f *MockFragment) Fill() {
 }
 
 func (f *MockFragment) Result() map[partitions.Kind]map[uint64]Result {
-	return f.result
+	f.Lock()
+	defer f.Unlock()
+
+	// Return a copy: the balancer may still be mutating the underlying map
+	// from its own goroutine while a test inspects the result.
+	result := make(map[partitions.Kind]map[uint64]Result, len(f.result))
+	for kind, results := range f.result {
+		m := make(map[uint64]Result, len(results))
+		maps.Copy(m, results)
+		result[kind] = m
+	}
+	return result
 }
 
 func (f *MockFragment) Move(part *partitions.Partition, name string, owners []discovery.Member) error {

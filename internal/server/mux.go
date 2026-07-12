@@ -20,14 +20,18 @@ package server
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/tidwall/redcon"
 
 	"github.com/tochemey/olric/internal/util"
 )
 
-// ServeMux is an RESP command multiplexer.
+// ServeMux is an RESP command multiplexer. It is safe for concurrent use:
+// handlers may be registered while the server is already accepting
+// connections (services register their handlers after ListenAndServe).
 type ServeMux struct {
+	mtx      sync.RWMutex
 	handlers map[string]redcon.Handler
 }
 
@@ -55,6 +59,9 @@ func (m *ServeMux) Handle(command string, handler redcon.Handler) {
 	if handler == nil {
 		panic("olric: nil handler")
 	}
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
 	if _, exist := m.handlers[command]; exist {
 		panic("olric: multiple registrations for " + command)
 	}
@@ -62,11 +69,21 @@ func (m *ServeMux) Handle(command string, handler redcon.Handler) {
 	m.handlers[command] = handler
 }
 
+// handler returns the registered handler for the command, if any. The lock is
+// only held for the lookup — never while the handler runs.
+func (m *ServeMux) handler(command string) (redcon.Handler, bool) {
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	h, ok := m.handlers[command]
+	return h, ok
+}
+
 // ServeRESP dispatches the command to the handler.
 func (m *ServeMux) ServeRESP(conn redcon.Conn, cmd redcon.Command) {
 	command := strings.ToLower(util.BytesToString(cmd.Args[0]))
 
-	if handler, ok := m.handlers[command]; ok {
+	if handler, ok := m.handler(command); ok {
 		handler.ServeRESP(conn, cmd)
 		return
 	}
@@ -79,7 +96,7 @@ func (m *ServeMux) ServeRESP(conn redcon.Conn, cmd redcon.Command) {
 		command = fmt.Sprintf("%s %s", command, util.BytesToString(cmd.Args[1]))
 	}
 
-	if handler, ok := m.handlers[command]; ok {
+	if handler, ok := m.handler(command); ok {
 		handler.ServeRESP(conn, cmd)
 		return
 	}

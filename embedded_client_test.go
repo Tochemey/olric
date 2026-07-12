@@ -362,7 +362,7 @@ func TestEmbeddedClient_DMap_Atomic_Incr(t *testing.T) {
 	var errGr errgroup.Group
 	for i := 0; i < 100; i++ {
 		errGr.Go(func() error {
-			_, err = dm.Incr(ctx, "mykey", 1)
+			_, err := dm.Incr(ctx, "mykey", 1)
 			return err
 		})
 	}
@@ -389,7 +389,7 @@ func TestEmbeddedClient_DMap_Atomic_Decr(t *testing.T) {
 	var errGr errgroup.Group
 	for i := 0; i < 100; i++ {
 		errGr.Go(func() error {
-			_, err = dm.Decr(ctx, "mykey", 1)
+			_, err := dm.Decr(ctx, "mykey", 1)
 			return err
 		})
 	}
@@ -435,7 +435,7 @@ func TestEmbeddedClient_DMap_Atomic_IncrByFloat(t *testing.T) {
 	var errGr errgroup.Group
 	for i := 0; i < 100; i++ {
 		errGr.Go(func() error {
-			_, err = dm.IncrByFloat(ctx, "mykey", 1.2)
+			_, err := dm.IncrByFloat(ctx, "mykey", 1.2)
 			return err
 		})
 	}

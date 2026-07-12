@@ -63,7 +63,7 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          go test -mod=vendor -p 1 -timeout 0 -v -coverprofile=coverage.out -covermode=atomic -coverpkg=./... `go list -mod=vendor ./... | grep -v -E "(hasher|internal/bufpool|pkg/flog|pkg/neterrors|pkg/service_discovery)"`
+          go test -mod=vendor -p 1 -timeout 0 -v -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./... `go list -mod=vendor ./... | grep -v -E "(hasher|internal/bufpool|pkg/flog|pkg/neterrors|pkg/service_discovery)"`
       - uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

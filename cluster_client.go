@@ -25,6 +25,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -82,6 +83,12 @@ func processProtocolError(err error) error {
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		opErr := err.(*net.OpError)
 		return fmt.Errorf("%s %s %s: %w", opErr.Op, opErr.Net, opErr.Addr, ErrConnRefused)
+	}
+	// A remote node may relay a raw dial error after forwarding a request to a
+	// partition owner that just died. Only the text survives the RESP
+	// round-trip, so classify it by message to keep such errors retryable.
+	if msg := err.Error(); strings.HasSuffix(msg, "connection refused") {
+		return fmt.Errorf("%s%w", strings.TrimSuffix(msg, "connection refused"), ErrConnRefused)
 	}
 	return convertDMapError(protocol.ConvertError(err))
 }

@@ -95,7 +95,10 @@ func newTestCluster(t *testing.T) *testCluster {
 		cl.mtx.Lock()
 		defer cl.mtx.Unlock()
 		for _, member := range cl.members {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Generous deadline: shutdown waits for leave broadcasts and
+			// background goroutines, which get markedly slower on starved CI
+			// runners and under the race detector.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := member.Shutdown(ctx)
 			cancel()
 			require.NoError(t, err)

@@ -81,14 +81,18 @@ func TestDMap_Shutdown_ContextDeadline(t *testing.T) {
 
 func TestDMap_initialSyncCompletePublisher(t *testing.T) {
 	cluster := testcluster.New(NewService)
-	s := cluster.AddMember(nil).(*Service)
-	defer cluster.Shutdown()
 
-	// Wire up a sync state and mark the initial sync as complete.
+	// Wire up a sync state marked as complete. It must be injected through the
+	// environment before the member starts: assigning s.syncState afterwards
+	// races with Service.Start reading the field from its own goroutine.
 	st := syncstate.New()
 	st.Reset(nil) // empty pending set signals "done" immediately
 	require.True(t, st.IsDone())
-	s.syncState = st
+
+	e := testcluster.NewEnvironment(nil)
+	e.Set("syncstate", st)
+	s := cluster.AddMember(e).(*Service)
+	defer cluster.Shutdown()
 
 	s.wg.Add(1)
 	go s.initialSyncCompletePublisher()
@@ -99,15 +103,19 @@ func TestDMap_initialSyncCompletePublisher(t *testing.T) {
 
 func TestDMap_initialSyncCompletePublisher_ContextDone(t *testing.T) {
 	cluster := testcluster.New(NewService)
-	s := cluster.AddMember(nil).(*Service)
-	defer cluster.Shutdown()
 
 	// Sync state that never completes so the publisher blocks until the
-	// service context is cancelled.
+	// service context is cancelled. Injected through the environment before
+	// the member starts: assigning s.syncState afterwards races with
+	// Service.Start reading the field from its own goroutine.
 	st := syncstate.New()
 	st.Reset([]uint64{1, 2, 3})
 	require.False(t, st.IsDone())
-	s.syncState = st
+
+	e := testcluster.NewEnvironment(nil)
+	e.Set("syncstate", st)
+	s := cluster.AddMember(e).(*Service)
+	defer cluster.Shutdown()
 
 	done := make(chan struct{})
 	s.wg.Add(1)

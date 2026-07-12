@@ -598,12 +598,21 @@ func TestRoutingTable_NodeUpdate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
 		}
-		n.Meta = meta
-		event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: n}
+		// Mutate a copy: LocalNode returns memberlist's live object, and
+		// writing its Meta races with concurrent metadata reads. The event is
+		// delivered to both nodes' event channels directly — the same way
+		// memberlist gossip would fan it out — so each routing table processes
+		// the NodeUpdate.
+		updated := *n
+		updated.Meta = meta
+		event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: &updated}
 		rt2.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
+		rt1.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
 
 		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			rt1.Members().RLock()
 			_, err = rt1.Members().Get(rt2.This().ID)
+			rt1.Members().RUnlock()
 			if err == nil {
 				// node id is updated.
 				return errors.New("rt2 could not be updated")
@@ -654,12 +663,21 @@ func TestRoutingTable_NodeUpdate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
 		}
-		n.Meta = meta
-		event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: n}
+		// Mutate a copy: LocalNode returns memberlist's live object, and
+		// writing its Meta races with concurrent metadata reads. The event is
+		// delivered to both nodes' event channels directly — the same way
+		// memberlist gossip would fan it out — so each routing table processes
+		// the NodeUpdate.
+		updated := *n
+		updated.Meta = meta
+		event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: &updated}
 		rt2.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
+		rt1.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
 
 		err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+			rt1.Members().RLock()
 			_, err = rt1.Members().Get(rt2.This().ID)
+			rt1.Members().RUnlock()
 			if err == nil {
 				// node id is updated.
 				return errors.New("rt2 could not be updated")
@@ -685,13 +703,31 @@ func TestRoutingTable_ConcurrentStartupRebalanceAck(t *testing.T) {
 	defer shutdownCluster(nodes, servers)
 
 	require.NoError(t, waitForClusterMembers(nodes, nodeCount, 5*time.Second))
-	coordinator, epoch, err := waitForActiveEpoch(nodes, 5*time.Second)
-	require.NoError(t, err)
 
-	for _, rt := range nodes {
-		require.NoError(t, rt.SendRebalanceAck(epoch))
+	// The active epoch can be superseded between reading it and the acks
+	// arriving (a late gossip update starts a new rebalance, which discards
+	// acks sent for the previous epoch). Retry the ack cycle against the
+	// current epoch until one completes.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		coordinator, epoch, err := waitForActiveEpoch(nodes, 5*time.Second)
+		require.NoError(t, err)
+
+		var ackErr error
+		for _, rt := range nodes {
+			if err := rt.SendRebalanceAck(epoch); err != nil {
+				ackErr = err
+				break
+			}
+		}
+		if ackErr == nil {
+			if err := waitForRebalanceComplete(coordinator, epoch, 2*time.Second); err == nil {
+				return
+			}
+		}
+		require.Truef(t, time.Now().Before(deadline),
+			"rebalance did not complete for any epoch; last ack error: %v", ackErr)
 	}
-	require.NoError(t, waitForRebalanceComplete(coordinator, epoch, 2*time.Second))
 }
 
 func TestRoutingTable_RebalanceCompletesWhenNodesLeave(t *testing.T) {
