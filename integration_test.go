@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"testing"
 	"time"
 
@@ -29,6 +30,77 @@ import (
 
 	"github.com/tochemey/olric/config"
 )
+
+// waitForClusterSize blocks until every given member's routing table reports
+// the expected number of cluster members. Cluster events are delivered
+// asynchronously, so tests must not assume a fixed propagation delay.
+func waitForClusterSize(t *testing.T, members []*Olric, expected int32) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, member := range members {
+			if member.rt.NumMembers() != expected {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 100*time.Millisecond)
+}
+
+// waitForPartitionOwners blocks until every member's routing view assigns an
+// owner to each primary partition and at least backupOwners owners to each
+// backup partition. Quorum reads and writes fail until this distribution is
+// complete, so membership convergence alone is not enough for quorum configs.
+func waitForPartitionOwners(t *testing.T, members []*Olric, backupOwners int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		for _, member := range members {
+			for partID := uint64(0); partID < member.config.PartitionCount; partID++ {
+				if member.primary.PartitionByID(partID).OwnerCount() < 1 {
+					return false
+				}
+				if member.backup.PartitionByID(partID).OwnerCount() < backupOwners {
+					return false
+				}
+			}
+		}
+		return true
+	}, 10*time.Second, 100*time.Millisecond)
+}
+
+// waitForBalancingToSettle blocks until per-partition data placement on the
+// given members stops changing. Ownership assignment (waitForPartitionOwners)
+// completes before the balancer finishes shuffling the data itself; killing a
+// node mid-shuffle can destroy partitions whose only copy was just relocated
+// to it.
+func waitForBalancingToSettle(t *testing.T, members []*Olric) {
+	t.Helper()
+	snapshot := func() []int {
+		var lengths []int
+		for _, member := range members {
+			for partID := uint64(0); partID < member.config.PartitionCount; partID++ {
+				lengths = append(lengths,
+					member.primary.PartitionByID(partID).Length(),
+					member.backup.PartitionByID(partID).Length())
+			}
+		}
+		return lengths
+	}
+
+	stable := 0
+	previous := snapshot()
+	require.Eventually(t, func() bool {
+		current := snapshot()
+		if slices.Equal(current, previous) {
+			stable++
+		} else {
+			stable = 0
+			previous = current
+		}
+		// Three unchanged samples span several balancer cycles
+		// (TriggerBalancerInterval is 50ms in these tests).
+		return stable >= 3
+	}, 10*time.Second, 100*time.Millisecond)
+}
 
 func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
 	t.Skip("TestIntegration_NodesJoinOrLeftDuringQuery: flaky test")
@@ -388,14 +460,7 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 	db5 := cluster.addMemberWithConfig(t, newConfig())
 
 	t.Log("Wait for all members to see the whole cluster")
-	require.Eventually(t, func() bool {
-		for _, member := range []*Olric{db, db2, db3, db4, db5} {
-			if member.rt.NumMembers() != 5 {
-				return false
-			}
-		}
-		return true
-	}, 10*time.Second, 100*time.Millisecond)
+	waitForClusterSize(t, []*Olric{db, db2, db3, db4, db5}, 5)
 
 	ctx := context.Background()
 	c, err := NewClusterClient([]string{db.name})
@@ -432,14 +497,7 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 	require.NoError(t, db5.Shutdown(context.Background()))
 
 	t.Log("Wait for \"NodeLeave\" event propagation")
-	require.Eventually(t, func() bool {
-		for _, member := range []*Olric{db, db2, db4} {
-			if member.rt.NumMembers() != 3 {
-				return false
-			}
-		}
-		return true
-	}, 10*time.Second, 100*time.Millisecond)
+	waitForClusterSize(t, []*Olric{db, db2, db4}, 3)
 
 	// With WriteQuorum=1 and async replication, a key whose owner died before
 	// replicating may be legitimately gone. The cluster must stay operational:
@@ -480,10 +538,13 @@ func TestIntegration_ProductionConfig_NoDataLoss(t *testing.T) {
 	// Start with 3 nodes (minimum for production config with ReplicaCount=3)
 	db1 := cluster.addMemberWithConfig(t, newConfig())
 	db2 := cluster.addMemberWithConfig(t, newConfig())
-	_ = cluster.addMemberWithConfig(t, newConfig())
+	db3 := cluster.addMemberWithConfig(t, newConfig())
 
 	t.Log("Wait for cluster to stabilize")
-	<-time.After(time.Second)
+	waitForClusterSize(t, []*Olric{db1, db2, db3}, 3)
+	// ReplicaCount=3 on 3 nodes: every partition needs 2 backup owners before
+	// WriteQuorum=2/ReadQuorum=2 operations can succeed.
+	waitForPartitionOwners(t, []*Olric{db1, db2, db3}, 2)
 
 	ctx := context.Background()
 	c, err := NewClusterClient([]string{db1.name})
@@ -516,13 +577,18 @@ func TestIntegration_ProductionConfig_NoDataLoss(t *testing.T) {
 	require.NoError(t, db2.Shutdown(context.Background()))
 
 	t.Log("Wait for \"NodeLeave\" event propagation and rebalancing")
-	<-time.After(2 * time.Second)
+	waitForClusterSize(t, []*Olric{db1, db3}, 2)
+	// With 2 nodes left each partition can have at most 1 backup owner, which
+	// still satisfies ReadQuorum=2 (primary + backup).
+	waitForPartitionOwners(t, []*Olric{db1, db3}, 1)
 
 	t.Log("Verify all keys are still accessible after 1 node failure (2 nodes remaining)")
 	// With ReplicaCount=3, WriteQuorum=2, ReadQuorum=2, we should still have quorum
 	// with 2 nodes remaining (since we wrote to 2+ nodes and can read from 2 nodes)
 	accessibleCount := 0
-	for i := range keyCount {
+	// Classic loop: the ErrConnRefused branch rewinds i to retry the same key,
+	// which has no effect on a range-over-int loop variable.
+	for i := 0; i < keyCount; i++ {
 		ctx := context.Background()
 		entry, err := dm.Get(ctx, fmt.Sprintf("mykey-%d", i))
 		if errors.Is(err, ErrConnRefused) {
@@ -731,7 +797,7 @@ func TestIntegration_ProactiveSync_RollingRestart(t *testing.T) {
 	db3 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
 
 	t.Log("Wait for cluster to stabilize")
-	<-time.After(time.Second)
+	waitForClusterSize(t, []*Olric{db1, db2, db3}, 3)
 
 	ctx := context.Background()
 	c, err := NewClusterClient([]string{db1.name})
@@ -758,16 +824,30 @@ func TestIntegration_ProactiveSync_RollingRestart(t *testing.T) {
 		require.Equal(t, fmt.Sprintf("value-%d", i), val)
 	}
 
-	t.Log("Simulate rolling restart: terminate 2 of 3 nodes")
+	t.Log("Simulate rolling restart: terminate 2 of 3 nodes, one at a time")
 	require.NoError(t, db2.Shutdown(context.Background()))
+
+	// A rolling restart terminates pods one at a time with a grace period in
+	// between. Waiting for the cluster to settle here also avoids a data-loss
+	// race: after db2 leaves, db1 may hold the only copy of a partition in a
+	// backup fragment, and the balancer relocates it (transfer + local drop) to
+	// db3 as the newly assigned replica owner. Killing db3 mid-shuffle destroys
+	// those partitions even though db1 never died.
+	waitForClusterSize(t, []*Olric{db1, db3}, 2)
+	waitForPartitionOwners(t, []*Olric{db1, db3}, 1)
+	waitForBalancingToSettle(t, []*Olric{db1, db3})
+
 	require.NoError(t, db3.Shutdown(context.Background()))
 
 	t.Log("Wait for NodeLeave propagation")
-	<-time.After(2 * time.Second)
+	waitForClusterSize(t, []*Olric{db1}, 1)
 
 	t.Log("Add 2 new nodes (replacement pods)")
-	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
-	_ = cluster.addMemberWithConfig(t, productionLikeConfig(t))
+	db4 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+	db5 := cluster.addMemberWithConfig(t, productionLikeConfig(t))
+
+	t.Log("Wait for the replacement nodes to join")
+	waitForClusterSize(t, []*Olric{db1, db4, db5}, 3)
 
 	t.Log("Verify keys accessible via cluster client (use survivor as entry - routes to all)")
 	c2, err := NewClusterClient([]string{db1.name})
@@ -806,6 +886,7 @@ func TestIntegration_ProactiveSync_RollingRestart(t *testing.T) {
 	for {
 		<-time.After(2 * time.Second)
 		accessible = countAccessible()
+		t.Logf("accessible keys: %d/%d (threshold %d)", accessible, keyCount, threshold)
 		if accessible >= threshold || time.Now().After(deadline) {
 			break
 		}
