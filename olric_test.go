@@ -20,6 +20,7 @@ package olric
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -28,7 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
-	"github.com/tochemey/olric/internal/checkpoint"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/stats"
 )
@@ -37,12 +37,6 @@ import (
 // This function is intended for internal use. Please use testOlricCluster and its
 // methods to form a cluster in tests.
 func newTestWithConfig(t *testing.T, c *config.Config) *Olric {
-	// Reset checkpoint counters to prevent accumulation across tests. Tests that
-	// call New() without Start() (e.g. TestOlric_WaitForInitialSync_ReplicaCount1)
-	// leave required > passed, which would cause AllPassed() to return false for
-	// all subsequent tests that do call Start().
-	checkpoint.Reset()
-
 	port, err := testutil.GetFreePort()
 	require.NoError(t, err)
 
@@ -135,6 +129,37 @@ func TestStartAndShutdown(t *testing.T) {
 
 	err := db.Shutdown(context.Background())
 	require.NoError(t, err)
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/20. A failed
+// node start must not block the Started callback of instances created later
+// in the same process.
+func TestOlric_StartedCallback_AfterFailedStart(t *testing.T) {
+	// Occupy a TCP port so memberlist cannot bind it and the discovery
+	// subsystem fails to start, making Start return an error. At that point
+	// the TCP server checkpoint has passed but the routing table checkpoint
+	// has not, which used to leave the process-global counters unbalanced
+	// forever.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, blocker.Close())
+	}()
+
+	c := testutil.NewConfig()
+	c.MemberlistConfig.BindAddr = "127.0.0.1"
+	c.MemberlistConfig.BindPort = blocker.Addr().(*net.TCPAddr).Port
+
+	db, err := New(c)
+	require.NoError(t, err)
+	require.Error(t, db.Start())
+	require.NoError(t, db.Shutdown(context.Background()))
+
+	// A healthy instance in the same process must still fire Started.
+	// newTestWithConfig fails the test if the callback does not fire within
+	// a second.
+	cluster := newTestCluster(t)
+	cluster.addMember(t)
 }
 
 func TestClusterStartAndShutdown(t *testing.T) {

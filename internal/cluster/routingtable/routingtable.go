@@ -85,7 +85,8 @@ type RoutingTable struct {
 	rebalanceMtx   sync.Mutex
 	rebalanceState rebalanceState
 
-	syncState *syncstate.State
+	syncState  *syncstate.State
+	checkpoint *checkpoint.Checkpoint
 }
 
 func registerErrors() {
@@ -96,8 +97,12 @@ func registerErrors() {
 }
 
 func New(e *environment.Environment) *RoutingTable {
+	cp, _ := e.Get("checkpoint").(*checkpoint.Checkpoint)
+	if cp == nil {
+		cp = checkpoint.New()
+	}
 	// The routing table has to be started properly before accepting connections.
-	checkpoint.Add()
+	cp.Add()
 	c := e.Get("config").(*config.Config)
 	log := e.Get("logger").(*flog.Logger)
 
@@ -121,6 +126,7 @@ func New(e *environment.Environment) *RoutingTable {
 		server:     e.Get("server").(*server.Server),
 		pushPeriod: c.RoutingTablePushInterval,
 		joined:     make(chan struct{}),
+		checkpoint: cp,
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -483,7 +489,7 @@ func (r *RoutingTable) Start() error {
 	}
 	r.log.V(2).Printf("[INFO] Memberlist bindAddr: %s, bindPort: %d", r.config.MemberlistConfig.BindAddr, r.config.MemberlistConfig.BindPort)
 	r.log.V(2).Printf("[INFO] Cluster coordinator: %s", r.discovery.GetCoordinator())
-	checkpoint.Pass()
+	r.checkpoint.Pass()
 	return nil
 }
 

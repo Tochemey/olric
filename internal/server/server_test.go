@@ -66,7 +66,7 @@ func newServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Conn, 
 		BindPort:        bindPort,
 		KeepAlivePeriod: time.Second,
 	}
-	s := New(c, fl)
+	s := New(c, fl, nil)
 	s.SetPreConditionFunc(preCond)
 
 	go func() {
@@ -105,7 +105,7 @@ func newTLSServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Con
 		KeepAlivePeriod: time.Second,
 		TLS:             conf.ServerTLS,
 	}
-	s := New(c, fl)
+	s := New(c, fl, nil)
 	s.SetPreConditionFunc(preCond)
 
 	go func() {
@@ -181,7 +181,7 @@ func TestServer_HandlerHandleFunc_NilHandler_Panics(t *testing.T) {
 		BindPort:        0,
 		KeepAlivePeriod: time.Second,
 	}
-	s := New(c, newTestLogger())
+	s := New(c, newTestLogger(), nil)
 
 	require.PanicsWithValue(t, "server: nil handler", func() {
 		s.ServeMux().HandleFunc("ping", nil)
@@ -194,7 +194,7 @@ func TestServer_Shutdown_NeverStarted(t *testing.T) {
 		BindPort:        0,
 		KeepAlivePeriod: time.Second,
 	}
-	s := New(c, newTestLogger())
+	s := New(c, newTestLogger(), nil)
 
 	// The server was never started, so server is nil and Shutdown must
 	// simply return nil.
@@ -210,7 +210,7 @@ func TestServer_Shutdown_AlreadyClosed(t *testing.T) {
 		BindPort:        bindPort,
 		KeepAlivePeriod: time.Second,
 	}
-	s := New(c, newTestLogger())
+	s := New(c, newTestLogger(), nil)
 
 	go func() {
 		_ = s.ListenAndServe()
@@ -243,7 +243,7 @@ func TestServer_ServeMux_ReturnsWrapper(t *testing.T) {
 		BindPort:        0,
 		KeepAlivePeriod: time.Second,
 	}
-	s := New(c, newTestLogger())
+	s := New(c, newTestLogger(), nil)
 	require.NotNil(t, s.ServeMux())
 	require.Same(t, s.wmux, s.ServeMux())
 }
@@ -285,7 +285,7 @@ func TestServer_ListenAndServe_BadAddr(t *testing.T) {
 		BindPort:        0,
 		KeepAlivePeriod: time.Second,
 	}
-	s := New(c, newTestLogger())
+	s := New(c, newTestLogger(), nil)
 	err := s.ListenAndServe()
 	require.Error(t, err)
 }

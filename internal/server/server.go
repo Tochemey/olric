@@ -118,6 +118,7 @@ type Server struct {
 	server     ConServer
 	log        *flog.Logger
 	listener   *ListenerWrapper
+	checkpoint *checkpoint.Checkpoint
 	StartedCtx context.Context
 	started    context.CancelFunc
 	ctx        context.Context
@@ -128,9 +129,12 @@ type Server struct {
 }
 
 // New creates and returns a new Server.
-func New(config *Config, logger *flog.Logger) *Server {
+func New(config *Config, logger *flog.Logger, cp *checkpoint.Checkpoint) *Server {
+	if cp == nil {
+		cp = checkpoint.New()
+	}
 	// The server has to be started properly before accepting connections.
-	checkpoint.Add()
+	cp.Add()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	startedCtx, started := context.WithCancel(context.Background())
@@ -138,6 +142,7 @@ func New(config *Config, logger *flog.Logger) *Server {
 		config:     config,
 		mux:        NewServeMux(),
 		log:        logger,
+		checkpoint: cp,
 		started:    started,
 		StartedCtx: startedCtx,
 		stopped:    make(chan struct{}),
@@ -182,7 +187,7 @@ func (s *Server) ListenAndServe() error {
 
 	// The TCP server has been started
 	s.started()
-	checkpoint.Pass()
+	s.checkpoint.Pass()
 	return s.server.Serve(lw)
 }
 

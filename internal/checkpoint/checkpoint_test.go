@@ -25,25 +25,40 @@ import (
 )
 
 func TestCheckpoint(t *testing.T) {
+	cp := New()
+
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			Add()
+			cp.Add()
 		}()
 	}
 
 	wg.Wait()
+	require.False(t, cp.AllPassed())
 
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			Pass()
+			cp.Pass()
 		}()
 	}
 
 	wg.Wait()
-	require.Equal(t, true, AllPassed())
+	require.True(t, cp.AllPassed())
+}
+
+func TestCheckpoint_Isolated(t *testing.T) {
+	// A checkpoint with an unmet requirement must not affect a fresh one.
+	failed := New()
+	failed.Add()
+	require.False(t, failed.AllPassed())
+
+	healthy := New()
+	healthy.Add()
+	healthy.Pass()
+	require.True(t, healthy.AllPassed())
 }

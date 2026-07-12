@@ -133,6 +133,10 @@ type Olric struct {
 	pubsub *pubsub.Service
 	dmap   *dmap.Service
 
+	// Per-instance readiness checkpoints. A failed start of another instance
+	// in the same process must not block this instance's Started callback.
+	checkpoint *checkpoint.Checkpoint
+
 	// Structures for flow control
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -229,19 +233,22 @@ func New(config *config.Config) (*Olric, error) {
 	e.Set("primary", partitions.New(config.PartitionCount, partitions.PRIMARY))
 	e.Set("backup", partitions.New(config.PartitionCount, partitions.BACKUP))
 	e.Set("locker", locker.New())
+	cp := checkpoint.New()
+	e.Set("checkpoint", cp)
 	ctx, cancel := context.WithCancel(context.Background())
 	db := &Olric{
-		name:     config.MemberlistConfig.Name,
-		env:      e,
-		log:      flogger,
-		config:   config,
-		hashFunc: config.Hasher,
-		client:   client,
-		primary:  e.Get("primary").(*partitions.Partitions),
-		backup:   e.Get("backup").(*partitions.Partitions),
-		started:  config.Started,
-		ctx:      ctx,
-		cancel:   cancel,
+		name:       config.MemberlistConfig.Name,
+		env:        e,
+		log:        flogger,
+		config:     config,
+		hashFunc:   config.Hasher,
+		client:     client,
+		primary:    e.Get("primary").(*partitions.Partitions),
+		backup:     e.Get("backup").(*partitions.Partitions),
+		started:    config.Started,
+		checkpoint: cp,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	// Create a Redcon server instance
@@ -255,7 +262,7 @@ func New(config *config.Config) (*Olric, error) {
 		rc.TLS = config.TLS.Server
 	}
 
-	srv := server.New(rc, flogger)
+	srv := server.New(rc, flogger, cp)
 	srv.SetPreConditionFunc(db.preconditionFunc)
 
 	db.server = srv
@@ -299,7 +306,7 @@ func (db *Olric) callStartedCallback() {
 		timer.Reset(10 * time.Millisecond)
 		select {
 		case <-timer.C:
-			if checkpoint.AllPassed() {
+			if db.checkpoint.AllPassed() {
 				if db.started != nil {
 					db.started()
 				}

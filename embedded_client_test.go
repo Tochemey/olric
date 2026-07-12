@@ -28,7 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/tochemey/olric/internal/checkpoint"
 	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/pkg/storage"
@@ -1059,11 +1058,6 @@ func TestEmbeddedClient_Errors_After_Shutdown(t *testing.T) {
 }
 
 func TestEmbeddedClient_Errors_Not_Started(t *testing.T) {
-	// This instance is never started, so its checkpoints would otherwise leak
-	// into the process-global counters and break subsequent tests.
-	checkpoint.Reset()
-	t.Cleanup(checkpoint.Reset)
-
 	// A node that has been created but not started cannot satisfy the member
 	// count quorum, so it is not operable.
 	c := testutil.NewConfig()
