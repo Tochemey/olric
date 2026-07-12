@@ -289,3 +289,34 @@ func TestServer_ListenAndServe_BadAddr(t *testing.T) {
 	err := s.ListenAndServe()
 	require.Error(t, err)
 }
+
+// Regression test for the startup/shutdown race that hung CI: a Shutdown
+// landing before redcon's Serve stores the listener used to hit redcon's
+// "not serving" no-op Close, leaving the serve loop running and Shutdown
+// blocked on <-s.stopped forever. Shutdown must terminate the serve loop no
+// matter which side of that window it lands on, and ListenAndServe must
+// report the resulting accept error as a graceful stop.
+func TestServer_ShutdownRightAfterStart(t *testing.T) {
+	for range 50 {
+		bindPort, err := getFreePort()
+		require.NoError(t, err)
+		c := &Config{
+			BindAddr:        "127.0.0.1",
+			BindPort:        bindPort,
+			KeepAlivePeriod: time.Second,
+		}
+		s := New(c, newTestLogger(), nil)
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- s.ListenAndServe()
+		}()
+		<-s.StartedCtx.Done()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = s.Shutdown(ctx)
+		cancel()
+		require.NoError(t, err)
+		require.NoError(t, <-errCh)
+	}
+}
