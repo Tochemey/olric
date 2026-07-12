@@ -25,28 +25,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestState_Reset_Empty(t *testing.T) {
+func TestState_Reconcile_Empty(t *testing.T) {
 	s := New()
-	s.Reset(nil)
+	s.Reconcile(nil, time.Second)
 	require.True(t, s.PendingEmpty())
 	require.True(t, s.IsDone())
 	select {
 	case <-s.Done():
 	default:
-		t.Fatal("Done() channel should be closed when reset with empty")
+		t.Fatal("Done() channel should be closed when reconciled with empty")
 	}
 }
 
-func TestState_Reset_WithPartitions(t *testing.T) {
+func TestState_Reconcile_WithPartitions(t *testing.T) {
 	s := New()
-	s.Reset([]uint64{1, 2, 3})
+	s.Reconcile([]uint64{1, 2, 3}, time.Second)
 	require.False(t, s.PendingEmpty())
 	require.False(t, s.IsDone())
 }
 
 func TestState_MarkReceived(t *testing.T) {
 	s := New()
-	s.Reset([]uint64{1, 2, 3})
+	s.Reconcile([]uint64{1, 2, 3}, time.Second)
 
 	s.MarkReceived(2)
 	require.False(t, s.PendingEmpty())
@@ -59,42 +59,140 @@ func TestState_MarkReceived(t *testing.T) {
 
 func TestState_MarkReceived_UnknownPartition(t *testing.T) {
 	s := New()
-	s.Reset([]uint64{1})
+	s.Reconcile([]uint64{1}, time.Second)
 	s.MarkReceived(99) // not in pending
 	require.False(t, s.PendingEmpty())
 	s.MarkReceived(1)
 	require.True(t, s.PendingEmpty())
 }
 
-func TestState_Reset_AfterDone(t *testing.T) {
+func TestState_Reconcile_AfterDone(t *testing.T) {
 	s := New()
-	s.Reset([]uint64{1})
+	s.Reconcile([]uint64{1}, time.Second)
 	s.MarkReceived(1)
 	require.True(t, s.IsDone())
 
-	s.Reset([]uint64{2, 3})
+	s.Reconcile([]uint64{2, 3}, time.Second)
 	require.False(t, s.IsDone())
 	require.False(t, s.PendingEmpty())
 }
 
-func TestState_StartEmptyPartitionTimeout(t *testing.T) {
+func TestState_Reconcile_PreservesDeadlines(t *testing.T) {
+	// The escape clock of an already-pending partition must not restart when
+	// the pending set is reconciled again: churn faster than the escape delay
+	// must not starve expiry.
 	s := New()
-	s.Reset([]uint64{1, 2, 3})
+	escape := 100 * time.Millisecond
+	s.Reconcile([]uint64{1, 2}, escape)
+
+	deadline := time.Now().Add(escape)
+	// Reconcile repeatedly, always faster than the escape delay.
+	for time.Now().Before(deadline.Add(50 * time.Millisecond)) {
+		s.Reconcile([]uint64{1, 2}, escape)
+		if s.PendingEmpty() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.True(t, s.PendingEmpty(),
+		"partitions must escape after their original deadline despite continuous reconciles")
+	require.True(t, s.IsDone())
+
+	// An escaped partition must stay escaped: a later Reconcile with the same
+	// IDs must not resurrect it with a fresh clock.
+	s.Reconcile([]uint64{1, 2}, escape)
+	require.True(t, s.PendingEmpty(),
+		"reconcile must not restart the escape clock of an already-escaped partition")
+	require.True(t, s.IsDone())
+}
+
+func TestState_Reconcile_DropsStaleEntries(t *testing.T) {
+	s := New()
+	s.Reconcile([]uint64{1, 2, 3}, time.Second)
+	// Partition 3 is no longer pending receive.
+	s.Reconcile([]uint64{1, 2}, time.Second)
+	s.MarkReceived(1)
+	s.MarkReceived(2)
+	require.True(t, s.PendingEmpty())
+	require.True(t, s.IsDone())
+}
+
+func TestState_LazyExpiry_PendingEmpty(t *testing.T) {
+	s := New()
+	s.Reconcile([]uint64{1, 2}, 20*time.Millisecond)
+	require.False(t, s.PendingEmpty())
+
+	time.Sleep(40 * time.Millisecond)
+	require.True(t, s.PendingEmpty(), "expired partitions must be pruned lazily")
+	require.True(t, s.IsDone())
+}
+
+func TestState_Expiry_SignalsDoneWithoutPolling(t *testing.T) {
+	// Done must fire even when nothing polls PendingEmpty: WaitForInitialSync
+	// and the dmap initial-sync publisher only wait on the channel.
+	s := New()
+	s.Reconcile([]uint64{1, 2, 3}, 20*time.Millisecond)
 	require.False(t, s.IsDone())
 
-	s.StartEmptyPartitionTimeout(10 * time.Millisecond)
 	select {
 	case <-s.Done():
 		require.True(t, s.IsDone())
-		require.True(t, s.PendingEmpty())
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Done() should close within timeout")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Done() should close once the escape deadline elapses")
 	}
 }
 
-func TestState_Done_ConcurrentWithReset(t *testing.T) {
+func TestState_Expiry_MixedDeadlines(t *testing.T) {
+	// A later Reconcile adds a new partition with a later deadline; the
+	// backstop timer must fire for both, in order.
 	s := New()
-	s.Reset([]uint64{1, 2, 3})
+	s.Reconcile([]uint64{1}, 30*time.Millisecond)
+	time.Sleep(15 * time.Millisecond)
+	s.Reconcile([]uint64{1, 2}, 30*time.Millisecond)
+
+	select {
+	case <-s.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Done() should close once every escape deadline has elapsed")
+	}
+	require.True(t, s.PendingEmpty())
+}
+
+func TestState_EscapeIsPerPartition_NoPrematureClear(t *testing.T) {
+	// Deadlines are per partition: a partition that just became pending must
+	// not be cleared when an older partition's deadline elapses. The previous
+	// implementation cleared the whole pending set with a single timer, so a
+	// genuinely-transferring partition could be acked before it received any
+	// data.
+	s := New()
+	escape := 100 * time.Millisecond
+	s.Reconcile([]uint64{1}, escape)
+	time.Sleep(80 * time.Millisecond)
+	s.Reconcile([]uint64{1, 2}, escape)
+
+	// Partition 1 expires; partition 2 is only ~40ms old and must survive.
+	time.Sleep(40 * time.Millisecond)
+	require.False(t, s.PendingEmpty(),
+		"a fresh partition must not be cleared by an older partition's deadline")
+	require.False(t, s.IsDone())
+
+	// Partition 2 escapes once its own deadline elapses.
+	require.Eventually(t, func() bool { return s.IsDone() }, time.Second, 5*time.Millisecond)
+}
+
+func TestState_ZeroEscape_NeverExpires(t *testing.T) {
+	s := New()
+	s.Reconcile([]uint64{1}, 0)
+	time.Sleep(20 * time.Millisecond)
+	require.False(t, s.PendingEmpty())
+	require.False(t, s.IsDone())
+	s.MarkReceived(1)
+	require.True(t, s.IsDone())
+}
+
+func TestState_Done_ConcurrentWithReconcile(t *testing.T) {
+	s := New()
+	s.Reconcile([]uint64{1, 2, 3}, time.Second)
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -112,17 +210,10 @@ func TestState_Done_ConcurrentWithReset(t *testing.T) {
 	}
 
 	for i := range 1000 {
-		s.Reset([]uint64{uint64(i)})
+		s.Reconcile([]uint64{uint64(i)}, time.Second)
 		s.MarkReceived(uint64(i))
 	}
 	close(stop)
 	wg.Wait()
 	require.True(t, s.IsDone())
-}
-
-func TestState_StartEmptyPartitionTimeout_ZeroNoOp(t *testing.T) {
-	s := New()
-	s.Reset([]uint64{1})
-	s.StartEmptyPartitionTimeout(0)
-	require.False(t, s.IsDone())
 }

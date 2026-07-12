@@ -283,11 +283,7 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 
 	r.fillRoutingTable()
 	if r.syncState != nil {
-		pending := r.partitionsPendingReceive()
-		r.syncState.Reset(pending)
-		if len(pending) > 0 && r.config.InitialSyncEmptyPartitionTimeout > 0 {
-			r.syncState.StartEmptyPartitionTimeout(r.config.InitialSyncEmptyPartitionTimeout)
-		}
+		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
 	}
 	previousSignature := r.Signature()
 	data, signature, err := r.buildRoutingTablePayload()

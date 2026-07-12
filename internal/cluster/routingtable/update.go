@@ -112,6 +112,7 @@ func (r *RoutingTable) updateRoutingTableOnMember(data []byte, member discovery.
 func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.Member]*leftOverDataReport, error) {
 	var mtx sync.Mutex
 	var g errgroup.Group
+	var unreachable []discovery.Member
 	reports := make(map[discovery.Member]*leftOverDataReport)
 	num := int64(runtime.NumCPU())
 	sem := semaphore.NewWeighted(num)
@@ -128,7 +129,19 @@ func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.M
 
 			report, err := r.updateRoutingTableOnMember(data, member)
 			if err != nil {
-				return err
+				// The coordinator must apply its own table, otherwise the
+				// committed epoch would reference a table this node never
+				// installed.
+				if member.CompareByID(r.this) {
+					return err
+				}
+				// An unreachable member must not block the commit for the
+				// rest of the cluster. It receives the table on the next
+				// push, or memberlist removes it.
+				mtx.Lock()
+				unreachable = append(unreachable, member)
+				mtx.Unlock()
+				return nil
 			}
 
 			mtx.Lock()
@@ -142,6 +155,11 @@ func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.M
 
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+
+	if len(unreachable) > 0 {
+		r.log.V(2).Printf("[WARN] Routing table could not be pushed to %d member(s): %v. "+
+			"They will receive it on the next update", len(unreachable), unreachable)
 	}
 	return reports, nil
 }

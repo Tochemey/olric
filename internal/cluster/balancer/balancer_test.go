@@ -517,7 +517,7 @@ func TestTryAckRebalance_Guards(t *testing.T) {
 
 	// When syncState reports pending data, ack is skipped.
 	pending := syncstate.New()
-	pending.Reset([]uint64{1})
+	pending.Reconcile([]uint64{1}, time.Minute)
 	b.syncState = pending
 	require.False(t, b.syncState.PendingEmpty())
 	b.tryAckRebalance(1234)

@@ -120,13 +120,12 @@ func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.
 	// Bootstrapped by the coordinator.
 	r.markBootstrapped()
 
-	// Reset sync state for partitions we need to receive data for.
+	// Reconcile sync state for partitions we need to receive data for.
+	// Partitions already pending keep their original escape deadline, so
+	// routing updates arriving faster than the escape delay cannot starve
+	// the rebalance ACK.
 	if r.syncState != nil {
-		pending := r.partitionsPendingReceive()
-		r.syncState.Reset(pending)
-		if len(pending) > 0 && r.config.InitialSyncEmptyPartitionTimeout > 0 {
-			r.syncState.StartEmptyPartitionTimeout(r.config.InitialSyncEmptyPartitionTimeout)
-		}
+		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
 	}
 
 	// Collect report
