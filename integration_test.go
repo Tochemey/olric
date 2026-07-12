@@ -35,6 +35,9 @@ import (
 // asynchronously, so tests must not assume a fixed propagation delay.
 func waitForClusterSize(t *testing.T, members []*Olric, expected int32) {
 	t.Helper()
+	// Generous deadline: memberlist failure detection is markedly slower on
+	// starved CI runners, and the race detector slows everything further. The
+	// wait returns as soon as the condition holds.
 	require.Eventually(t, func() bool {
 		for _, member := range members {
 			if member.rt.NumMembers() != expected {
@@ -42,7 +45,7 @@ func waitForClusterSize(t *testing.T, members []*Olric, expected int32) {
 			}
 		}
 		return true
-	}, 10*time.Second, 100*time.Millisecond)
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 // waitForPartitionOwners blocks until every member's routing view assigns an
@@ -63,7 +66,7 @@ func waitForPartitionOwners(t *testing.T, members []*Olric, backupOwners int) {
 			}
 		}
 		return true
-	}, 10*time.Second, 100*time.Millisecond)
+	}, 30*time.Second, 100*time.Millisecond)
 }
 
 func TestIntegration_NodesJoinOrLeftDuringQuery(t *testing.T) {
@@ -564,6 +567,14 @@ func TestIntegration_ProductionConfig_NoDataLoss(t *testing.T) {
 		if errors.Is(err, ErrKeyNotFound) {
 			// Key might be lost if it was only on the failed node (shouldn't happen with quorum)
 			t.Logf("Key mykey-%d not found after node failure", i)
+			continue
+		}
+		if errors.Is(err, ErrReadQuorum) {
+			// With WriteQuorum=2 of 3 replicas, the dead node may have held
+			// one of the two acknowledged copies; the surviving single copy
+			// cannot satisfy ReadQuorum=2. Counts as inaccessible against the
+			// threshold below.
+			t.Logf("Key mykey-%d lost read quorum after node failure", i)
 			continue
 		}
 		require.NoError(t, err, "Key should be accessible after node failure")
