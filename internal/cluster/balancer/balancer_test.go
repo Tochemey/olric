@@ -261,11 +261,15 @@ func TestBalance_Backup_Move(t *testing.T) {
 			}
 
 			require.Len(t, result, 1)
-			require.NotNil(t, result[partitions.BACKUP])
-			r := result[partitions.BACKUP]
+			// The node is the primary owner of these partitions, so the data
+			// in its backup fragments is promoted into the local primary
+			// (see promoteBackupCopies) instead of being relocated to the
+			// other node, which would drop the only copy from this node.
+			require.NotNil(t, result[partitions.PRIMARY])
+			r := result[partitions.PRIMARY]
 			require.NotNil(t, r[partID])
 			require.Equal(t, "test-data", r[partID].Name)
-			require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
+			require.Equal(t, []discovery.Member{b1.rt.This()}, r[partID].Owners)
 		}
 	})
 	t.Run("Without TLS", func(t *testing.T) {
@@ -315,11 +319,15 @@ func TestBalance_Backup_Move(t *testing.T) {
 			}
 
 			require.Len(t, result, 1)
-			require.NotNil(t, result[partitions.BACKUP])
-			r := result[partitions.BACKUP]
+			// The node is the primary owner of these partitions, so the data
+			// in its backup fragments is promoted into the local primary
+			// (see promoteBackupCopies) instead of being relocated to the
+			// other node, which would drop the only copy from this node.
+			require.NotNil(t, result[partitions.PRIMARY])
+			r := result[partitions.PRIMARY]
 			require.NotNil(t, r[partID])
 			require.Equal(t, "test-data", r[partID].Name)
-			require.Equal(t, []discovery.Member{b2.rt.This()}, r[partID].Owners)
+			require.Equal(t, []discovery.Member{b1.rt.This()}, r[partID].Owners)
 		}
 	})
 }
@@ -564,6 +572,139 @@ func TestBalanceEagerly(t *testing.T) {
 			b1.BalanceEagerly()
 		})
 	}
+}
+
+// TestPromoteBackupCopies verifies that data sitting in a backup fragment of a
+// partition this node is the primary owner of gets merged into the primary
+// fragment (a move to itself with the PRIMARY target kind) instead of being
+// relocated to another node. A single-node cluster with ReplicaCount=2 models
+// the post-failure state: the survivor owns every partition while its backup
+// fragments still hold the only copy of the data.
+func TestPromoteBackupCopies(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	c1 := testutil.NewConfig()
+	c1.ReplicaCount = 2
+	e1 := newTestEnvironment(c1)
+	b1 := cluster.addNode(e1)
+
+	b1.rt.UpdateEagerly()
+	err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !b1.rt.IsBootstrapped() {
+			return errors.New("the node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	fragments := make(map[uint64]*mockfragment.MockFragment)
+
+	c := e1.Get("config").(*config.Config)
+	backup := e1.Get(strings.ToLower(partitions.BACKUP.String())).(*partitions.Partitions)
+	for partID := uint64(0); partID < c.PartitionCount; partID++ {
+		part := backup.PartitionByID(partID)
+		s := mockfragment.New()
+		s.Fill()
+		part.Map().Store("dmap.test-data", s)
+		fragments[partID] = s
+	}
+
+	// Stats is guarded by the fragment mutex, so once every fragment reports
+	// empty, the balancer's writes to the move results are visible too.
+	err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		for partID, f := range fragments {
+			if f.Stats().Length != 0 {
+				return fmt.Errorf("backup fragment of PartID: %d has not been promoted yet", partID)
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	for partID, f := range fragments {
+		r := f.Result()[partitions.PRIMARY][partID]
+		require.Equal(t, "test-data", r.Name)
+		// Promotion targets the node itself, never another member.
+		require.Equal(t, []discovery.Member{b1.rt.This()}, r.Owners)
+		// The backup fragment must be drained afterwards so backupCopies has
+		// nothing left to relocate.
+		require.Equal(t, 0, f.Stats().Length)
+		// The data must not have been relocated as a backup copy anywhere.
+		require.Nil(t, f.Result()[partitions.BACKUP])
+	}
+}
+
+// TestPromoteBackupCopies_NotPrimaryOwner verifies that backup fragments of
+// partitions owned by another node are left alone by the promotion pass.
+func TestPromoteBackupCopies_NotPrimaryOwner(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	c1 := testutil.NewConfig()
+	c1.ReplicaCount = 2
+	e1 := newTestEnvironment(c1)
+	b1 := cluster.addNode(e1)
+
+	c2 := testutil.NewConfig()
+	c2.ReplicaCount = 2
+	e2 := newTestEnvironment(c2)
+	b2 := cluster.addNode(e2)
+
+	err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	b1.rt.UpdateEagerly()
+
+	// Fill b1's backup fragments only for partitions whose primary owner is b2.
+	fragments := make(map[uint64]*mockfragment.MockFragment)
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get(strings.ToLower(partitions.PRIMARY.String())).(*partitions.Partitions)
+	backup := e1.Get(strings.ToLower(partitions.BACKUP.String())).(*partitions.Partitions)
+	for partID := uint64(0); partID < c.PartitionCount; partID++ {
+		if primary.PartitionByID(partID).Owner().CompareByName(b1.rt.This()) {
+			continue
+		}
+		part := backup.PartitionByID(partID)
+		s := mockfragment.New()
+		s.Fill()
+		part.Map().Store("dmap.test-data", s)
+		fragments[partID] = s
+	}
+	require.NotEmpty(t, fragments)
+
+	b1.BalanceEagerly()
+
+	for partID, f := range fragments {
+		require.Nilf(t, f.Result()[partitions.PRIMARY],
+			"backup fragment of PartID: %d owned by another node must not be promoted", partID)
+	}
+}
+
+func TestPromoteBackupCopies_SingleReplica(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	// ReplicaCount defaults to MinimumReplicaCount, so there are no backup
+	// copies to promote and the pass must be a no-op.
+	e := newTestEnvironment(nil)
+	b := cluster.addNode(e)
+
+	err := testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !b.rt.IsBootstrapped() {
+			return errors.New("node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	moved, aborted := b.promoteBackupCopies(b.rt.Signature())
+	require.False(t, moved)
+	require.False(t, aborted)
 }
 
 func TestBalanceEagerly_SingleReplica(t *testing.T) {

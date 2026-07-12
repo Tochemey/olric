@@ -135,10 +135,14 @@ func (db *Olric) stats(cfg statsConfig) stats.Stats {
 	db.rt.RLock()
 	defer db.rt.RUnlock()
 
+	// The members map is guarded by its own mutex, not the routing table's:
+	// cluster events mutate it under Members().Lock().
+	db.rt.Members().RLock()
 	db.rt.Members().Range(func(id uint64, member discovery.Member) bool {
 		s.ClusterMembers[stats.MemberID(id)] = toMember(member)
 		return true
 	})
+	db.rt.Members().RUnlock()
 
 	for partID := uint64(0); partID < db.config.PartitionCount; partID++ {
 		primary := db.primary.PartitionByID(partID)
