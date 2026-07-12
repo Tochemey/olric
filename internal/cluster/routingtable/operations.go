@@ -68,42 +68,33 @@ func (r *RoutingTable) verifyRoutingTable(id uint64, table map[uint64]*route) er
 	return nil
 }
 
-func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.Command) {
-	// The command handlers of the routing table service should wait for the cluster join event.
-	<-r.joined
-
+// applyRoutingTablePayload installs a routing table received from the
+// coordinator (either pushed or pulled), marks this node as bootstrapped and
+// triggers the balancer callbacks. It returns the left-over data report.
+// When onlyBootstrap is true the payload is dropped if the node is already
+// bootstrapped: the pull path is a bootstrap guarantee and must never regress
+// a fresher pushed table.
+func (r *RoutingTable) applyRoutingTablePayload(payload []byte, coordinatorID uint64, onlyBootstrap bool) ([]byte, error) {
 	r.updateRoutingMtx.Lock()
 	defer r.updateRoutingMtx.Unlock()
 
-	updateRoutingCmd, err := protocol.ParseUpdateRoutingCommand(cmd)
-	if err != nil {
-		protocol.WriteError(conn, err)
-		return
+	if onlyBootstrap && r.IsBootstrapped() {
+		return nil, nil
 	}
 
 	table := make(map[uint64]*route)
-	err = msgpack.Unmarshal(updateRoutingCmd.Payload, &table)
+	err := msgpack.Unmarshal(payload, &table)
 	if err != nil {
-		protocol.WriteError(conn, err)
-		return
+		return nil, err
 	}
 
-	// Log this event
-	coordinator, err := r.discovery.FindMemberByID(updateRoutingCmd.CoordinatorID)
-	if err != nil {
-		protocol.WriteError(conn, err)
-		return
-	}
-	r.log.V(5).Printf("[DEBUG] Routing table has been pushed by %s", coordinator)
-
-	if err = r.verifyRoutingTable(updateRoutingCmd.CoordinatorID, table); err != nil {
-		protocol.WriteError(conn, err)
-		return
+	if err = r.verifyRoutingTable(coordinatorID, table); err != nil {
+		return nil, err
 	}
 
 	// owners(atomic.value) is guarded by routingUpdateMtx against parallel writers.
 	// Calculate routing signature. This is useful to control balancing tasks.
-	r.setSignature(xxhash.Sum64(updateRoutingCmd.Payload))
+	r.setSignature(xxhash.Sum64(payload))
 	for partID, data := range table {
 		// Set partition(primary copies) owners
 		part := r.primary.PartitionByID(partID)
@@ -120,26 +111,78 @@ func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.
 	// Bootstrapped by the coordinator.
 	r.markBootstrapped()
 
-	// Reset sync state for partitions we need to receive data for.
+	// Reconcile sync state for partitions we need to receive data for.
+	// Partitions already pending keep their original escape deadline, so
+	// routing updates arriving faster than the escape delay cannot starve
+	// the rebalance ACK.
 	if r.syncState != nil {
-		pending := r.partitionsPendingReceive()
-		r.syncState.Reset(pending)
-		if len(pending) > 0 && r.config.InitialSyncEmptyPartitionTimeout > 0 {
-			r.syncState.StartEmptyPartitionTimeout(r.config.InitialSyncEmptyPartitionTimeout)
-		}
+		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
 	}
 
 	// Collect report
 	value, err := r.prepareLeftOverDataReport()
 	if err != nil {
-		protocol.WriteError(conn, err)
-		return
+		return nil, err
 	}
 
 	// Call balancer to distribute load evenly
 	r.wg.Add(1)
 	go r.runCallbacks()
+	return value, nil
+}
+
+func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.Command) {
+	// TODO: temporary diagnostic logging for the routing table push
+	// investigation. Remove once the silent push failure is understood.
+	r.log.V(1).Printf("[DEBUG] Routing table push received from %s", conn.RemoteAddr())
+
+	// The command handlers of the routing table service should wait for the cluster join event.
+	<-r.joined
+
+	updateRoutingCmd, err := protocol.ParseUpdateRoutingCommand(cmd)
+	if err != nil {
+		r.log.V(1).Printf("[ERROR] Failed to parse routing table push from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteError(conn, err)
+		return
+	}
+
+	value, err := r.applyRoutingTablePayload(updateRoutingCmd.Payload, updateRoutingCmd.CoordinatorID, false)
+	if err != nil {
+		r.log.V(1).Printf("[ERROR] Failed to apply pushed routing table from %s: %v", conn.RemoteAddr(), err)
+		protocol.WriteError(conn, err)
+		return
+	}
 	conn.WriteBulk(value)
+}
+
+// fetchRoutingCommandHandler serves the current committed routing table to a
+// member that pulls it. The push in updateRoutingCommandHandler remains the
+// fast path; this pull is the delivery guarantee for members the push never
+// reached. It intentionally reads the committed payload from an atomic instead
+// of taking the routing mutex: a stalled push fan-out must not block pulls.
+func (r *RoutingTable) fetchRoutingCommandHandler(conn redcon.Conn, cmd redcon.Command) {
+	// The command handlers of the routing table service should wait for the cluster join event.
+	<-r.joined
+
+	fetchRoutingCmd, err := protocol.ParseFetchRoutingCommand(cmd)
+	if err != nil {
+		protocol.WriteError(conn, err)
+		return
+	}
+
+	if !r.discovery.IsCoordinator() {
+		protocol.WriteError(conn, protocol.ErrNotCoordinator)
+		return
+	}
+
+	payload, ok := r.committedPayload.Load().([]byte)
+	if !ok || len(payload) == 0 {
+		protocol.WriteError(conn, fmt.Errorf("%w: routing table has not been committed yet", protocol.ErrInvalidArgument))
+		return
+	}
+
+	r.log.V(1).Printf("[DEBUG] Routing table pulled by member: %d", fetchRoutingCmd.MemberID)
+	conn.WriteBulk(payload)
 }
 
 func (r *RoutingTable) rebalanceAckCommandHandler(conn redcon.Conn, cmd redcon.Command) {
@@ -157,8 +200,10 @@ func (r *RoutingTable) rebalanceAckCommandHandler(conn redcon.Conn, cmd redcon.C
 		return
 	}
 
-	if !r.handleRebalanceAck(ackCmd.Epoch, ackCmd.MemberID) {
-		protocol.WriteError(conn, fmt.Errorf("%w: rebalance epoch is not active", protocol.ErrInvalidArgument))
+	// A stale ack is a status, not an error: the sender re-runs its balance
+	// cycle against its current table. Early and accepted acks are both OK.
+	if r.handleRebalanceAck(ackCmd.Epoch, ackCmd.MemberID) == ackStale {
+		conn.WriteString(protocol.StatusStaleRebalanceAck)
 		return
 	}
 	conn.WriteString(protocol.StatusOK)

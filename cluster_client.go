@@ -462,10 +462,14 @@ func (dm *ClusterDMap) Scan(ctx context.Context, options ...ScanOption) (Iterato
 	i.scanner = i.scanOnOwners
 
 	if err := i.fetchRoutingTable(); err != nil {
+		cancel()
 		return nil, err
 	}
 	// Load the route for the first partition (0) to scan.
-	i.loadRoute()
+	if !i.loadRoute() {
+		cancel()
+		return nil, fmt.Errorf("partID: %d could not be found in the routing table", i.partID)
+	}
 
 	i.wg.Add(1)
 	go i.fetchRoutingTablePeriodically()

@@ -27,7 +27,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tochemey/olric/internal/checkpoint"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
 )
@@ -399,10 +398,6 @@ func TestPubSub_EmbeddedClient_DefaultAddress(t *testing.T) {
 }
 
 func TestPubSub_EmbeddedClient_NotJoined(t *testing.T) {
-	// This instance is never started, so its checkpoints would otherwise leak
-	// into the process-global counters and break subsequent tests.
-	checkpoint.Reset()
-
 	// Before the node joins the cluster the local member is unknown, so
 	// NewPubSub without an explicit address must fail fast with a clear error
 	// instead of "no available client found".

@@ -1511,3 +1511,48 @@ func TestRoutingTable_ProactiveSyncOnJoin(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// Regression test for the routing table commit aborting when any member is
+// unreachable. A member whose RESP server is dead (but whose memberlist is
+// still alive, e.g. a pod that just crashed) must not block the coordinator
+// from committing routing updates: a joiner arriving while the dead member
+// is still in the member list must receive a table and bootstrap.
+func TestRoutingTable_CommitWithUnreachableMember(t *testing.T) {
+	cluster := newTestCluster()
+	defer func() {
+		require.NoError(t, cluster.shutdown())
+	}()
+
+	c1 := testutil.NewConfig()
+	c1.EnableClusterEventsChannel = true
+	rt1, err := cluster.addNode(c1)
+	require.NoError(t, err)
+	_, err = cluster.addNode(nil)
+	require.NoError(t, err)
+	rt3, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	require.NoError(t, rt3.CheckBootstrap())
+
+	// Kill rt3's RESP server hard. Its memberlist stays alive, so the
+	// coordinator still counts it as a member but cannot push tables to it.
+	require.NoError(t, rt3.server.Shutdown(context.Background()))
+
+	previousSignature := rt1.Signature()
+
+	rt4, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	// The unreachable member must still be part of the cluster while the
+	// joiner bootstraps.
+	require.Equal(t, int32(4), rt1.NumMembers())
+	require.NoError(t, rt4.CheckBootstrap())
+
+	// The coordinator must commit the new routing table and start a rebalance
+	// epoch even though one member could not be reached: an unreachable
+	// member must not veto the commit for the rest of the cluster.
+	require.Eventually(t, func() bool {
+		epoch, _, _, _ := rt1.getRebalanceState()
+		return rt1.Signature() != previousSignature && epoch == rt1.Signature()
+	}, 15*time.Second, 100*time.Millisecond,
+		"coordinator must commit the routing update and start an epoch despite an unreachable member")
+}

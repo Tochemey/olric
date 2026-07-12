@@ -19,26 +19,26 @@ package checkpoint
 
 import "sync/atomic"
 
-var (
+// Checkpoint tracks the readiness of the components of a single Olric
+// instance. Counters are per-instance so a failed start of one node cannot
+// block the Started signal of another node in the same process.
+type Checkpoint struct {
 	required int32
 	passed   int32
-)
-
-func Add() {
-	atomic.AddInt32(&required, 1)
 }
 
-func Pass() {
-	atomic.AddInt32(&passed, 1)
+func New() *Checkpoint {
+	return &Checkpoint{}
 }
 
-func AllPassed() bool {
-	return atomic.LoadInt32(&passed) == required
+func (c *Checkpoint) Add() {
+	atomic.AddInt32(&c.required, 1)
 }
 
-// Reset resets the checkpoint counters to zero. Call this at the start of each
-// test that creates a fresh Olric node to prevent counter accumulation across tests.
-func Reset() {
-	atomic.StoreInt32(&required, 0)
-	atomic.StoreInt32(&passed, 0)
+func (c *Checkpoint) Pass() {
+	atomic.AddInt32(&c.passed, 1)
+}
+
+func (c *Checkpoint) AllPassed() bool {
+	return atomic.LoadInt32(&c.passed) == atomic.LoadInt32(&c.required)
 }

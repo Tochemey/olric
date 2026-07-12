@@ -20,7 +20,10 @@ package olric
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,7 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
-	"github.com/tochemey/olric/internal/checkpoint"
+	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/stats"
 )
@@ -37,12 +40,6 @@ import (
 // This function is intended for internal use. Please use testOlricCluster and its
 // methods to form a cluster in tests.
 func newTestWithConfig(t *testing.T, c *config.Config) *Olric {
-	// Reset checkpoint counters to prevent accumulation across tests. Tests that
-	// call New() without Start() (e.g. TestOlric_WaitForInitialSync_ReplicaCount1)
-	// leave required > passed, which would cause AllPassed() to return false for
-	// all subsequent tests that do call Start().
-	checkpoint.Reset()
-
 	port, err := testutil.GetFreePort()
 	require.NoError(t, err)
 
@@ -135,6 +132,128 @@ func TestStartAndShutdown(t *testing.T) {
 
 	err := db.Shutdown(context.Background())
 	require.NoError(t, err)
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/20. A failed
+// node start must not block the Started callback of instances created later
+// in the same process.
+func TestOlric_StartedCallback_AfterFailedStart(t *testing.T) {
+	// Occupy a TCP port so memberlist cannot bind it and the discovery
+	// subsystem fails to start, making Start return an error. At that point
+	// the TCP server checkpoint has passed but the routing table checkpoint
+	// has not, which used to leave the process-global counters unbalanced
+	// forever.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, blocker.Close())
+	}()
+
+	c := testutil.NewConfig()
+	c.MemberlistConfig.BindAddr = "127.0.0.1"
+	c.MemberlistConfig.BindPort = blocker.Addr().(*net.TCPAddr).Port
+
+	db, err := New(c)
+	require.NoError(t, err)
+	require.Error(t, db.Start())
+	require.NoError(t, db.Shutdown(context.Background()))
+
+	// A healthy instance in the same process must still fire Started.
+	// newTestWithConfig fails the test if the callback does not fire within
+	// a second.
+	cluster := newTestCluster(t)
+	cluster.addMember(t)
+}
+
+// Regression test for rebalance ACK starvation: routing updates arriving
+// faster than the empty-partition escape delay used to rebuild the pending
+// set and restart its escape clock from zero on every update, so no member
+// ever ACKed and no rebalance epoch completed. With per-partition deadlines
+// preserved across reconciles, an epoch started mid-storm must still
+// complete: every owned-but-empty partition escapes once its own deadline
+// elapses, regardless of how often the routing table is pushed.
+func TestOlric_RebalanceCompletes_UnderRoutingUpdateChurn(t *testing.T) {
+	const escape = 1500 * time.Millisecond
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.WriteQuorum = 1
+		c.ReadQuorum = 1
+		c.EnableClusterEventsChannel = true
+		c.InitialSyncEmptyPartitionTimeout = escape
+		c.TriggerBalancerInterval = 100 * time.Millisecond
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+
+	// Cluster events are published on the coordinator's Pub/Sub. db1 is the
+	// oldest member, so it stays coordinator for the whole test.
+	ctx := context.Background()
+	ps, err := db1.NewEmbeddedClient().NewPubSub(ToAddress(db1.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	defer func() {
+		require.NoError(t, rp.Close())
+	}()
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	var completes atomic.Int64
+	ch := rp.Channel()
+	go func() {
+		for msg := range ch {
+			if strings.Contains(msg.Payload, events.KindRebalanceCompleteEvent) {
+				completes.Add(1)
+			}
+		}
+	}()
+
+	// Let the bootstrap epochs settle and the initial empty partitions
+	// escape once, then start counting from zero.
+	<-time.After(escape + time.Second)
+	completes.Store(0)
+
+	// Storm: force a routing table push on the whole cluster far more often
+	// than the escape delay. Every push reconciles the pending set on every
+	// member; before per-partition deadlines this restarted the escape clock
+	// each time and starved the ACKs.
+	stormDone := make(chan struct{})
+	stormStopped := make(chan struct{})
+	go func() {
+		defer close(stormStopped)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stormDone:
+				return
+			case <-ticker.C:
+				db1.rt.UpdateEagerly()
+			}
+		}
+	}()
+	defer func() {
+		close(stormDone)
+		<-stormStopped
+	}()
+
+	// A member joining mid-storm starts a new rebalance epoch. It must
+	// complete while the storm keeps reconciling the pending sets: each
+	// member's owned-but-empty partitions escape once their own deadline
+	// elapses, the balancer ACKs on its next tick, and the coordinator
+	// publishes RebalanceComplete.
+	<-time.After(time.Second)
+	cluster.addMemberWithConfig(t, newConfig())
+
+	require.Eventually(t, func() bool {
+		return completes.Load() >= 1
+	}, 15*time.Second, 100*time.Millisecond,
+		"rebalance epochs must complete while routing updates arrive faster than the escape delay")
 }
 
 func TestClusterStartAndShutdown(t *testing.T) {

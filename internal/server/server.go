@@ -20,6 +20,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"strconv"
 	"sync"
@@ -118,6 +119,7 @@ type Server struct {
 	server     ConServer
 	log        *flog.Logger
 	listener   *ListenerWrapper
+	checkpoint *checkpoint.Checkpoint
 	StartedCtx context.Context
 	started    context.CancelFunc
 	ctx        context.Context
@@ -128,9 +130,12 @@ type Server struct {
 }
 
 // New creates and returns a new Server.
-func New(config *Config, logger *flog.Logger) *Server {
+func New(config *Config, logger *flog.Logger, cp *checkpoint.Checkpoint) *Server {
+	if cp == nil {
+		cp = checkpoint.New()
+	}
 	// The server has to be started properly before accepting connections.
-	checkpoint.Add()
+	cp.Add()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	startedCtx, started := context.WithCancel(context.Background())
@@ -138,6 +143,7 @@ func New(config *Config, logger *flog.Logger) *Server {
 		config:     config,
 		mux:        NewServeMux(),
 		log:        logger,
+		checkpoint: cp,
 		started:    started,
 		StartedCtx: startedCtx,
 		stopped:    make(chan struct{}),
@@ -182,8 +188,19 @@ func (s *Server) ListenAndServe() error {
 
 	// The TCP server has been started
 	s.started()
-	checkpoint.Pass()
-	return s.server.Serve(lw)
+	s.checkpoint.Pass()
+	err = s.server.Serve(lw)
+	if err != nil {
+		select {
+		case <-s.ctx.Done():
+			// Shutdown closed the raw listener while the serve loop was still
+			// starting up; the resulting accept error is a graceful stop, not
+			// a failure.
+			err = nil
+		default:
+		}
+	}
+	return err
 }
 
 // Shutdown gracefully shuts down the server without interrupting any active connections.
@@ -208,15 +225,33 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	var latestError error
-	err := s.server.Close()
-	if err != nil {
-		s.log.V(2).Printf("[ERROR] Failed to close listener: %v", err)
-		latestError = err
+	if err := s.server.Close(); err != nil {
+		// redcon returns "not serving" when Close lands before Serve has
+		// stored the listener; that Close is a no-op and would leave the
+		// serve loop running forever. The raw listener close below covers
+		// that window, so this error is informational only.
+		s.log.V(2).Printf("[WARN] Failed to close the TCP server: %v", err)
 	}
 
-	// Listener is closed successfully. Now we can await for closing
-	// other components of the TCP server.
-	<-s.stopped
+	if s.listener != nil {
+		// Closing the raw listener makes the serve loop return no matter
+		// which side of redcon's startup window we are on. When s.server.Close
+		// succeeded it already closed this listener; tolerate that.
+		if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			s.log.V(2).Printf("[ERROR] Failed to close listener: %v", err)
+			latestError = err
+		}
+	}
+
+	// Await the serve loop's exit; the remaining components of the TCP
+	// server are closed after the listener. The context bounds the wait so
+	// Shutdown can never block forever.
+	select {
+	case <-s.stopped:
+	case <-ctx.Done():
+		s.log.V(2).Printf("[ERROR] Context has an error: %v", ctx.Err())
+		return ctx.Err()
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -225,8 +260,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}()
 	select {
 	case <-ctx.Done():
-		err = ctx.Err()
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			s.log.V(2).Printf("[ERROR] Context has an error: %v", err)
 			latestError = err
 		}

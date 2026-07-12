@@ -19,8 +19,11 @@ package routingtable
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
@@ -137,6 +140,38 @@ func TestUpdateRoutingTableOnMember_InvalidReport(t *testing.T) {
 	fakeMember := discovery.Member{Name: fakeCfg.MemberlistConfig.Name}
 	_, err = rt.updateRoutingTableOnMember(data, fakeMember)
 	require.Error(t, err)
+}
+
+func TestFetchRoutingTableFromCoordinator_Bootstraps(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt1, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	rt2, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !rt2.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	// The coordinator does not pull; it bootstraps itself.
+	require.NoError(t, rt1.fetchRoutingTableFromCoordinator())
+
+	// Simulate a joiner whose routing table push was lost: it is joined but
+	// not bootstrapped. The pull must install the coordinator's committed
+	// table and bootstrap the node.
+	atomic.StoreInt32(&rt2.bootstrapped, 0)
+	require.NoError(t, rt2.fetchRoutingTableFromCoordinator())
+	require.True(t, rt2.IsBootstrapped())
+	require.Equal(t, rt1.Signature(), rt2.Signature())
+
+	// A pull on an already bootstrapped node is a no-op.
+	require.NoError(t, rt2.fetchRoutingTableFromCoordinator())
 }
 
 func TestUpdateRoutingTableOnCluster_Canceled(t *testing.T) {

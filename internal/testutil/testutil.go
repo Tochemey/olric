@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/internal/checkpoint"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/pkg/flog"
 )
@@ -128,7 +129,7 @@ func NewServer(c *config.Config) *server.Server {
 	}
 
 	l := NewFlogger(c)
-	return server.New(sc, l)
+	return server.New(sc, l, checkpoint.New())
 }
 
 func TryWithInterval(max int, interval time.Duration, f func() error) error {

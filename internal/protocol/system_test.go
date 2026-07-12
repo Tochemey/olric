@@ -66,6 +66,16 @@ func TestProtocol_UpdateRoutingTable(t *testing.T) {
 	require.Equal(t, uint64(123), parsed.CoordinatorID)
 }
 
+func TestProtocol_FetchRouting(t *testing.T) {
+	fetchRoutingCmd := NewFetchRouting(123)
+
+	cmd := stringToCommand(fetchRoutingCmd.Command(context.Background()).String())
+	parsed, err := ParseFetchRoutingCommand(cmd)
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(123), parsed.MemberID)
+}
+
 func TestProtocol_RebalanceAck(t *testing.T) {
 	rebalanceAckCmd := NewRebalanceAck(42, 7)
 

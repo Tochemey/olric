@@ -161,9 +161,50 @@ func TestRoutingTable_rebalanceAckCommandHandler_Errors(t *testing.T) {
 	cmd := protocol.NewRebalanceAck(42, rt2.This().ID).Command(ctx)
 	require.Error(t, rc2.Process(ctx, cmd))
 
-	// The epoch is not active on the coordinator.
+	// An ack for a superseded epoch is not an error: the coordinator reports
+	// it as stale so the sender re-runs its balance cycle.
 	cmd = protocol.NewRebalanceAck(999999999, rt1.This().ID).Command(ctx)
-	require.Error(t, rc1.Process(ctx, cmd))
+	require.NoError(t, rc1.Process(ctx, cmd))
+	status, err := cmd.Result()
+	require.NoError(t, err)
+	require.Equal(t, protocol.StatusStaleRebalanceAck, status)
+}
+
+func TestRoutingTable_fetchRoutingCommandHandler(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt1, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	rt2, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !rt2.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Malformed command: the member ID is missing.
+	rc1 := rt1.client.Get(rt1.This().String())
+	require.Error(t, rc1.Do(ctx, protocol.Internal.FetchRouting).Err())
+
+	// rt2 is not the cluster coordinator: it must refuse the pull.
+	rc2 := rt2.client.Get(rt2.This().String())
+	cmd := protocol.NewFetchRouting(rt1.This().ID).Command(ctx)
+	require.Error(t, rc2.Process(ctx, cmd))
+
+	// The coordinator serves the committed routing table payload.
+	cmd = protocol.NewFetchRouting(rt2.This().ID).Command(ctx)
+	require.NoError(t, rc1.Process(ctx, cmd))
+	payload, err := cmd.Bytes()
+	require.NoError(t, err)
+	require.NotEmpty(t, payload)
+	require.Equal(t, rt1.committedPayload.Load().([]byte), payload)
 }
 
 func newRoutingTableWithSyncState(c *config.Config, srv *server.Server) *RoutingTable {

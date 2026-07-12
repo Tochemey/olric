@@ -338,6 +338,14 @@ func (b *Balancer) pushPrimaryToBackups(sign uint64) (bool, bool) {
 }
 
 func (b *Balancer) triggerBalancer() {
+	b.runBalance(false)
+}
+
+// runBalance executes balance cycles under the balancer lock. A cycle whose
+// rebalance ack turns out to be stale re-runs immediately against the fresh
+// routing table instead of waiting for the next tick, with a small cap to
+// avoid spinning under heavy membership churn.
+func (b *Balancer) runBalance(proactiveSync bool) {
 	b.Lock()
 	defer b.Unlock()
 
@@ -346,63 +354,95 @@ func (b *Balancer) triggerBalancer() {
 		return
 	}
 
+	for attempts := 0; attempts < 3; attempts++ {
+		if !b.balanceOnce(proactiveSync) {
+			return
+		}
+	}
+}
+
+// balanceOnce runs a single balance cycle. It returns true when the cycle
+// acked a stale epoch and the routing table has changed since the cycle
+// started, i.e. the caller should re-run against the fresh table.
+func (b *Balancer) balanceOnce(proactiveSync bool) bool {
 	sign := b.rt.Signature()
 	moved, aborted := b.promoteBackupCopies(sign)
 	if aborted {
-		return
+		return false
 	}
 
 	primaryMoved, aborted := b.primaryCopies(sign)
 	moved = moved || primaryMoved
 	if aborted {
-		return
+		return false
 	}
 
 	if b.config.ReplicaCount > config.MinimumReplicaCount {
+		if proactiveSync && sign != b.lastProactiveSyncSignature {
+			primaryPushed, aborted := b.pushPrimaryToBackups(sign)
+			moved = moved || primaryPushed
+			if aborted {
+				return false
+			}
+			// One push per epoch is sufficient. MoveWithTargetKind for BACKUP
+			// intentionally keeps data on the primary, so repeated calls would
+			// flood backup nodes with duplicate data.
+			b.lastProactiveSyncSignature = sign
+		}
+
 		backupMoved, aborted := b.backupCopies(sign)
 		moved = moved || backupMoved
 		if aborted {
-			return
+			return false
 		}
 	}
 
 	if !moved {
-		b.tryAckRebalance(sign)
+		return b.tryAckRebalance(sign) && b.rt.Signature() != sign
 	}
+	return false
 }
 
-func (b *Balancer) tryAckRebalance(sign uint64) {
+// tryAckRebalance sends the rebalance ack for sign. It returns true when the
+// coordinator reported the ack as stale, meaning the epoch was superseded.
+func (b *Balancer) tryAckRebalance(sign uint64) bool {
 	if sign == 0 || sign == b.lastAckedSignature {
-		return
+		return false
 	}
 	if b.syncState != nil && !b.syncState.PendingEmpty() {
-		return
+		return false
 	}
 
 	// Don't try to send ACK if node is shutting down
 	select {
 	case <-b.ctx.Done():
-		return
+		return false
 	default:
 	}
 
 	if err := b.rt.SendRebalanceAck(sign); err != nil {
+		if errors.Is(err, routingtable.ErrStaleRebalanceAck) {
+			// The coordinator has moved to a newer epoch. Re-balance against
+			// the current table instead of retrying this signature.
+			return true
+		}
 		// Don't log if context was canceled (expected during graceful shutdown)
 		if errors.Is(err, context.Canceled) {
-			return
+			return false
 		}
 		// Convert protocol error and check if it's ErrNotCoordinator
 		// This is expected during coordinator transitions and will retry automatically
 		convertedErr := protocol.ConvertError(err)
 		if errors.Is(convertedErr, protocol.ErrNotCoordinator) || errors.Is(err, protocol.ErrNotCoordinator) {
 			// Silently ignore - this is expected during coordinator transitions
-			return
+			return false
 		}
 		// Log other errors as they indicate actual problems
 		b.log.V(3).Printf("[WARN] Failed to send rebalance ack for signature %d: %v", sign, err)
-		return
+		return false
 	}
 	b.lastAckedSignature = sign
+	return false
 }
 
 // BalanceEagerly is the callback registered for node-join events. It runs the
@@ -414,49 +454,7 @@ func (b *Balancer) tryAckRebalance(sign uint64) {
 // the entire push duration, causing read timeouts. The routing table ensures
 // this by only triggering runCallbacks on rebalanceReasonNodeJoin.
 func (b *Balancer) BalanceEagerly() {
-	b.Lock()
-	defer b.Unlock()
-
-	if err := b.rt.CheckBootstrap(); err != nil {
-		b.log.V(2).Printf("[WARN] Balancer awaits for bootstrapping")
-		return
-	}
-
-	sign := b.rt.Signature()
-	moved, aborted := b.promoteBackupCopies(sign)
-	if aborted {
-		return
-	}
-
-	primaryMoved, aborted := b.primaryCopies(sign)
-	moved = moved || primaryMoved
-	if aborted {
-		return
-	}
-
-	if b.config.ReplicaCount > config.MinimumReplicaCount {
-		if sign != b.lastProactiveSyncSignature {
-			primaryPushed, aborted := b.pushPrimaryToBackups(sign)
-			moved = moved || primaryPushed
-			if aborted {
-				return
-			}
-			// One push per epoch is sufficient. MoveWithTargetKind for BACKUP
-			// intentionally keeps data on the primary, so repeated calls would
-			// flood backup nodes with duplicate data.
-			b.lastProactiveSyncSignature = sign
-		}
-
-		backupMoved, aborted := b.backupCopies(sign)
-		moved = moved || backupMoved
-		if aborted {
-			return
-		}
-	}
-
-	if !moved {
-		b.tryAckRebalance(sign)
-	}
+	b.runBalance(true)
 }
 
 func (b *Balancer) balance() {

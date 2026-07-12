@@ -89,3 +89,29 @@ func TestEmbeddedClient_Scan(t *testing.T) {
 	}
 	require.Equal(t, 100, count)
 }
+
+// Regression test: Close must never panic, even when the scan context has
+// already been canceled by the caller before the iterator is closed. Failing
+// to tear down the internal cluster client's connection pools is not a fatal
+// condition.
+func TestEmbeddedClient_Scan_CloseWithCanceledContext(t *testing.T) {
+	cl := newTestCluster(t)
+	db := cl.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	dm, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	require.NoError(t, dm.Put(context.Background(), "key", "value"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	it, err := dm.Scan(ctx)
+	require.NoError(t, err)
+
+	// The caller cancels the scan context first (e.g. a supervisor shutting
+	// down), then closes the iterator. Close must not panic.
+	cancel()
+	require.NotPanics(t, func() {
+		it.Close()
+	})
+}
