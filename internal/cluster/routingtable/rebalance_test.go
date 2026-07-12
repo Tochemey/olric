@@ -71,7 +71,7 @@ func TestRoutingTable_rebalanceCompleteEventOnAck(t *testing.T) {
 		conn.WriteInt(1)
 	})
 
-	rt.startRebalanceEpoch(42, rebalanceReasonNodeLeft, peer.String())
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeLeft, peer.String(), []uint64{rt.this.ID, peer.ID})
 	rt.handleRebalanceAck(42, rt.this.ID)
 
 	select {
@@ -113,7 +113,7 @@ func TestRoutingTable_bootstrapStartsRebalanceEpoch(t *testing.T) {
 
 	require.Equal(t, signature, epoch)
 	require.NotZero(t, pendingLen)
-	require.True(t, rt.handleRebalanceAck(signature, rt.this.ID))
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(signature, rt.this.ID))
 
 	rt.rebalanceMtx.Lock()
 	completed := rt.rebalanceState.completed
@@ -149,13 +149,13 @@ func TestStartRebalanceEpoch_EarlyReturns(t *testing.T) {
 	rt := newRoutingTableForTest(c, testutil.NewServer(c))
 
 	// A zero epoch is ignored.
-	rt.startRebalanceEpoch(0, rebalanceReasonManual, "")
+	rt.startRebalanceEpoch(0, rebalanceReasonManual, "", []uint64{1})
 	epoch, pending, _, _ := rt.getRebalanceState()
 	require.Zero(t, epoch)
 	require.Zero(t, pending)
 
-	// Without any known members there is nothing to track.
-	rt.startRebalanceEpoch(42, rebalanceReasonManual, "")
+	// Without any members that confirmed the table push there is nothing to track.
+	rt.startRebalanceEpoch(42, rebalanceReasonManual, "", nil)
 	epoch, pending, _, _ = rt.getRebalanceState()
 	require.Zero(t, epoch)
 	require.Zero(t, pending)
@@ -165,8 +165,8 @@ func TestHandleRebalanceAck_EdgeCases(t *testing.T) {
 	c := testutil.NewConfig()
 	rt := newRoutingTableForTest(c, testutil.NewServer(c))
 
-	// No active epoch.
-	require.False(t, rt.handleRebalanceAck(5, 1))
+	// No active epoch and no committed table: the ack is stale.
+	require.Equal(t, ackStale, rt.handleRebalanceAck(5, 1))
 
 	rt.rebalanceMtx.Lock()
 	rt.rebalanceState = rebalanceState{
@@ -176,23 +176,135 @@ func TestHandleRebalanceAck_EdgeCases(t *testing.T) {
 	}
 	rt.rebalanceMtx.Unlock()
 
-	// Mismatched epoch.
-	require.False(t, rt.handleRebalanceAck(6, 1))
+	// Mismatched epoch that doesn't match the committed table either.
+	require.Equal(t, ackStale, rt.handleRebalanceAck(6, 1))
 
 	// A member that is not in the pending set is acknowledged as a no-op.
-	require.True(t, rt.handleRebalanceAck(5, 99))
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(5, 99))
 
 	// The first ack is recorded. The member is not in the members list, so
 	// the epoch cannot complete yet.
-	require.True(t, rt.handleRebalanceAck(5, 1))
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(5, 1))
 	// A duplicate ack is idempotent.
-	require.True(t, rt.handleRebalanceAck(5, 1))
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(5, 1))
 
-	// A completed epoch always reports true.
+	// A completed epoch always accepts.
 	rt.rebalanceMtx.Lock()
 	rt.rebalanceState.completed = true
 	rt.rebalanceMtx.Unlock()
-	require.True(t, rt.handleRebalanceAck(5, 1))
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(5, 1))
+}
+
+func TestHandleRebalanceAck_EarlyAckIsBufferedAndHarvested(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	peerCfg := testutil.NewConfig()
+	peerCfg.MemberlistConfig.Name = "127.0.0.1:9999"
+	peer := discovery.NewMember(peerCfg)
+
+	otherCfg := testutil.NewConfig()
+	otherCfg.MemberlistConfig.Name = "127.0.0.1:9998"
+	other := discovery.NewMember(otherCfg)
+
+	rt.Members().Lock()
+	rt.Members().Add(peer)
+	rt.Members().Add(other)
+	rt.Members().Unlock()
+
+	// The table with signature 42 has been committed, but its epoch has not
+	// started yet: a fast member acks during the push fan-out.
+	rt.setSignature(42)
+	require.Equal(t, ackEarly, rt.handleRebalanceAck(42, peer.ID))
+
+	// An ack that matches neither the active epoch nor the committed table.
+	require.Equal(t, ackStale, rt.handleRebalanceAck(41, peer.ID))
+
+	// The epoch starts: the buffered ack is harvested.
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID, other.ID})
+	epoch, pending, acked, completed := rt.getRebalanceState()
+	require.Equal(t, uint64(42), epoch)
+	require.Equal(t, 2, pending)
+	require.Equal(t, 1, acked)
+	require.False(t, completed)
+
+	// The remaining member completes the epoch.
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(42, other.ID))
+	_, _, _, completed = rt.getRebalanceState()
+	require.True(t, completed)
+}
+
+func TestStartRebalanceEpoch_UnpushedMemberDoesNotBlockCompletion(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	peerCfg := testutil.NewConfig()
+	peerCfg.MemberlistConfig.Name = "127.0.0.1:9999"
+	peer := discovery.NewMember(peerCfg)
+
+	joinerCfg := testutil.NewConfig()
+	joinerCfg.MemberlistConfig.Name = "127.0.0.1:9998"
+	joiner := discovery.NewMember(joinerCfg)
+
+	// Both members are known to memberlist, but the joiner never received the
+	// routing table push (it cannot bootstrap, so it can never ack).
+	rt.Members().Lock()
+	rt.Members().Add(peer)
+	rt.Members().Add(joiner)
+	rt.Members().Unlock()
+
+	rt.setSignature(42)
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID})
+
+	// The epoch completes with the pushed member's ack alone.
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(42, peer.ID))
+	_, _, _, completed := rt.getRebalanceState()
+	require.True(t, completed)
+}
+
+func TestStartRebalanceEpoch_CompletesImmediatelyWhenAllAckedEarly(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	peerCfg := testutil.NewConfig()
+	peerCfg.MemberlistConfig.Name = "127.0.0.1:9999"
+	peer := discovery.NewMember(peerCfg)
+
+	rt.Members().Lock()
+	rt.Members().Add(peer)
+	rt.Members().Unlock()
+
+	rt.setSignature(42)
+	require.Equal(t, ackEarly, rt.handleRebalanceAck(42, peer.ID))
+
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID})
+	_, _, _, completed := rt.getRebalanceState()
+	require.True(t, completed)
+}
+
+func TestSendRebalanceAck_StaleEpoch(t *testing.T) {
+	c := testutil.NewConfig()
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	require.NoError(t, rt.Join())
+	require.NoError(t, rt.Start())
+	defer func() {
+		require.NoError(t, rt.Shutdown(context.Background()))
+	}()
+
+	// The single node is the coordinator and has an active epoch for its own
+	// signature. An ack for a superseded epoch is reported as stale, not as an
+	// error.
+	require.NotEqual(t, uint64(999999999), rt.Signature())
+	err = rt.SendRebalanceAck(999999999)
+	require.ErrorIs(t, err, ErrStaleRebalanceAck)
+
+	// An ack for the active epoch is accepted.
+	require.NoError(t, rt.SendRebalanceAck(rt.Signature()))
 }
 
 func TestCheckRebalanceCompletionLocked_EarlyReturn(t *testing.T) {

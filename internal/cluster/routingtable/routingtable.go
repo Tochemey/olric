@@ -84,6 +84,15 @@ type RoutingTable struct {
 
 	rebalanceMtx   sync.Mutex
 	rebalanceState rebalanceState
+	// earlyAcks buffers rebalance acks that arrive before their epoch becomes
+	// active (epoch -> member IDs). Guarded by rebalanceMtx.
+	earlyAcks map[uint64]map[uint64]struct{}
+
+	// committedPayload holds the last routing table payload ([]byte) that was
+	// successfully committed to the cluster. It backs the pull-based bootstrap
+	// path and is deliberately independent of the routing mutex: a stalled
+	// push fan-out must not block table pulls.
+	committedPayload atomic.Value
 
 	syncState  *syncstate.State
 	checkpoint *checkpoint.Checkpoint
@@ -115,6 +124,7 @@ func New(e *environment.Environment) *RoutingTable {
 	}
 
 	rt := &RoutingTable{
+		earlyAcks:  make(map[uint64]map[uint64]struct{}),
 		members:    newMembers(),
 		discovery:  discovery.New(log, c),
 		config:     c,
@@ -297,9 +307,15 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 		r.log.V(2).Printf("[ERROR] Failed to update routing table on cluster: %v", err)
 		return
 	}
+	r.committedPayload.Store(data)
 	r.processLeftOverDataReports(reports)
 	if signature != previousSignature {
-		r.startRebalanceEpoch(signature, reason, node)
+		// Only members that confirmed receipt of the table gate the epoch.
+		updated := make([]uint64, 0, len(reports))
+		for member := range reports {
+			updated = append(updated, member.ID)
+		}
+		r.startRebalanceEpoch(signature, reason, node, updated)
 		// Proactive sync pushes primary data to newly joined backup owners.
 		// It must NOT run on node-leave events: when nodes die the fragment
 		// write-lock held during the network transfer would block concurrent
@@ -380,6 +396,36 @@ func (r *RoutingTable) listenClusterEvents(eventCh chan *discovery.ClusterEvent)
 			r.processClusterEvent(e)
 			reason, node := rebalanceReasonFromEvent(e)
 			r.updateRoutingWithReason(reason, node)
+		}
+	}
+}
+
+// pullRoutingTableUntilBootstrapped keeps requesting the committed routing
+// table from the coordinator until this node is bootstrapped. The coordinator
+// push is the fast path; this pull is the guarantee: a joiner whose push was
+// lost would otherwise never bootstrap, never run its balancer and never ack a
+// rebalance epoch.
+func (r *RoutingTable) pullRoutingTableUntilBootstrapped() {
+	defer r.wg.Done()
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			if r.IsBootstrapped() {
+				return
+			}
+			if err := r.fetchRoutingTableFromCoordinator(); err != nil {
+				r.log.V(3).Printf("[WARN] Failed to pull routing table from the coordinator: %v", err)
+				continue
+			}
+			if r.IsBootstrapped() {
+				r.log.V(1).Printf("[INFO] Bootstrapped by pulling the routing table from the coordinator")
+				return
+			}
 		}
 	}
 }
@@ -471,6 +517,9 @@ func (r *RoutingTable) Start() error {
 			return err
 		}
 	}
+
+	r.wg.Add(1)
+	go r.pullRoutingTableUntilBootstrapped()
 
 	r.wg.Add(1)
 	go r.pushPeriodically()

@@ -19,6 +19,12 @@ package protocol
 
 const StatusOK = "OK"
 
+// StatusStaleRebalanceAck is returned by the coordinator when a rebalance ack
+// references an epoch that has been superseded. It is a status, not an error:
+// the sender should re-read its routing table signature and re-run its balance
+// cycle instead of treating the ack as failed.
+const StatusStaleRebalanceAck = "STALE"
+
 type ClusterCommands struct {
 	RoutingTable string
 	Members      string
@@ -32,6 +38,7 @@ var Cluster = &ClusterCommands{
 type InternalCommands struct {
 	MoveFragment        string
 	UpdateRouting       string
+	FetchRouting        string
 	RebalanceAck        string
 	LengthOfPart        string
 	ClusterRoutingTable string
@@ -40,6 +47,7 @@ type InternalCommands struct {
 var Internal = &InternalCommands{
 	MoveFragment:  "internal.node.movefragment",
 	UpdateRouting: "internal.node.updaterouting",
+	FetchRouting:  "internal.node.fetchrouting",
 	RebalanceAck:  "internal.node.rebalanceack",
 	LengthOfPart:  "internal.node.lengthofpart",
 }

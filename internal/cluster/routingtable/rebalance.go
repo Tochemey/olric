@@ -18,6 +18,8 @@
 package routingtable
 
 import (
+	"errors"
+
 	"github.com/hashicorp/memberlist"
 
 	"github.com/tochemey/olric/internal/discovery"
@@ -43,6 +45,22 @@ type rebalanceState struct {
 	completed bool
 }
 
+// ackStatus is the coordinator's verdict on a received rebalance ack.
+type ackStatus int
+
+const (
+	// ackAccepted: the ack was counted for the active epoch (or was an
+	// idempotent no-op for it).
+	ackAccepted ackStatus = iota
+	// ackEarly: the ack references the table this coordinator has already
+	// committed, but startRebalanceEpoch has not run yet. The ack is buffered
+	// and harvested when the epoch starts.
+	ackEarly
+	// ackStale: the ack references a superseded epoch. The sender should
+	// re-run its balance cycle against its current table.
+	ackStale
+)
+
 func rebalanceReasonFromEvent(event *discovery.ClusterEvent) (rebalanceReason, string) {
 	member, _ := discovery.NewMemberFromMetadata(event.NodeMeta)
 	switch event.Event {
@@ -57,18 +75,21 @@ func rebalanceReasonFromEvent(event *discovery.ClusterEvent) (rebalanceReason, s
 	}
 }
 
-func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason, node string) {
+// startRebalanceEpoch activates a new rebalance epoch. memberIDs is the set of
+// members that confirmed receipt of the routing table push for this epoch: a
+// member that never received the table cannot balance against it, so it must
+// not gate the epoch (an unbootstrapped joiner would otherwise block every
+// epoch forever).
+func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason, node string, memberIDs []uint64) {
 	if epoch == 0 {
 		return
 	}
 
-	pending := make(map[uint64]struct{})
-	r.Members().RLock()
-	r.Members().Range(func(id uint64, _ discovery.Member) bool {
+	pending := make(map[uint64]struct{}, len(memberIDs))
+	for _, id := range memberIDs {
 		pending[id] = struct{}{}
-		return true
-	})
-	r.Members().RUnlock()
+	}
+
 	if len(pending) == 0 {
 		return
 	}
@@ -79,6 +100,15 @@ func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason,
 		pending: pending,
 		acked:   make(map[uint64]struct{}),
 	}
+	// Harvest acks that raced the epoch start: members that processed the
+	// pushed table acked while the coordinator was still fanning it out.
+	for id := range r.earlyAcks[epoch] {
+		if _, ok := pending[id]; ok {
+			r.rebalanceState.acked[id] = struct{}{}
+		}
+	}
+	r.earlyAcks = make(map[uint64]map[uint64]struct{})
+	r.checkRebalanceCompletionLocked()
 	r.rebalanceMtx.Unlock()
 
 	if r.config.EnableClusterEventsChannel {
@@ -87,21 +117,32 @@ func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason,
 	}
 }
 
-func (r *RoutingTable) handleRebalanceAck(epoch, memberID uint64) bool {
+func (r *RoutingTable) handleRebalanceAck(epoch, memberID uint64) ackStatus {
 	r.rebalanceMtx.Lock()
 	defer r.rebalanceMtx.Unlock()
 
 	if r.rebalanceState.epoch == 0 || r.rebalanceState.epoch != epoch {
-		return false
+		// The push fan-out and startRebalanceEpoch are not atomic: a member
+		// that applies the pushed table quickly acks before the epoch becomes
+		// active. Buffer acks matching the committed table signature; they are
+		// harvested when the epoch starts.
+		if epoch == r.Signature() {
+			if r.earlyAcks[epoch] == nil {
+				r.earlyAcks[epoch] = make(map[uint64]struct{})
+			}
+			r.earlyAcks[epoch][memberID] = struct{}{}
+			return ackEarly
+		}
+		return ackStale
 	}
 	if r.rebalanceState.completed {
-		return true
+		return ackAccepted
 	}
 	if _, ok := r.rebalanceState.pending[memberID]; !ok {
-		return true
+		return ackAccepted
 	}
 	if _, ok := r.rebalanceState.acked[memberID]; ok {
-		return true
+		return ackAccepted
 	}
 
 	r.rebalanceState.acked[memberID] = struct{}{}
@@ -111,7 +152,7 @@ func (r *RoutingTable) handleRebalanceAck(epoch, memberID uint64) bool {
 	// and "node-left-event remains a membership signal, not a rebalance barrier"
 	r.checkRebalanceCompletionLocked()
 
-	return true
+	return ackAccepted
 }
 
 // checkRebalanceCompletionLocked checks if rebalance is complete based on current live members.
@@ -160,6 +201,11 @@ func (r *RoutingTable) checkRebalanceCompletionLocked() {
 	}
 }
 
+// ErrStaleRebalanceAck is returned by SendRebalanceAck when the coordinator
+// reports that the acked epoch has been superseded. The caller should re-run
+// its balance cycle against the current routing table instead of retrying.
+var ErrStaleRebalanceAck = errors.New("rebalance ack references a superseded epoch")
+
 func (r *RoutingTable) SendRebalanceAck(epoch uint64) error {
 	if epoch == 0 {
 		return nil
@@ -174,5 +220,12 @@ func (r *RoutingTable) SendRebalanceAck(epoch uint64) error {
 	if err != nil {
 		return err
 	}
-	return cmd.Err()
+	status, err := cmd.Result()
+	if err != nil {
+		return err
+	}
+	if status == protocol.StatusStaleRebalanceAck {
+		return ErrStaleRebalanceAck
+	}
+	return nil
 }

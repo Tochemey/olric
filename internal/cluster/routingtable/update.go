@@ -109,6 +109,33 @@ func (r *RoutingTable) updateRoutingTableOnMember(data []byte, member discovery.
 	return &report, nil
 }
 
+// fetchRoutingTableFromCoordinator pulls the committed routing table from the
+// cluster coordinator and applies it if this node is not bootstrapped yet.
+// It is the delivery guarantee behind the push in updateRoutingTableOnCluster.
+func (r *RoutingTable) fetchRoutingTableFromCoordinator() error {
+	coordinator := r.discovery.GetCoordinator()
+	if coordinator.ID == 0 {
+		return ErrNotJoinedYet
+	}
+	if coordinator.CompareByID(r.this) {
+		// The coordinator bootstraps itself.
+		return nil
+	}
+
+	cmd := protocol.NewFetchRouting(r.this.ID).Command(r.ctx)
+	rc := r.client.Get(coordinator.String())
+	if err := rc.Process(r.ctx, cmd); err != nil {
+		return err
+	}
+	payload, err := cmd.Bytes()
+	if err != nil {
+		return err
+	}
+
+	_, err = r.applyRoutingTablePayload(payload, coordinator.ID, true)
+	return err
+}
+
 func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.Member]*leftOverDataReport, error) {
 	var mtx sync.Mutex
 	var g errgroup.Group
@@ -128,6 +155,13 @@ func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.M
 			defer sem.Release(1)
 
 			report, err := r.updateRoutingTableOnMember(data, member)
+			// TODO: temporary diagnostic logging for the routing table push
+			// investigation. Remove once the silent push failure is understood.
+			if err != nil {
+				r.log.V(1).Printf("[WARN] Failed to push routing table to %s: %v", member, err)
+			} else {
+				r.log.V(1).Printf("[DEBUG] Routing table pushed to %s", member)
+			}
 			if err != nil {
 				// The coordinator must apply its own table, otherwise the
 				// committed epoch would reference a table this node never

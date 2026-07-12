@@ -41,11 +41,16 @@ func (r *RoutingTable) bootstrapCoordinator() error {
 	if err != nil {
 		return err
 	}
-	_, err = r.updateRoutingTableOnCluster(data)
+	reports, err := r.updateRoutingTableOnCluster(data)
 	if err != nil {
 		return err
 	}
-	r.startRebalanceEpoch(signature, rebalanceReasonBootstrap, "")
+	r.committedPayload.Store(data)
+	updated := make([]uint64, 0, len(reports))
+	for member := range reports {
+		updated = append(updated, member.ID)
+	}
+	r.startRebalanceEpoch(signature, rebalanceReasonBootstrap, "", updated)
 	// The coordinator bootstraps itself.
 	r.markBootstrapped()
 	r.log.V(2).Printf("[INFO] The cluster coordinator has been bootstrapped")

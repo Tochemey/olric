@@ -119,6 +119,37 @@ func ParseUpdateRoutingCommand(cmd redcon.Command) (*UpdateRouting, error) {
 	return NewUpdateRouting(cmd.Args[1], coordinatorID), nil
 }
 
+// FetchRouting is sent by an unbootstrapped node to pull the current committed
+// routing table from the cluster coordinator. The push in UpdateRouting remains
+// the fast path; this pull is the delivery guarantee.
+type FetchRouting struct {
+	MemberID uint64
+}
+
+func NewFetchRouting(memberID uint64) *FetchRouting {
+	return &FetchRouting{
+		MemberID: memberID,
+	}
+}
+
+func (f *FetchRouting) Command(ctx context.Context) *redis.StringCmd {
+	var args []interface{}
+	args = append(args, Internal.FetchRouting)
+	args = append(args, f.MemberID)
+	return redis.NewStringCmd(ctx, args...)
+}
+
+func ParseFetchRoutingCommand(cmd redcon.Command) (*FetchRouting, error) {
+	if len(cmd.Args) < 2 {
+		return nil, errWrongNumber(cmd.Args)
+	}
+	memberID, err := strconv.ParseUint(util.BytesToString(cmd.Args[1]), 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	return NewFetchRouting(memberID), nil
+}
+
 type RebalanceAck struct {
 	Epoch    uint64
 	MemberID uint64
