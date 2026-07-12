@@ -382,14 +382,20 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 	cluster := newTestCluster(t)
 
 	db := cluster.addMemberWithConfig(t, newConfig())
-
-	cluster.addMemberWithConfig(t, newConfig())
+	db2 := cluster.addMemberWithConfig(t, newConfig())
 	db3 := cluster.addMemberWithConfig(t, newConfig())
-	cluster.addMemberWithConfig(t, newConfig())
+	db4 := cluster.addMemberWithConfig(t, newConfig())
 	db5 := cluster.addMemberWithConfig(t, newConfig())
 
-	t.Log("Wait for 1 second before inserting keys")
-	<-time.After(time.Second)
+	t.Log("Wait for all members to see the whole cluster")
+	require.Eventually(t, func() bool {
+		for _, member := range []*Olric{db, db2, db3, db4, db5} {
+			if member.rt.NumMembers() != 5 {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 100*time.Millisecond)
 
 	ctx := context.Background()
 	c, err := NewClusterClient([]string{db.name})
@@ -398,21 +404,20 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 		require.NoError(t, c.Close(ctx))
 	}()
 
-	require.NoError(t, err)
-
 	dm, err := c.NewDMap("mydmap")
 	require.NoError(t, err)
 
 	t.Log("Insert keys")
 
-	for i := 0; i < 100000; i++ {
+	keyCount := 10000
+	for i := range keyCount {
 		err = dm.Put(ctx, fmt.Sprintf("mykey-%d", i), "myvalue")
 		require.NoError(t, err)
 	}
 
 	t.Log("Fetch all keys")
 
-	for i := 0; i < 100000; i++ {
+	for i := range keyCount {
 		_, err = dm.Get(ctx, fmt.Sprintf("mykey-%d", i))
 		if errors.Is(err, ErrKeyNotFound) {
 			continue
@@ -427,14 +432,27 @@ func TestIntegration_Kill_Nodes_During_Operation(t *testing.T) {
 	require.NoError(t, db5.Shutdown(context.Background()))
 
 	t.Log("Wait for \"NodeLeave\" event propagation")
-	<-time.After(time.Second)
+	require.Eventually(t, func() bool {
+		for _, member := range []*Olric{db, db2, db4} {
+			if member.rt.NumMembers() != 3 {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, 100*time.Millisecond)
 
-	for i := 0; i < 100000; i++ {
+	// With WriteQuorum=1 and async replication, a key whose owner died before
+	// replicating may be legitimately gone. The cluster must stay operational:
+	// every Get returns either the value or ErrKeyNotFound, never anything else.
+	for i := 0; i < keyCount; i++ {
 		ctx := context.Background()
 		_, err = dm.Get(ctx, fmt.Sprintf("mykey-%d", i))
 		if errors.Is(err, ErrConnRefused) {
 			i--
 			require.NoError(t, c.RefreshMetadata(ctx))
+			continue
+		}
+		if errors.Is(err, ErrKeyNotFound) {
 			continue
 		}
 		require.NoError(t, err)

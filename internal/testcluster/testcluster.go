@@ -23,6 +23,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/tochemey/olric/internal/cluster/balancer"
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/cluster/routingtable"
+	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/locker"
 	"github.com/tochemey/olric/internal/server"
@@ -104,6 +106,40 @@ func New(constructor func(e *environment.Environment) (service.Service, error)) 
 	}
 }
 
+// waitForConvergence blocks until every member's routing table has processed
+// the join event for the newest member. Cluster events are delivered
+// asynchronously, so without this wait syncCluster may build and distribute a
+// routing table that doesn't include the newest member yet.
+//
+// It is best-effort: a member that was shut down by a test never processes the
+// event, so after the deadline syncCluster proceeds anyway.
+func (t *TestCluster) waitForConvergence(member discovery.Member) {
+	for range 200 {
+		converged := true
+		for _, e := range t.environments {
+			rt := e.Get("routingtable").(*routingtable.RoutingTable)
+			known := false
+			rt.Members().RLock()
+			rt.Members().Range(func(_ uint64, m discovery.Member) bool {
+				if m.CompareByName(member) {
+					known = true
+					return false
+				}
+				return true
+			})
+			rt.Members().RUnlock()
+			if !known {
+				converged = false
+				break
+			}
+		}
+		if converged {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func (t *TestCluster) syncCluster() {
 	// Update routing table on the cluster before running balancer
 	for _, e := range t.environments {
@@ -171,6 +207,7 @@ func (t *TestCluster) AddMember(e *environment.Environment) service.Service {
 
 	t.environments = append(t.environments, e)
 	t.memberPorts = append(t.memberPorts, port)
+	t.waitForConvergence(rt.This())
 	t.syncCluster()
 	return s
 }
