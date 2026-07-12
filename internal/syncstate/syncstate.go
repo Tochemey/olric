@@ -115,5 +115,7 @@ func (s *State) IsDone() bool {
 
 // Done returns a channel that closes when initial sync is complete.
 func (s *State) Done() <-chan struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.doneCh
 }

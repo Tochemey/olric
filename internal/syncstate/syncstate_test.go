@@ -18,6 +18,7 @@
 package syncstate
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -89,6 +90,34 @@ func TestState_StartEmptyPartitionTimeout(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Done() should close within timeout")
 	}
+}
+
+func TestState_Done_ConcurrentWithReset(t *testing.T) {
+	s := New()
+	s.Reset([]uint64{1, 2, 3})
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for range 4 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case <-s.Done():
+					s.IsDone()
+				}
+			}
+		})
+	}
+
+	for i := range 1000 {
+		s.Reset([]uint64{uint64(i)})
+		s.MarkReceived(uint64(i))
+	}
+	close(stop)
+	wg.Wait()
+	require.True(t, s.IsDone())
 }
 
 func TestState_StartEmptyPartitionTimeout_ZeroNoOp(t *testing.T) {
