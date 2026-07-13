@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Embedded `DMap.Scan` no longer stalls for minutes after a member dies hard (`kill -9`, pod crash). The scan path now filters partition owners against live memberlist membership before dialing them, skipping any owner memberlist has **confirmed removed** (not merely suspected, so a flapping-but-alive member is never skipped mid-scan). Previously, a scan touching a partition still owned by the dead member in the iterator's routing-table snapshot kept dialing the dead address until repair converged; on Kubernetes a deleted pod IP drops packets, so every attempt burned the full dial timeout, and the eventual error aborted the whole scan. The dead owner's data is served by the promoted replica, so skipping it is safe and bounds crash-recovery scans by failure detection plus one scan instead of the routing-table repair window. Fixes [#22](https://github.com/Tochemey/olric/issues/22).
+
 ## v0.3.11 - 2026-07-04
 
 ### Added

@@ -39,6 +39,15 @@ type EmbeddedIterator struct {
 func (e *EmbeddedIterator) scanOnOwners() error {
 	owners := e.clusterIterator.getOwners()
 
+	// The embedded member has authoritative, seconds-fresh membership through
+	// memberlist. Build the live set once per pass so a hard-dead owner is
+	// skipped instead of dialed: a deleted pod IP drops packets, so each dial
+	// against it burns the full dial timeout for nothing, and the dead owner's
+	// data is served by the promoted replica anyway. GetMembers reports members
+	// that are confirmed removed from memberlist (not merely suspected), so a
+	// flapping-but-alive member is never skipped mid-scan.
+	live := e.liveMembers()
+
 	for idx, owner := range owners {
 		cursor := e.clusterIterator.loadCursor(owner)
 
@@ -51,6 +60,14 @@ func (e *EmbeddedIterator) scanOnOwners() error {
 			if newCursor == 0 {
 				e.clusterIterator.removeScannedOwner(idx)
 			}
+			continue
+		}
+
+		// Skip owners memberlist has confirmed dead. Dropping the owner from the
+		// route lets the scan converge without ever dialing the corpse; without
+		// this removal the route would never empty and the iterator would spin.
+		if _, alive := live[owner]; !alive {
+			e.clusterIterator.removeScannedOwner(idx)
 			continue
 		}
 
@@ -84,6 +101,19 @@ func (e *EmbeddedIterator) scanOnOwners() error {
 		}
 	}
 	return nil
+}
+
+// liveMembers returns the set of member addresses memberlist currently reports
+// as live. Membership is keyed on confirmed removal, not suspicion: a member
+// that is merely suspected is still returned here, so its data is never skipped
+// mid-scan on a false positive.
+func (e *EmbeddedIterator) liveMembers() map[string]struct{} {
+	members := e.client.db.rt.Discovery().GetMembers()
+	live := make(map[string]struct{}, len(members))
+	for _, m := range members {
+		live[m.Name] = struct{}{}
+	}
+	return live
 }
 
 // Next returns true if there is more key in the iterator implementation.

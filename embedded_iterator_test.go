@@ -90,6 +90,53 @@ func TestEmbeddedClient_Scan(t *testing.T) {
 	require.Equal(t, 100, count)
 }
 
+// Regression test for https://github.com/Tochemey/olric/issues/22. When the
+// iterator's routing-table snapshot still names a hard-dead owner (a member
+// removed from memberlist after a crash), the embedded scan path must skip it
+// instead of dialing the corpse: the dead address is filtered against live
+// membership, the scan converges over the surviving owners, and no doomed dial
+// is ever made.
+func TestEmbeddedClient_Scan_SkipsDeadOwner(t *testing.T) {
+	cl := newTestCluster(t)
+	db := cl.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	dm, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	allKeys := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		require.NoError(t, dm.Put(ctx, testutil.ToKey(i), i))
+		allKeys[testutil.ToKey(i)] = false
+	}
+
+	it, err := dm.Scan(ctx)
+	require.NoError(t, err)
+	defer it.Close()
+
+	// Splice an owner that memberlist has never seen into every partition's
+	// primary owner list. It points at a refused port: if the scan path dialed
+	// it, the scan would error out and yield fewer than 100 keys. Because the
+	// address is absent from live membership, the embedded scan path skips it
+	// and still returns everything the surviving (local) owner holds.
+	const deadOwner = "127.0.0.1:1"
+	ci := it.(*EmbeddedIterator).clusterIterator
+	ci.routingTableMtx.Lock()
+	for pid, route := range ci.routingTable {
+		route.PrimaryOwners = append(route.PrimaryOwners, deadOwner)
+		ci.routingTable[pid] = route
+	}
+	ci.routingTableMtx.Unlock()
+
+	var count int
+	for it.Next() {
+		count++
+		require.Contains(t, allKeys, it.Key())
+	}
+	require.Equal(t, 100, count)
+}
+
 // Regression test: Close must never panic, even when the scan context has
 // already been canceled by the caller before the iterator is closed. Failing
 // to tear down the internal cluster client's connection pools is not a fatal

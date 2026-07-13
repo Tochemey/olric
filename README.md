@@ -66,6 +66,7 @@ Please use the original repo for any bugs or related questions.
 * **Backup-to-primary promotion on failover** (fixes a data-loss race inherited from the original library): when a node died, a survivor that had been the backup owner became the primary owner of a partition while the data still sat in its backup fragment. The balancer then relocated that sole copy — transfer plus local drop — to the newly assigned replica owner; if that node also died moments later (the second kill of a rolling restart), the partitions were destroyed even though the survivor never failed. The balancer now first merges such backup fragments into the survivor's own primary fragment (through the standard fragment-merge path with last-write-wins conflict resolution), so the data later pushed to the new replica owner is a copy rather than the last copy. Combine with `EnableProactiveSyncOnJoin` so the replica copy is re-established promptly after promotion.
 * **Thread-safe command registration**: the RESP command multiplexer's handler map was read by connection goroutines without synchronization while services register their handlers after the server starts accepting connections. Registration and lookup are now guarded by a read-write mutex (never held while a handler runs).
 * **Reliable `EmbeddedClient.NewPubSub`**: `NewPubSub()` without a `ToAddress` option used to pick a connection from the node's internal pool, which is populated lazily as a side effect of intra-cluster traffic — on a freshly joined member the pool was usually still empty, so the call failed intermittently with a confusing `no available client found` error, and even when it succeeded the PubSub client was silently pinned to an arbitrary cluster member whose departure would break it. It now targets the local node by default, which is always correct since a `PUBLISH` received by any member is relayed to the whole cluster. This prevents the startup flakiness entirely: once the `Started` callback fires, `NewPubSub()` is guaranteed to succeed. An explicit non-blank `ToAddress` still takes precedence; blank or whitespace-only addresses fall back to the local node instead of failing; and calling before the node has joined the cluster fails fast with the new `ErrNotJoinedYet` sentinel instead of racing on cluster state or returning a misleading error.
+* **Fast-fail on dead owners in the embedded scan path**: after a member died hard (`kill -9`, pod crash), an embedded `DMap.Scan` used to stall for minutes because the iterator's routing-table snapshot kept naming the dead address as a partition owner and every scan pass dialed it — on Kubernetes a deleted pod IP drops packets, so each attempt burned the full dial timeout, and the eventual error aborted the whole scan. The scan path now filters partition owners against live memberlist membership before dialing, skipping any owner memberlist has **confirmed removed** (not merely suspected, so a flapping-but-alive member is never skipped mid-scan) and reading its data from the promoted replica. This bounds crash-recovery scans by failure detection plus one scan instead of the routing-table repair window. See [SCAN on DMaps](#scan-on-dmaps).
 
 ## Overview
 
@@ -759,6 +760,17 @@ func main() {
 	}
 }
 ```
+
+> **Fast-fail on dead owners (embedded scenario).** When an embedded member scans
+> a DMap, it filters partition owners against live memberlist membership before
+> dialing them. If a member dies hard (`kill -9`, pod crash), a scan touching a
+> partition it used to own would otherwise keep dialing the dead address until
+> the routing table converges — and on Kubernetes a deleted pod IP drops packets,
+> so every attempt burns the full dial timeout. The embedded member instead skips
+> any owner memberlist has **confirmed removed** (not merely suspected, so a
+> flapping-but-alive member is never skipped mid-scan) and reads the data from
+> the promoted replica. This keeps crash-recovery scans bounded by failure
+> detection plus one scan rather than stalling for minutes on doomed dials.
 
 ### Client-server scenario
 
