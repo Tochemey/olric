@@ -160,8 +160,7 @@ func (s *Service) moveFragmentCommandHandler(conn redcon.Conn, cmd redcon.Comman
 			IsBackup:      part.Kind() == partitions.BACKUP,
 			Timestamp:     time.Now().UnixNano(),
 		}
-		s.wg.Add(1)
-		go s.publishEvent(e)
+		s.spawn(func() { s.publishEvent(e) })
 	}
 
 	conn.WriteString(protocol.StatusOK)

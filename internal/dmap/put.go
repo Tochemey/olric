@@ -135,8 +135,6 @@ func (dm *DMap) putOnReplicaFragment(e *env) error {
 }
 
 func (dm *DMap) asyncPutOnBackup(e *env, data []byte, owner discovery.Member) {
-	defer dm.s.wg.Done()
-
 	rc := dm.s.client.Get(owner.String())
 	cmd := protocol.NewPutEntry(e.dmap, e.key, data).Command(dm.s.ctx)
 	err := rc.Process(dm.s.ctx, cmd)
@@ -168,8 +166,7 @@ func (dm *DMap) asyncPutOnCluster(e *env, nt storage.Entry) error {
 			return ErrServerGone
 		}
 
-		dm.s.wg.Add(1)
-		go dm.asyncPutOnBackup(e, encodedEntry, owner)
+		dm.s.spawn(func() { dm.asyncPutOnBackup(e, encodedEntry, owner) })
 	}
 
 	return nil

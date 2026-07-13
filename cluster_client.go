@@ -84,6 +84,15 @@ func processProtocolError(err error) error {
 		opErr := err.(*net.OpError)
 		return fmt.Errorf("%s %s %s: %w", opErr.Op, opErr.Net, opErr.Addr, ErrConnRefused)
 	}
+	// A departing owner's connection pool is closed on NodeLeave
+	// (server.Client.Close) while an in-flight request may already hold its
+	// go-redis client, so the command fails with "redis: client is closed".
+	// Like a refused dial, this is a transient failover condition rather than a
+	// hard error: surface it as ErrConnRefused so callers refresh their metadata
+	// and retry against the promoted owner instead of failing the operation.
+	if errors.Is(err, redis.ErrClosed) {
+		return fmt.Errorf("%s: %w", err.Error(), ErrConnRefused)
+	}
 	// A remote node may relay a raw dial error after forwarding a request to a
 	// partition owner that just died. Only the text survives the RESP
 	// round-trip, so classify it by message to keep such errors retryable.
