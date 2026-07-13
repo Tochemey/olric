@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -40,6 +41,7 @@ import (
 	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/flog"
 	"github.com/tochemey/olric/pkg/storage"
 	"github.com/tochemey/olric/stats"
 )
@@ -924,7 +926,7 @@ func newDeadClusterClient(t *testing.T) (*ClusterClient, *ClusterDMap, string) {
 	cl := &ClusterClient{
 		client:         c,
 		config:         &clusterClientConfig{routingTableFetchInterval: time.Minute},
-		logger:         log.New(&bytes.Buffer{}, "", 0),
+		logger:         newTestFlogger(&bytes.Buffer{}),
 		partitionCount: 7,
 	}
 	cl.ctx, cl.cancel = context.WithCancel(context.Background())
@@ -1109,6 +1111,11 @@ func TestClusterClient_Pick_Errors(t *testing.T) {
 	// A server.Client without registered addresses makes Pick fail.
 	c := server.NewClient(newFastFailClientConfig(t))
 	cl := &ClusterClient{client: c, partitionCount: 7}
+	// fetchRoutingTable derives its context from the client's, which
+	// NewClusterClient would have set.
+	cl.ctx, cl.cancel = context.WithCancel(context.Background())
+	t.Cleanup(cl.cancel)
+
 	dm := &ClusterDMap{
 		name:          "mydmap",
 		newEntry:      func() storage.Entry { return entry.New() },
@@ -1179,6 +1186,14 @@ func TestClusterClient_NewDMap_WithOptions(t *testing.T) {
 	require.Equal(t, "mydmap", dm.Name())
 }
 
+// newTestFlogger returns a logger verbose enough to emit the V(2) messages the
+// tests assert on.
+func newTestFlogger(w io.Writer) *flog.Logger {
+	l := flog.New(log.New(w, "", 0))
+	l.SetLevel(config.DefaultLogVerbosity)
+	return l
+}
+
 // safeBuffer is a goroutine-safe bytes.Buffer used to capture log output.
 type safeBuffer struct {
 	mtx sync.Mutex
@@ -1203,7 +1218,7 @@ func TestClusterClient_fetchRoutingTablePeriodically_Error(t *testing.T) {
 		// No registered addresses: fetching the routing table always fails.
 		client: server.NewClient(newFastFailClientConfig(t)),
 		config: &clusterClientConfig{routingTableFetchInterval: time.Millisecond},
-		logger: log.New(buf, "", 0),
+		logger: newTestFlogger(buf),
 	}
 	cl.ctx, cl.cancel = context.WithCancel(context.Background())
 

@@ -19,12 +19,12 @@ package olric
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
 	"github.com/tochemey/olric/internal/dmap"
 	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/pkg/flog"
 )
 
 type currentCursor struct {
@@ -37,7 +37,7 @@ type ClusterIterator struct {
 	mtx             sync.Mutex // protects pos and page
 	routingTableMtx sync.Mutex // protects routingTable and partitionCount
 
-	logger         *log.Logger
+	logger         *flog.Logger
 	dm             *ClusterDMap
 	clusterClient  *ClusterClient
 	pos            int
@@ -65,7 +65,7 @@ func (i *ClusterIterator) loadRoute() bool {
 
 	route, ok := i.routingTable[i.partID]
 	if !ok {
-		i.logger.Printf("[ERROR] PartID: %d could not be found in the routing table", i.partID)
+		i.logger.V(2).Printf("[ERROR] PartID: %d could not be found in the routing table", i.partID)
 		return false
 	}
 	// Make an explicit copy to avoid pointer aliasing issues
@@ -225,7 +225,7 @@ func (i *ClusterIterator) next() bool {
 
 	for {
 		if err := i.fetchData(); err != nil {
-			i.logger.Printf("[ERROR] Failed to fetch data: %s", err)
+			i.logger.V(2).Printf("[ERROR] Failed to fetch data: %s", err)
 			return false
 		}
 		if len(i.page) != 0 {
@@ -294,7 +294,9 @@ func (i *ClusterIterator) fetchRoutingTablePeriodically() {
 			return
 		case <-time.After(time.Second):
 			if err := i.fetchRoutingTable(); err != nil {
-				i.logger.Printf("[ERROR] Failed to fetch the latest version of the routing table: %s", err)
+				// Retryable: the next tick picks the table up. See the sibling
+				// refresher on ClusterClient for why this is not error-grade.
+				i.logger.V(2).Printf("[ERROR] Failed to fetch the latest version of the routing table: %s", err)
 			}
 		}
 	}

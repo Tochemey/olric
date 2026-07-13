@@ -996,40 +996,90 @@ func TestEmbeddedClient_RefreshMetadata(t *testing.T) {
 	e := &EmbeddedClient{}
 	require.NoError(t, e.RefreshMetadata(context.TODO()))
 }
-func TestEmbeddedDMap_setOrGetClusterClient(t *testing.T) {
+func TestOlric_embeddedClusterClient(t *testing.T) {
 	cluster := newTestCluster(t)
 	db := cluster.addMember(t)
 
-	e := db.NewEmbeddedClient()
-	dmc, err := e.NewDMap("mydmap")
-	require.NoError(t, err)
-	dm := dmc.(*EmbeddedDMap)
-
-	// Call it concurrently. Exactly one goroutine creates the cluster client,
-	// the others hit either the fast path or the second nil-check under the
-	// write lock.
+	// Call it concurrently. Creation is single-flighted under clusterClientMtx,
+	// so every caller has to observe the very same client.
 	var errGr errgroup.Group
-	for i := 0; i < 20; i++ {
+	clients := make([]*ClusterClient, 20)
+	for i := 0; i < len(clients); i++ {
 		errGr.Go(func() error {
-			_, err := dm.setOrGetClusterClient()
+			cc, err := db.embeddedClusterClient()
+			clients[i] = cc
 			return err
 		})
 	}
 	require.NoError(t, errGr.Wait())
-	require.NotNil(t, dm.clusterClient)
-	defer func() {
-		require.NoError(t, dm.clusterClient.Close(context.Background()))
-	}()
 
-	// The cached cluster client is returned on subsequent calls.
-	cc, err := dm.setOrGetClusterClient()
+	require.NotNil(t, db.clusterClient)
+	for _, cc := range clients {
+		require.Same(t, db.clusterClient, cc)
+	}
+}
+
+// A fresh EmbeddedDMap per NewDMap call must not mean a fresh cluster client per
+// NewDMap call: the client is owned by the member, not by the DMap.
+func TestEmbeddedDMap_Pipeline_SharesTheMemberClusterClient(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	for i := 0; i < 5; i++ {
+		dm, err := e.NewDMap("mydmap")
+		require.NoError(t, err)
+
+		pipe, err := dm.Pipeline()
+		require.NoError(t, err)
+		pipe.Close()
+	}
+
+	require.NotNil(t, db.clusterClient)
+	require.Same(t, db.clusterClient, mustEmbeddedClusterClient(t, db))
+}
+
+func mustEmbeddedClusterClient(t *testing.T, db *Olric) *ClusterClient {
+	t.Helper()
+	cc, err := db.embeddedClusterClient()
 	require.NoError(t, err)
-	require.Equal(t, dm.clusterClient, cc)
+	return cc
+}
 
-	// Pipeline reuses the cached cluster client as well.
+// Shutdown has to reclaim the cluster client the member created, so its routing
+// table fetcher and connection pools cannot outlive the member.
+func TestOlric_Shutdown_ClosesTheEmbeddedClusterClient(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	e := db.NewEmbeddedClient()
+	dm, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+	require.NoError(t, dm.Put(context.Background(), "mykey", "myvalue"))
+
+	// Both entry points that spin up the shared client.
+	i, err := dm.Scan(context.Background())
+	require.NoError(t, err)
+	i.Close()
+
 	pipe, err := dm.Pipeline()
 	require.NoError(t, err)
 	pipe.Close()
+
+	cc := db.clusterClient
+	require.NotNil(t, cc)
+	require.NoError(t, cc.ctx.Err(), "the fetcher must still be running before shutdown")
+
+	require.NoError(t, db.Shutdown(context.Background()))
+
+	// The fetcher goroutine is gone and the pools are closed.
+	require.Error(t, cc.ctx.Err())
+	require.Empty(t, cc.client.Addresses())
+
+	// The gate is shut: a late Scan cannot resurrect a client behind the teardown.
+	_, err = db.embeddedClusterClient()
+	require.ErrorIs(t, err, ErrMemberClosing)
+	require.Nil(t, db.clusterClient)
 }
 
 func TestEmbeddedClient_Errors_After_Shutdown(t *testing.T) {

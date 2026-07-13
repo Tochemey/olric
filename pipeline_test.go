@@ -563,7 +563,7 @@ func TestDMapPipeline_setOrGetClusterClient(t *testing.T) {
 	require.NoError(t, err)
 	defer pipeOne.Close()
 
-	require.NotNil(t, dm.(*EmbeddedDMap).clusterClient)
+	require.NotNil(t, db.clusterClient)
 }
 
 func TestPipelineStringValue_UnexpectedCmdType(t *testing.T) {

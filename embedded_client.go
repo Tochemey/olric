@@ -20,7 +20,6 @@ package olric
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"time"
 
 	"github.com/tochemey/olric/internal/discovery"
@@ -58,48 +57,11 @@ type EmbeddedClient struct {
 
 // EmbeddedDMap is an DMap client implementation for embedded-member scenario.
 type EmbeddedDMap struct {
-	mtx           sync.RWMutex
-	clusterClient *ClusterClient
-	config        *dmapConfig
-	member        discovery.Member
-	dm            *dmap.DMap
-	client        *EmbeddedClient
-	name          string
-}
-
-func (dm *EmbeddedDMap) setOrGetClusterClient() (Client, error) {
-	// Acquire the read lock and try to access the cluster client, if any.
-	dm.mtx.RLock()
-	if dm.clusterClient != nil {
-		dm.mtx.RUnlock()
-		return dm.clusterClient, nil
-	}
-	dm.mtx.RUnlock()
-
-	// The cluster client is unset, try to create a new one.
-	dm.mtx.Lock()
-	defer dm.mtx.Unlock()
-
-	// Check the existing value last time. There can be another running instances
-	// of this function.
-	if dm.clusterClient != nil {
-		return dm.clusterClient, nil
-	}
-
-	// prepare the cluster client options
-	opts := []ClusterClientOption{
-		WithHasher(dm.client.db.hashFunc),
-		WithConfig(dm.client.db.config.Client),
-	}
-
-	// Create a new cluster client here.
-	c, err := NewClusterClient([]string{dm.client.db.rt.This().String()}, opts...)
-	if err != nil {
-		return nil, err
-	}
-	dm.clusterClient = c
-
-	return dm.clusterClient, nil
+	config *dmapConfig
+	member discovery.Member
+	dm     *dmap.DMap
+	client *EmbeddedClient
+	name   string
 }
 
 // Pipeline is a mechanism to realise Redis Pipeline technique.
@@ -114,7 +76,7 @@ func (dm *EmbeddedDMap) setOrGetClusterClient() (Client, error) {
 // Redis client has retransmission logic in case of timeouts, pipeline
 // can be retransmitted and commands can be executed more than once.
 func (dm *EmbeddedDMap) Pipeline(opts ...PipelineOption) (*DMapPipeline, error) {
-	cc, err := dm.setOrGetClusterClient()
+	cc, err := dm.client.db.embeddedClusterClient()
 	if err != nil {
 		return nil, err
 	}
@@ -141,13 +103,10 @@ func (e *EmbeddedClient) RefreshMetadata(_ context.Context) error {
 // * Count
 // * Match
 func (dm *EmbeddedDMap) Scan(ctx context.Context, options ...ScanOption) (Iterator, error) {
-	// prepare the cluster client options
-	opts := []ClusterClientOption{
-		WithHasher(dm.client.db.hashFunc),
-		WithConfig(dm.client.db.config.Client),
-	}
-
-	cc, err := NewClusterClient([]string{dm.client.db.rt.This().String()}, opts...)
+	// The cluster client is shared and owned by the member, so a scan neither pays
+	// for its construction — a Members call plus a full routing table fetch — nor
+	// closes it on the way out.
+	cc, err := dm.client.db.embeddedClusterClient()
 	if err != nil {
 		return nil, err
 	}
@@ -162,9 +121,8 @@ func (dm *EmbeddedDMap) Scan(ctx context.Context, options ...ScanOption) (Iterat
 	}
 
 	e := &EmbeddedIterator{
-		client:        dm.client,
-		dm:            dm.dm,
-		clusterClient: cc,
+		client: dm.client,
+		dm:     dm.dm,
 	}
 
 	clusterIterator := i.(*ClusterIterator)

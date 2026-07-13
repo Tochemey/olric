@@ -43,6 +43,7 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/resp"
 	"github.com/tochemey/olric/internal/server"
+	"github.com/tochemey/olric/pkg/flog"
 	"github.com/tochemey/olric/pkg/storage"
 	"github.com/tochemey/olric/stats"
 )
@@ -507,12 +508,18 @@ func (dm *ClusterDMap) Destroy(ctx context.Context) error {
 type ClusterClient struct {
 	client         *server.Client
 	config         *clusterClientConfig
-	logger         *log.Logger
+	logger         *flog.Logger
 	routingTable   atomic.Value
 	partitionCount uint64
 	wg             sync.WaitGroup
 	ctx            context.Context
 	cancel         context.CancelFunc
+
+	// closeOnce makes Close idempotent. A plain "is the context done?" check
+	// followed by a cancel is a check-then-act race: two concurrent Close calls
+	// can both fall through it.
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Ping sends a ping message to an Olric node. Returns PONG if message is empty,
@@ -675,22 +682,25 @@ func (cl *ClusterClient) RefreshMetadata(ctx context.Context) error {
 	return cl.fetchRoutingTable()
 }
 
-// Close stops background routines and frees allocated resources.
+// Close stops background routines and frees allocated resources. It is
+// idempotent and safe to call concurrently.
+//
+// Pass a context without a deadline unless the caller genuinely wants a bounded
+// teardown: server.Client.Shutdown checks the context between connection pools
+// and bails out mid-loop when it expires, leaving an arbitrary subset of the
+// pools open with no second chance to reclaim them.
 func (cl *ClusterClient) Close(ctx context.Context) error {
-	select {
-	case <-cl.ctx.Done():
-		return nil
-	default:
-	}
+	cl.closeOnce.Do(func() {
+		cl.cancel()
 
-	cl.cancel()
+		// Wait for the background workers:
+		// * fetchRoutingTablePeriodically
+		cl.wg.Wait()
 
-	// Wait for the background workers:
-	// * fetchRoutingTablePeriodically
-	cl.wg.Wait()
-
-	// Close the underlying TCP sockets gracefully.
-	return cl.client.Shutdown(ctx)
+		// Close the underlying TCP sockets gracefully.
+		cl.closeErr = cl.client.Shutdown(ctx)
+	})
+	return cl.closeErr
 }
 
 // NewPubSub returns a new PubSub client with the given options.
@@ -725,6 +735,7 @@ type ClusterClientOption func(c *clusterClientConfig)
 
 type clusterClientConfig struct {
 	logger                    *log.Logger
+	logVerbosity              int32
 	config                    *config.Client
 	hasher                    hasher.Hasher
 	routingTableFetchInterval time.Duration
@@ -748,6 +759,17 @@ func WithConfig(c *config.Client) ClusterClientOption {
 	}
 }
 
+// withLogVerbosity sets the verbosity level of the logger, mirroring
+// config.Config.LogVerbosity. It exists so an embedded member can hand its own
+// verbosity to the cluster client it owns, and is deliberately unexported: no
+// caller outside this package needs it, and the default already matches
+// config.DefaultLogVerbosity.
+func withLogVerbosity(verbosity int32) ClusterClientOption {
+	return func(cfg *clusterClientConfig) {
+		cfg.logVerbosity = verbosity
+	}
+}
+
 // WithRoutingTableFetchInterval is used to set a custom value to routingTableFetchInterval. ClusterClient implementation
 // retrieves the routing table from the cluster to route requests to the partition owners.
 func WithRoutingTableFetchInterval(interval time.Duration) ClusterClientOption {
@@ -757,7 +779,11 @@ func WithRoutingTableFetchInterval(interval time.Duration) ClusterClientOption {
 }
 
 func (cl *ClusterClient) fetchRoutingTable() error {
-	ctx, cancel := context.WithCancel(context.Background())
+	// Derive from the client's context, not from Background: Close cancels it and
+	// then waits for the fetcher, so an in-flight fetch has to be interruptible.
+	// Otherwise teardown stalls for a full dial/read timeout whenever a tick is
+	// in flight against a member that is going away.
+	ctx, cancel := context.WithCancel(cl.ctx)
 	defer cancel()
 
 	routingTable, err := cl.RoutingTable(ctx)
@@ -787,7 +813,10 @@ func (cl *ClusterClient) fetchRoutingTablePeriodically() {
 		case <-ticker.C:
 			err := cl.fetchRoutingTable()
 			if err != nil {
-				cl.logger.Printf("[ERROR] Failed to fetch the latest version of the routing table: %s", err)
+				// A failed refresh is retryable and routine during cluster churn or
+				// while a member is shutting down: the next tick picks the table up.
+				// It is not an error-grade event, so it is gated behind V(2).
+				cl.logger.V(2).Printf("[ERROR] Failed to fetch the latest version of the routing table: %s", err)
 			}
 		}
 	}
@@ -812,6 +841,10 @@ func NewClusterClient(addresses []string, options ...ClusterClientOption) (*Clus
 		cc.logger = log.New(os.Stderr, "logger: ", log.Lshortfile)
 	}
 
+	if cc.logVerbosity <= 0 {
+		cc.logVerbosity = config.DefaultLogVerbosity
+	}
+
 	if cc.config == nil {
 		cc.config = config.NewClient()
 	}
@@ -827,11 +860,14 @@ func NewClusterClient(addresses []string, options ...ClusterClientOption) (*Clus
 		return nil, err
 	}
 
+	flogger := flog.New(cc.logger)
+	flogger.SetLevel(cc.logVerbosity)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cl := &ClusterClient{
 		client: server.NewClient(cc.config),
 		config: &cc,
-		logger: cc.logger,
+		logger: flogger,
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -841,9 +877,20 @@ func NewClusterClient(addresses []string, options ...ClusterClientOption) (*Clus
 		cl.client.Get(address)
 	}
 
+	// The fetcher goroutine is not running yet, so Close here only cancels the
+	// context and reclaims the connection pools registered above. Without it a
+	// failed construction strands them, and a caller that retries construction
+	// accumulates one stranded set per attempt.
+	cleanup := func() {
+		if err := cl.Close(context.Background()); err != nil {
+			cl.logger.V(2).Printf("[ERROR] Failed to close the half-constructed cluster client: %s", err)
+		}
+	}
+
 	// Discover all cluster members
 	members, err := cl.Members(ctx)
 	if err != nil {
+		cleanup()
 		return nil, fmt.Errorf("error while discovering the cluster members: %w", err)
 	}
 	for _, member := range members {
@@ -855,6 +902,7 @@ func NewClusterClient(addresses []string, options ...ClusterClientOption) (*Clus
 
 	// Initial fetch. ClusterClient targets the primary owners for a smooth and quick operation.
 	if err := cl.fetchRoutingTable(); err != nil {
+		cleanup()
 		return nil, err
 	}
 

@@ -18,7 +18,6 @@
 package olric
 
 import (
-	"context"
 	"sync"
 
 	"github.com/tochemey/olric/internal/dmap"
@@ -29,8 +28,6 @@ import (
 type EmbeddedIterator struct {
 	mtx sync.Mutex
 
-	// this is only used when performing scanning
-	clusterClient   Client
 	client          *EmbeddedClient
 	dm              *dmap.DMap
 	clusterIterator *ClusterIterator
@@ -128,13 +125,9 @@ func (e *EmbeddedIterator) Key() string {
 }
 
 // Close stops the iteration and releases allocated resources.
+//
+// The cluster client behind the iteration is shared and owned by the member, not
+// by this iterator, so it is deliberately left open: Olric.Shutdown closes it.
 func (e *EmbeddedIterator) Close() {
 	e.clusterIterator.Close()
-	// The internal cluster client is owned by the iterator, so its teardown
-	// must not depend on the caller's scan context, which is routinely
-	// canceled before Close runs. Failing to tear down a connection pool is
-	// not a fatal condition either way: Close never panics.
-	if err := e.clusterClient.Close(context.Background()); err != nil {
-		e.client.db.log.V(2).Printf("[ERROR] Failed to close the embedded iterator's cluster client: %v", err)
-	}
 }

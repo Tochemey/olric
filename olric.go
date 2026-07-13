@@ -106,6 +106,10 @@ var (
 	// ErrConnRefused returned if the target node refused a connection request.
 	// It is good to call RefreshMetadata to update the underlying data structures.
 	ErrConnRefused = errors.New("connection refused")
+
+	// ErrMemberClosing is returned by embedded operations that need the member's
+	// shared cluster client after Shutdown has begun tearing it down.
+	ErrMemberClosing = errors.New("member is shutting down")
 )
 
 // Olric implements a distributed cache and in-memory key/value data store.
@@ -136,6 +140,21 @@ type Olric struct {
 	// Per-instance readiness checkpoints. A failed start of another instance
 	// in the same process must not block this instance's Started callback.
 	checkpoint *checkpoint.Checkpoint
+
+	// The cluster client shared by every EmbeddedDMap on this member. Scan and
+	// Pipeline need one, and it owns a routing table fetcher goroutine plus a set
+	// of connection pools. The member owns it so that Shutdown reclaims it: an
+	// orphaned fetcher would otherwise outlive the member and keep dialing its
+	// dead address forever.
+	//
+	// clusterClientMtx guards clusterClient against the create/close race.
+	// Shutdown sets clusterClientClosed under this lock and embeddedClusterClient
+	// creates under the same lock, so a Scan racing Shutdown can never construct a
+	// client behind the teardown. Checking db.ctx instead would be a check-then-act
+	// race, exactly as it is for wg.Add against wg.Wait.
+	clusterClientMtx    sync.Mutex
+	clusterClient       *ClusterClient
+	clusterClientClosed bool
 
 	// Structures for flow control
 	ctx    context.Context
@@ -449,6 +468,63 @@ func (db *Olric) Start() error {
 	return errGr.Wait()
 }
 
+// embeddedClusterClient returns the cluster client shared by every EmbeddedDMap
+// on this member, creating it on first use. The returned client is owned by the
+// member: callers must not close it.
+//
+// Creation happens under clusterClientMtx, which single-flights it, so
+// concurrent first-time callers cannot race two clients into existence.
+func (db *Olric) embeddedClusterClient() (*ClusterClient, error) {
+	db.clusterClientMtx.Lock()
+	defer db.clusterClientMtx.Unlock()
+
+	if db.clusterClientClosed {
+		return nil, ErrMemberClosing
+	}
+
+	if db.clusterClient != nil {
+		return db.clusterClient, nil
+	}
+
+	cc, err := NewClusterClient(
+		[]string{db.rt.This().String()},
+		WithHasher(db.hashFunc),
+		WithConfig(db.config.Client),
+		// Without these the client falls back to its own stderr logger and drops
+		// the member's logging configuration on the floor.
+		WithLogger(db.config.Logger),
+		withLogVerbosity(db.config.LogVerbosity),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	db.clusterClient = cc
+	return cc, nil
+}
+
+// closeEmbeddedClusterClient tears down the member's shared cluster client and
+// closes the gate, so no later caller can create another one.
+func (db *Olric) closeEmbeddedClusterClient() error {
+	db.clusterClientMtx.Lock()
+	cc := db.clusterClient
+	db.clusterClient = nil
+	db.clusterClientClosed = true
+	db.clusterClientMtx.Unlock()
+
+	if cc == nil {
+		return nil
+	}
+
+	// Close outside the lock: it waits for the routing table fetcher, and holding
+	// the lock across that would block a concurrent Scan on teardown.
+	//
+	// Close with a fresh context rather than the caller's: Shutdown's context is
+	// routinely expired by the time it reaches here, and a spent context makes the
+	// pool teardown bail out midway and strand connections.
+	return cc.Close(context.Background())
+}
+
 // Shutdown stops background servers and leaves the cluster.
 func (db *Olric) Shutdown(ctx context.Context) error {
 	select {
@@ -461,6 +537,14 @@ func (db *Olric) Shutdown(ctx context.Context) error {
 	db.cancel()
 
 	var latestError error
+
+	// Tear the embedded cluster client down first, while the RESP server it talks
+	// to is still up: its fetcher is aimed at this member's own address, so
+	// stopping it now means it never dials a dead socket.
+	if err := db.closeEmbeddedClusterClient(); err != nil {
+		db.log.V(2).Printf("[ERROR] Failed to shutdown the embedded cluster client: %v", err)
+		latestError = err
+	}
 
 	if err := db.pubsub.Shutdown(ctx); err != nil {
 		db.log.V(2).Printf("[ERROR] Failed to shutdown PubSub service: %v", err)
