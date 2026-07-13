@@ -35,6 +35,15 @@ type Client struct {
 	config     *config.Client
 	clients    map[string]*redis.Client
 	roundRobin *roundrobin.RoundRobin
+	// banned holds addresses of members the cluster knows are dead. A banned
+	// address never (re-)enters the round-robin rotation: Get still returns a
+	// usable client for callers that explicitly target the address (from a
+	// stale routing table snapshot, for instance), but Pick will not dial it.
+	// The ban is lifted by Unban once the member is seen alive again.
+	//
+	// Invariant, maintained under mu: an address is in the rotation if and
+	// only if it has an entry in clients and is not banned.
+	banned map[string]struct{}
 }
 
 func NewClient(c *config.Client) *Client {
@@ -49,6 +58,7 @@ func NewClient(c *config.Client) *Client {
 		config:     c,
 		clients:    make(map[string]*redis.Client),
 		roundRobin: roundrobin.New(nil),
+		banned:     make(map[string]struct{}),
 	}
 }
 
@@ -87,7 +97,9 @@ func (c *Client) Get(addr string) *redis.Client {
 	opt.Addr = addr
 	rc = redis.NewClient(opt)
 	c.clients[addr] = rc
-	c.roundRobin.Add(addr)
+	if _, ok := c.banned[addr]; !ok {
+		c.roundRobin.Add(addr)
+	}
 	return rc
 }
 
@@ -113,10 +125,9 @@ func (c *Client) Pick() (*redis.Client, error) {
 	return c.Get(addr), nil
 }
 
-func (c *Client) Close(addr string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+// closeLocked closes and forgets the connection pool of addr. The caller must
+// hold c.mu.
+func (c *Client) closeLocked(addr string) error {
 	rc, ok := c.clients[addr]
 	if ok {
 		err := rc.Close()
@@ -128,6 +139,42 @@ func (c *Client) Close(addr string) error {
 	}
 
 	return nil
+}
+
+func (c *Client) Close(addr string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.closeLocked(addr)
+}
+
+// Ban closes the connection pool of addr like Close and additionally keeps the
+// address out of the round-robin rotation until Unban: a later Get for the
+// same address still returns a usable client, but Pick will not dial it. Use
+// it when the cluster reports the member dead, so a caller holding a stale
+// routing table cannot resurrect the address into the rotation.
+func (c *Client) Ban(addr string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.banned[addr] = struct{}{}
+	return c.closeLocked(addr)
+}
+
+// Unban lifts the ban on addr. If a client for the address was created while
+// the ban was in effect, the address rejoins the round-robin rotation here;
+// otherwise it rejoins lazily on the next Get.
+func (c *Client) Unban(addr string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, ok := c.banned[addr]; !ok {
+		return
+	}
+	delete(c.banned, addr)
+	if _, ok := c.clients[addr]; ok {
+		c.roundRobin.Add(addr)
+	}
 }
 
 func (c *Client) Shutdown(ctx context.Context) error {

@@ -1227,7 +1227,12 @@ func TestClusterClient_fetchRoutingTablePeriodically_Error(t *testing.T) {
 
 	err := testutil.TryWithInterval(50, 10*time.Millisecond, func() error {
 		if !strings.Contains(buf.String(), "[ERROR] Failed to fetch the latest version of the routing table") {
-			return errors.New("no error logged yet")
+			return errors.New("no fetch error logged yet")
+		}
+		// The prune that follows the fetch fails for the same reason and must
+		// be logged, not silently dropped.
+		if !strings.Contains(buf.String(), "[ERROR] Failed to prune stale clients") {
+			return errors.New("no prune error logged yet")
 		}
 		return nil
 	})
@@ -1250,4 +1255,197 @@ func TestNewClusterClient_Errors(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "error while discovering the cluster members")
 	})
+}
+
+// A standalone ClusterClient gets no memberlist events, so the periodic
+// routing table fetcher is its only chance to notice a departed member.
+// Without pruning there, the dead address stays in the round-robin rotation
+// forever and every Nth pick of a Pick-based command dials it; on a
+// packet-dropping network each such pick burns the full dial timeout. The
+// invariant asserted here is rotation membership, which is
+// environment-independent.
+func TestClusterClient_fetchRoutingTablePeriodically_PrunesDeadMembers(t *testing.T) {
+	cluster := newTestCluster(t)
+	db1 := cluster.addMember(t)
+	db2 := cluster.addMember(t)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db1.name}, WithRoutingTableFetchInterval(100*time.Millisecond))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	// The cluster client discovers every member at construction time.
+	db2Addr := db2.rt.This().String()
+	require.Contains(t, c.client.Addresses(), db2Addr)
+
+	require.NoError(t, db2.Shutdown(ctx))
+
+	// The next successful prune tick evicts the departed address. A tick whose
+	// Members call lands on the dead address fails fast, advances the rotation
+	// and leaves the eviction to the following tick.
+	require.Eventually(t, func() bool {
+		_, ok := c.client.Addresses()[db2Addr]
+		return !ok
+	}, 10*time.Second, 100*time.Millisecond)
+
+	// The surviving member must stay in the rotation.
+	require.Contains(t, c.client.Addresses(), db1.rt.This().String())
+}
+
+func TestClusterClient_staleAddresses(t *testing.T) {
+	set := func(items ...string) map[string]struct{} {
+		m := make(map[string]struct{}, len(items))
+		for _, item := range items {
+			m[item] = struct{}{}
+		}
+		return m
+	}
+
+	// Alive addresses and seeds survive; everything else is stale.
+	stale := staleAddresses(
+		set("alive:3320", "seed:3320", "dead:3320"),
+		set("alive:3320"),
+		set("seed:3320"),
+	)
+	require.Equal(t, []string{"dead:3320"}, stale)
+
+	// Nothing alive, no seeds: everything is stale. The caller's empty-pool
+	// guard is responsible for refusing this wholesale eviction.
+	stale = staleAddresses(set("a:3320", "b:3320"), set(), set())
+	require.Len(t, stale, 2)
+
+	// Nil seed set (a manually constructed client) must not panic.
+	stale = staleAddresses(set("a:3320"), set("a:3320"), nil)
+	require.Empty(t, stale)
+}
+
+// The prune must never empty the pool: an empty intersection between the
+// advertised member names and the registered addresses means the client dials
+// through NAT or a load balancer, and evicting everything would brick it.
+func TestClusterClient_evictStaleAddresses_NeverPrunesToEmpty(t *testing.T) {
+	cl := &ClusterClient{
+		client: server.NewClient(newFastFailClientConfig(t)),
+		logger: newTestFlogger(&safeBuffer{}),
+	}
+	cl.client.Get("127.0.0.1:3320")
+	cl.client.Get("127.0.0.1:3321")
+
+	// No advertised name matches a registered address: keep what we have.
+	require.NoError(t, cl.evictStaleAddresses(map[string]struct{}{"10.0.0.1:3320": {}}))
+	require.Len(t, cl.client.Addresses(), 2)
+
+	// One registered address is alive: the other one is genuinely stale and
+	// the guard must not block its eviction.
+	require.NoError(t, cl.evictStaleAddresses(map[string]struct{}{"127.0.0.1:3320": {}}))
+	addresses := cl.client.Addresses()
+	require.Len(t, addresses, 1)
+	require.Contains(t, addresses, "127.0.0.1:3320")
+}
+
+// User-supplied seed addresses must survive pruning even when the cluster does
+// not list them as members: a seed may be a load balancer or DNS name. The
+// non-seed dead member in the same run proves the prune actually executed.
+func TestClusterClient_pruneStaleClients_NeverPrunesSeeds(t *testing.T) {
+	cluster := newTestCluster(t)
+	db1 := cluster.addMember(t)
+	db2 := cluster.addMember(t)
+	db3 := cluster.addMember(t)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db1.name}, WithRoutingTableFetchInterval(100*time.Millisecond))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	db1Addr := db1.rt.This().String()
+	db3Addr := db3.rt.This().String()
+	require.Contains(t, c.client.Addresses(), db1Addr)
+	require.Contains(t, c.client.Addresses(), db3Addr)
+
+	// Kill the seed member and a non-seed member.
+	require.NoError(t, db1.Shutdown(ctx))
+	require.NoError(t, db3.Shutdown(ctx))
+
+	// The non-seed dead member disappears: the prune ran.
+	require.Eventually(t, func() bool {
+		_, ok := c.client.Addresses()[db3Addr]
+		return !ok
+	}, 10*time.Second, 100*time.Millisecond)
+
+	// The dead seed is exempt, and the surviving member stays.
+	require.Contains(t, c.client.Addresses(), db1Addr)
+	require.Contains(t, c.client.Addresses(), db2.rt.This().String())
+}
+
+// evictStaleAddresses lifts the ban on addresses the member list reports
+// alive, so a member that comes back is dialed again by Pick-based commands
+// even if its address was registered while the ban was in effect.
+func TestClusterClient_evictStaleAddresses_UnbansAliveMembers(t *testing.T) {
+	cl := &ClusterClient{
+		client: server.NewClient(newFastFailClientConfig(t)),
+		logger: newTestFlogger(&safeBuffer{}),
+	}
+
+	// Addresses chosen so neither is a substring of the other.
+	returning := "10.255.255.255:3320"
+	surviving := "127.0.0.1:3320"
+	cl.client.Get(surviving)
+	require.NoError(t, cl.client.Ban(returning))
+	require.NotNil(t, cl.client.Get(returning))
+
+	// Banned: out of the rotation.
+	for i := 0; i < 10; i++ {
+		rc, err := cl.client.Pick()
+		require.NoError(t, err)
+		require.NotContains(t, rc.String(), returning)
+	}
+
+	alive := map[string]struct{}{returning: {}, surviving: {}}
+	require.NoError(t, cl.evictStaleAddresses(alive))
+
+	// Alive again: back in the rotation.
+	seen := false
+	for i := 0; i < 10; i++ {
+		rc, err := cl.client.Pick()
+		require.NoError(t, err)
+		if strings.Contains(rc.String(), returning) {
+			seen = true
+			break
+		}
+	}
+	require.True(t, seen, "an alive address must rejoin the rotation")
+}
+
+// RefreshMetadata still prunes dead members when called explicitly, now
+// through the same seed-aware eviction as the periodic prune.
+func TestClusterClient_RefreshMetadata_PrunesDeadMembers(t *testing.T) {
+	cluster := newTestCluster(t)
+	db1 := cluster.addMember(t)
+	db2 := cluster.addMember(t)
+
+	ctx := context.Background()
+	// A long fetch interval keeps the background prune out of the picture:
+	// only the explicit RefreshMetadata calls below may evict the dead member.
+	c, err := NewClusterClient([]string{db1.name}, WithRoutingTableFetchInterval(time.Hour))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	db2Addr := db2.rt.This().String()
+	require.Contains(t, c.client.Addresses(), db2Addr)
+
+	require.NoError(t, db2.Shutdown(ctx))
+
+	// Retry until the leave has propagated to db1's member list.
+	require.Eventually(t, func() bool {
+		if err := c.RefreshMetadata(ctx); err != nil {
+			return false
+		}
+		_, ok := c.client.Addresses()[db2Addr]
+		return !ok
+	}, 10*time.Second, 100*time.Millisecond)
 }

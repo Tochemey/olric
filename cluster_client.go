@@ -515,6 +515,12 @@ type ClusterClient struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 
+	// seeds holds the user-supplied addresses passed to NewClusterClient.
+	// Stale-client pruning never touches them: a seed may be a load balancer
+	// or DNS name that never appears on the member list yet must stay
+	// dialable.
+	seeds map[string]struct{}
+
 	// closeOnce makes Close idempotent. A plain "is the context done?" check
 	// followed by a cancel is a check-then-act race: two concurrent Close calls
 	// can both fall through it.
@@ -646,14 +652,84 @@ func (cl *ClusterClient) Members(ctx context.Context) ([]Member, error) {
 	return members, nil
 }
 
+// staleAddresses returns the registered addresses that should leave the
+// connection pool: everything that is neither reported alive by the cluster
+// nor a user-supplied seed. Seeds survive because they may be load balancer
+// or DNS names that never appear on the member list yet must stay dialable.
+func staleAddresses(registered, alive, seeds map[string]struct{}) []string {
+	var stale []string
+	for addr := range registered {
+		if _, ok := alive[addr]; ok {
+			continue
+		}
+		if _, ok := seeds[addr]; ok {
+			continue
+		}
+		stale = append(stale, addr)
+	}
+	return stale
+}
+
+// evictStaleAddresses reconciles the connection pool with the given set of
+// alive member names: it lifts the ban on every alive address and bans every
+// stale one, taking dead addresses out of the round-robin rotation used by
+// Pick-based commands. Without this, a departed member stays in rotation
+// forever and every Nth pick dials it; on a network that drops packets to dead
+// peers (a deleted Kubernetes pod, for instance) each such pick burns the full
+// dial timeout instead of failing fast. The ban is sticky, so a Get through a
+// stale routing table snapshot cannot resurrect a dead address into rotation.
+func (cl *ClusterClient) evictStaleAddresses(alive map[string]struct{}) error {
+	for addr := range alive {
+		// The member is provably alive: lift any earlier ban so the address
+		// can rejoin the rotation.
+		cl.client.Unban(addr)
+	}
+
+	registered := cl.client.Addresses()
+	stale := staleAddresses(registered, alive, cl.seeds)
+
+	// Never prune the pool down to nothing. An empty intersection between the
+	// member list and the registered addresses means the names the cluster
+	// advertises are not the addresses this client dials (NAT or a load
+	// balancer in between): evicting everything would brick the client, so
+	// keep what we have.
+	if len(stale) > 0 && len(stale) == len(registered) {
+		cl.logger.V(2).Printf("[WARN] Skipped pruning stale clients: no registered address matches the member list")
+		return nil
+	}
+
+	for _, addr := range stale {
+		// Gone
+		if err := cl.client.Ban(addr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pruneStaleClients fetches the list of currently alive members and reconciles
+// the connection pool with it. See evictStaleAddresses.
+func (cl *ClusterClient) pruneStaleClients(ctx context.Context) error {
+	members, err := cl.Members(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Use a map for fast access.
+	alive := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		alive[member.Name] = struct{}{}
+	}
+
+	return cl.evictStaleAddresses(alive)
+}
+
 // RefreshMetadata fetches a list of available members and the latest routing
 // table version. It also closes stale clients, if there are any.
 func (cl *ClusterClient) RefreshMetadata(ctx context.Context) error {
-	// Fetch a list of currently available cluster members.
-	var members []Member
-	var err error
+	// Clean stale client connections.
 	for {
-		members, err = cl.Members(ctx)
+		err := cl.pruneStaleClients(ctx)
 		if errors.Is(err, ErrConnRefused) {
 			continue
 		}
@@ -661,21 +737,6 @@ func (cl *ClusterClient) RefreshMetadata(ctx context.Context) error {
 			return err
 		}
 		break
-	}
-	// Use a map for fast access.
-	addresses := make(map[string]struct{})
-	for _, member := range members {
-		addresses[member.Name] = struct{}{}
-	}
-
-	// Clean stale client connections
-	for addr := range cl.client.Addresses() {
-		if _, ok := addresses[addr]; !ok {
-			// Gone
-			if err := cl.client.Close(addr); err != nil {
-				return err
-			}
-		}
 	}
 
 	// Re-fetch the routing table, we should use the latest routing table version.
@@ -818,6 +879,12 @@ func (cl *ClusterClient) fetchRoutingTablePeriodically() {
 				// It is not an error-grade event, so it is gated behind V(2).
 				cl.logger.V(2).Printf("[ERROR] Failed to fetch the latest version of the routing table: %s", err)
 			}
+			// Evict departed members from the round-robin rotation. No retry on
+			// failure: a pick that lands on a not-yet-pruned dead address errors
+			// out here, advances the rotation past it, and the next tick prunes.
+			if err := cl.pruneStaleClients(cl.ctx); err != nil {
+				cl.logger.V(2).Printf("[ERROR] Failed to prune stale clients: %s", err)
+			}
 		}
 	}
 }
@@ -868,12 +935,16 @@ func NewClusterClient(addresses []string, options ...ClusterClientOption) (*Clus
 		client: server.NewClient(cc.config),
 		config: &cc,
 		logger: flogger,
+		seeds:  make(map[string]struct{}, len(addresses)),
 		ctx:    ctx,
 		cancel: cancel,
 	}
 
-	// Initialize clients for the given cluster members.
+	// Initialize clients for the given cluster members. The user-supplied
+	// addresses are recorded as seeds, which stale-client pruning never
+	// removes.
 	for _, address := range addresses {
+		cl.seeds[address] = struct{}{}
 		cl.client.Get(address)
 	}
 

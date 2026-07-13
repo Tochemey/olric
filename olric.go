@@ -204,6 +204,16 @@ func initializeServices(db *Olric) error {
 	}
 	db.rt = routingtable.New(db.env)
 	db.env.Set("routingtable", db.rt)
+	// The routing table prunes its own connection pool on NodeLeave, but the
+	// embedded cluster client owns a second pool whose round-robin rotation
+	// would otherwise keep the departed address forever: every Nth pick would
+	// dial a dead member, which on a packet-dropping network burns the full
+	// dial timeout instead of failing fast. The ban is sticky — a stale
+	// routing table snapshot cannot resurrect the address into rotation — so
+	// the join callback lifts it when a member comes back under the same
+	// address.
+	db.rt.AddNodeLeaveCallback(db.pruneEmbeddedClusterClientPool)
+	db.rt.AddNodeJoinCallback(db.restoreEmbeddedClusterClientPool)
 
 	db.balancer = balancer.New(db.env)
 	if db.config.EnableProactiveSyncOnJoin {
@@ -501,6 +511,53 @@ func (db *Olric) embeddedClusterClient() (*ClusterClient, error) {
 
 	db.clusterClient = cc
 	return cc, nil
+}
+
+// pruneEmbeddedClusterClientPool evicts a departed member's connection pool
+// from the shared embedded cluster client, removing its address from the
+// round-robin rotation used by Pick-based commands (routing table fetches,
+// Members, Delete, Destroy). The ban is sticky: a Get through a stale routing
+// table snapshot cannot resurrect the address into rotation until
+// restoreEmbeddedClusterClientPool lifts it. It runs on the routing table's
+// node-leave callback goroutine.
+//
+// Snapshot-then-act is safe against a concurrent teardown: server.Client.Ban
+// on a pool that Shutdown already emptied only records the ban, and a cluster
+// client created after this event seeds itself from the live member list, so
+// it never learns the departed address in the first place.
+func (db *Olric) pruneEmbeddedClusterClientPool(nodeName string) {
+	db.clusterClientMtx.Lock()
+	cc := db.clusterClient
+	db.clusterClientMtx.Unlock()
+
+	if cc == nil {
+		return
+	}
+
+	if err := cc.client.Ban(nodeName); err != nil {
+		db.log.V(2).Printf("[ERROR] Failed to close the connection pool of %s on the embedded cluster client: %v", nodeName, err)
+	}
+}
+
+// Both hooks run synchronously on the routing table's membership event
+// goroutine, so they must stay fast: they only snapshot the client pointer
+// under clusterClientMtx and touch the pool's own mutex. The one caller that
+// holds clusterClientMtx longer, first-time creation in embeddedClusterClient,
+// performs local-only RPCs against this member, so the wait stays bounded in
+// milliseconds.
+
+// restoreEmbeddedClusterClientPool lifts the ban pruneEmbeddedClusterClientPool
+// placed on an address once a member joins (or is confirmed alive) under it.
+func (db *Olric) restoreEmbeddedClusterClientPool(nodeName string) {
+	db.clusterClientMtx.Lock()
+	cc := db.clusterClient
+	db.clusterClientMtx.Unlock()
+
+	if cc == nil {
+		return
+	}
+
+	cc.client.Unban(nodeName)
 }
 
 // closeEmbeddedClusterClient tears down the member's shared cluster client and

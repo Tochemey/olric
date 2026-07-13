@@ -559,6 +559,142 @@ func TestRoutingTable_NodeLeave(t *testing.T) {
 	})
 }
 
+// The NodeLeave branch of processClusterEvent must hand the departed member's
+// name to the registered node-leave callbacks: the member relies on this to
+// evict the address from connection pools the routing table does not own,
+// such as the embedded cluster client's.
+func TestRoutingTable_NodeLeave_FiresNodeLeaveCallbacks(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	rt1, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+	require.True(t, rt1.IsBootstrapped())
+
+	rt2, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !rt2.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	var mtx sync.Mutex
+	var left []string
+	rt2.AddNodeLeaveCallback(func(nodeName string) {
+		mtx.Lock()
+		defer mtx.Unlock()
+		left = append(left, nodeName)
+	})
+
+	rt1Name := rt1.This().String()
+	require.NoError(t, rt1.Shutdown(context.Background()))
+
+	err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		mtx.Lock()
+		defer mtx.Unlock()
+		for _, name := range left {
+			if name == rt1Name {
+				return nil
+			}
+		}
+		return errors.New("the node-leave callback has not fired for the departed member")
+	})
+	require.NoError(t, err)
+}
+
+// The NodeJoin branch of processClusterEvent must hand the joined member's
+// name to the registered node-join callbacks: the member relies on this to
+// lift the ban a node-leave callback placed on connection pools the routing
+// table does not own.
+func TestRoutingTable_NodeJoin_FiresNodeJoinCallbacks(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	rt1, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+	require.True(t, rt1.IsBootstrapped())
+
+	var mtx sync.Mutex
+	var joined []string
+	rt1.AddNodeJoinCallback(func(nodeName string) {
+		mtx.Lock()
+		defer mtx.Unlock()
+		joined = append(joined, nodeName)
+	})
+
+	rt2, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+	rt2Name := rt2.This().String()
+
+	err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		mtx.Lock()
+		defer mtx.Unlock()
+		for _, name := range joined {
+			if name == rt2Name {
+				return nil
+			}
+		}
+		return errors.New("the node-join callback has not fired for the joined member")
+	})
+	require.NoError(t, err)
+}
+
+// The NodeUpdate branch must fire the node-join callbacks: an update proves
+// the member is alive, so any ban placed on its address has to be lifted.
+func TestRoutingTable_NodeUpdate_FiresNodeJoinCallbacks(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	rt1, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+	require.True(t, rt1.IsBootstrapped())
+
+	c2 := testutil.NewConfig()
+	rt2, err := cluster.addNode(c2)
+	require.NoError(t, err)
+	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !rt2.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	var mtx sync.Mutex
+	var confirmed []string
+	rt1.AddNodeJoinCallback(func(nodeName string) {
+		mtx.Lock()
+		defer mtx.Unlock()
+		confirmed = append(confirmed, nodeName)
+	})
+
+	// Deliver a fabricated NodeUpdate for rt2 to rt1, the same way memberlist
+	// gossip would. See TestRoutingTable_NodeUpdate for the copy rationale.
+	n := rt2.Discovery().LocalNode()
+	meta, err := discovery.NewMember(c2).Encode()
+	require.NoError(t, err)
+	updated := *n
+	updated.Meta = meta
+	event := memberlist.NodeEvent{Event: memberlist.NodeUpdate, Node: &updated}
+	rt1.Discovery().ClusterEvents <- discovery.ToClusterEvent(event)
+
+	rt2Name := rt2.This().String()
+	err = testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		mtx.Lock()
+		defer mtx.Unlock()
+		for _, name := range confirmed {
+			if name == rt2Name {
+				return nil
+			}
+		}
+		return errors.New("the node-join callback has not fired for the updated member")
+	})
+	require.NoError(t, err)
+}
+
 func TestRoutingTable_NodeUpdate(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		cluster := newTestCluster()

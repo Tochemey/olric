@@ -206,6 +206,75 @@ func TestServer_Client_Pick_AfterGet(t *testing.T) {
 	require.NotNil(t, rc)
 }
 
+func TestServer_Client_Ban(t *testing.T) {
+	cs := NewClient(nil)
+	cs.Get("127.0.0.1:6379")
+	cs.Get("127.0.0.1:6380")
+	require.Equal(t, 2, cs.roundRobin.Length())
+
+	require.NoError(t, cs.Ban("127.0.0.1:6380"))
+	require.NotContains(t, cs.Addresses(), "127.0.0.1:6380")
+	require.Equal(t, 1, cs.roundRobin.Length())
+
+	// A Get for a banned address (a caller holding a stale routing table
+	// snapshot, for instance) still returns a usable client but must not
+	// resurrect the address into the round-robin rotation.
+	require.NotNil(t, cs.Get("127.0.0.1:6380"))
+	require.Contains(t, cs.Addresses(), "127.0.0.1:6380")
+	require.Equal(t, 1, cs.roundRobin.Length())
+
+	// Pick never lands on the banned address.
+	for i := 0; i < 10; i++ {
+		addr, err := cs.pickNodeRoundRobin()
+		require.NoError(t, err)
+		require.Equal(t, "127.0.0.1:6379", addr)
+	}
+}
+
+func TestServer_Client_Ban_UnknownAddr(t *testing.T) {
+	cs := NewClient(nil)
+
+	// Banning an address that was never registered records the ban without
+	// error, so a later Get cannot put it into the rotation.
+	require.NoError(t, cs.Ban("127.0.0.1:1234"))
+	cs.Get("127.0.0.1:1234")
+	require.Equal(t, 0, cs.roundRobin.Length())
+}
+
+func TestServer_Client_Unban(t *testing.T) {
+	cs := NewClient(nil)
+	cs.Get("127.0.0.1:6379")
+
+	require.NoError(t, cs.Ban("127.0.0.1:6380"))
+	// Created while the ban is in effect: registered, but out of rotation.
+	require.NotNil(t, cs.Get("127.0.0.1:6380"))
+	require.Equal(t, 1, cs.roundRobin.Length())
+
+	// Unban restores the rotation membership of a client that was created
+	// during the ban.
+	cs.Unban("127.0.0.1:6380")
+	require.Equal(t, 2, cs.roundRobin.Length())
+
+	// Unban of a not-banned address is a no-op and must not double-add.
+	cs.Unban("127.0.0.1:6380")
+	cs.Unban("127.0.0.1:6379")
+	cs.Unban("127.0.0.1:9999")
+	require.Equal(t, 2, cs.roundRobin.Length())
+
+	// Unban of a banned address that has no registered client only clears the
+	// ban; the address joins the rotation lazily on the next Get.
+	require.NoError(t, cs.Ban("127.0.0.1:7000"))
+	cs.Unban("127.0.0.1:7000")
+	require.Equal(t, 2, cs.roundRobin.Length())
+	cs.Get("127.0.0.1:7000")
+	require.Equal(t, 3, cs.roundRobin.Length())
+
+	// Close on a previously banned-and-unbanned address keeps the rotation
+	// consistent.
+	require.NoError(t, cs.Close("127.0.0.1:6380"))
+	require.Equal(t, 2, cs.roundRobin.Length())
+}
+
 func TestServer_Client_Shutdown_Empty(t *testing.T) {
 	cs := NewClient(nil)
 	require.NoError(t, cs.Shutdown(context.Background()))

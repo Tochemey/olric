@@ -75,6 +75,14 @@ type RoutingTable struct {
 	discovery        *discovery.Discovery
 	callbacks        []func()
 	callbackMtx      sync.Mutex
+	// leaveCallbacks receive the name (host:port) of every member that leaves
+	// the cluster; joinCallbacks receive the name of every member that joins
+	// or is confirmed alive by an update. The member uses these to ban and
+	// unban addresses in connection pools it owns outside this package; only
+	// the pool at r.client is pruned here.
+	leaveCallbacks    []func(nodeName string)
+	joinCallbacks     []func(nodeName string)
+	memberCallbackMtx sync.Mutex
 	pushPeriod       time.Duration
 	// The command handlers of the routing table service should wait for the cluster join event.
 	joined chan struct{}
@@ -327,7 +335,11 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 	}
 }
 
-func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) {
+// processClusterEvent applies a membership event to the routing table's
+// internal state. It returns the member callback notification the event calls
+// for (nil if none); the caller fires it after this function returns, so
+// callbacks never run under the members lock and always run in event order.
+func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) (notify func()) {
 	r.Members().Lock()
 	defer r.Members().Unlock()
 
@@ -338,6 +350,9 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) {
 		r.Members().Add(member)
 		r.consistent.Add(member)
 		r.log.V(2).Printf("[INFO] Node joined: %s", member)
+		// Lift any ban a leave callback placed on this address in pools owned
+		// outside this package.
+		notify = func() { r.notifyNodeJoinCallbacks(event.NodeName) }
 
 		if r.config.EnableClusterEventsChannel {
 			r.wg.Add(1)
@@ -346,7 +361,7 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) {
 	case memberlist.NodeLeave:
 		if _, err := r.Members().Get(member.ID); err != nil {
 			r.log.V(2).Printf("[ERROR] Unknown node left: %s: %d", event.NodeName, member.ID)
-			return
+			return nil
 		}
 		r.Members().Delete(member.ID)
 		r.consistent.Remove(event.NodeName)
@@ -355,6 +370,9 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) {
 		if err := r.client.Close(event.NodeName); err != nil {
 			r.log.V(2).Printf("[ERROR] Failed to remove the node from pool %s: %v", event.NodeName, err)
 		}
+		// The member may own other connection pools (the embedded cluster
+		// client's) that keep the dead address in round-robin rotation.
+		notify = func() { r.notifyNodeLeaveCallbacks(event.NodeName) }
 
 		if r.config.EnableClusterEventsChannel {
 			r.wg.Add(1)
@@ -376,14 +394,19 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) {
 		r.Members().Add(member)
 		r.consistent.Add(member)
 		r.log.V(2).Printf("[INFO] Node updated: %s", member)
+		// An update proves the member is alive (a fast restart under the same
+		// address, for instance), so it fires the join callbacks: any ban on
+		// this address in pools owned outside this package must be lifted.
+		notify = func() { r.notifyNodeJoinCallbacks(event.NodeName) }
 	default:
 		r.log.V(2).Printf("[ERROR] Unknown event received: %v", event)
-		return
+		return nil
 	}
 
 	// Store the current number of members in the member list.
 	// We need this to implement a simple split-brain protection algorithm.
 	r.setNumMembers()
+	return notify
 }
 
 func (r *RoutingTable) listenClusterEvents(eventCh chan *discovery.ClusterEvent) {
@@ -393,7 +416,14 @@ func (r *RoutingTable) listenClusterEvents(eventCh chan *discovery.ClusterEvent)
 		case <-r.ctx.Done():
 			return
 		case e := <-eventCh:
-			r.processClusterEvent(e)
+			notify := r.processClusterEvent(e)
+			if notify != nil {
+				// Fired here rather than inside processClusterEvent so the
+				// callbacks run without the members lock, strictly in event
+				// order: a ban from a NodeLeave can never be applied after
+				// the unban from a following NodeJoin for the same address.
+				notify()
+			}
 			reason, node := rebalanceReasonFromEvent(e)
 			r.updateRoutingWithReason(reason, node)
 		}

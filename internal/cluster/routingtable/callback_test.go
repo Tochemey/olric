@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/tochemey/olric/internal/testutil"
 )
 
@@ -40,6 +42,51 @@ func TestRoutingTable_Callback(t *testing.T) {
 	if modified != 1 {
 		t.Fatalf("Expected number: 1. Got: %v", modified)
 	}
+}
+
+func TestRoutingTable_NodeLeaveCallback(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	var got []string
+	rt.AddNodeLeaveCallback(func(nodeName string) {
+		got = append(got, nodeName)
+	})
+
+	// Callbacks fire synchronously on the event goroutine, in order.
+	rt.notifyNodeLeaveCallbacks("127.0.0.1:3320")
+	rt.notifyNodeLeaveCallbacks("127.0.0.1:3321")
+	require.Equal(t, []string{"127.0.0.1:3320", "127.0.0.1:3321"}, got)
+}
+
+func TestRoutingTable_NodeJoinCallback(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	var got []string
+	rt.AddNodeJoinCallback(func(nodeName string) {
+		got = append(got, nodeName)
+	})
+
+	rt.notifyNodeJoinCallbacks("127.0.0.1:3320")
+	require.Equal(t, []string{"127.0.0.1:3320"}, got)
+}
+
+func TestRoutingTable_NodeLeaveCallback_CanceledContext(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	var num int32
+	rt.AddNodeLeaveCallback(func(string) {
+		atomic.AddInt32(&num, 1)
+	})
+
+	// Cancel the routing table context: the notifier must return without
+	// invoking any callback.
+	rt.cancel()
+	rt.notifyNodeLeaveCallbacks("127.0.0.1:3320")
+
+	require.Zero(t, atomic.LoadInt32(&num))
 }
 
 func TestRoutingTable_Callback_CanceledContext(t *testing.T) {

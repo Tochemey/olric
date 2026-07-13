@@ -20,6 +20,7 @@ package olric
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1079,6 +1080,88 @@ func TestOlric_Shutdown_ClosesTheEmbeddedClusterClient(t *testing.T) {
 	// The gate is shut: a late Scan cannot resurrect a client behind the teardown.
 	_, err = db.embeddedClusterClient()
 	require.ErrorIs(t, err, ErrMemberClosing)
+	require.Nil(t, db.clusterClient)
+}
+
+// A departed member's address must leave the embedded cluster client's
+// round-robin rotation. Nothing but the routing table's node-leave hook prunes
+// that pool, and a stale address makes every Nth pick of a Pick-based command
+// (routing table fetches during Scan, Members, Delete, Destroy) dial a dead
+// peer. On a loopback network such a pick fails instantly with a TCP reset,
+// but on a packet-dropping network (a deleted Kubernetes pod) it burns the
+// full dial timeout, so the invariant asserted here is rotation membership,
+// which is environment-independent.
+func TestOlric_EmbeddedClusterClient_PrunesDeadMemberOnNodeLeave(t *testing.T) {
+	cluster := newTestCluster(t)
+	db1 := cluster.addMember(t)
+	db2 := cluster.addMember(t)
+
+	cc := mustEmbeddedClusterClient(t, db1)
+
+	// The cluster client discovers every member at construction time.
+	db2Addr := db2.rt.This().String()
+	require.Contains(t, cc.client.Addresses(), db2Addr)
+
+	require.NoError(t, db2.Shutdown(context.Background()))
+
+	// Memberlist delivers NodeLeave, the hook closes the departed member's
+	// connection pool and takes its address out of the rotation.
+	require.Eventually(t, func() bool {
+		_, ok := cc.client.Addresses()[db2Addr]
+		return !ok
+	}, 10*time.Second, 100*time.Millisecond)
+
+	// The member's own address must survive the prune.
+	require.Contains(t, cc.client.Addresses(), db1.rt.This().String())
+}
+
+// Ban/restore round-trip through the member's node-leave and node-join hooks,
+// observed through Pick: a banned address stays out of the round-robin
+// rotation even when a stale routing table Get re-registers it, and a
+// restored address rejoins the rotation.
+func TestOlric_EmbeddedClusterClientPool_BanAndRestore(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+	cc := mustEmbeddedClusterClient(t, db)
+
+	// An address that cannot collide with the member's own as a substring.
+	deadAddr := "10.255.255.255:3320"
+	db.pruneEmbeddedClusterClientPool(deadAddr)
+
+	// A Get during the ban (a stale routing table snapshot) registers the
+	// address but must not put it into the rotation.
+	require.NotNil(t, cc.client.Get(deadAddr))
+	require.Contains(t, cc.client.Addresses(), deadAddr)
+	for i := 0; i < 20; i++ {
+		rc, err := cc.client.Pick()
+		require.NoError(t, err)
+		require.NotContains(t, rc.String(), deadAddr)
+	}
+
+	// The member came back: the join hook lifts the ban and the address
+	// rejoins the rotation.
+	db.restoreEmbeddedClusterClientPool(deadAddr)
+	seen := false
+	for i := 0; i < 20; i++ {
+		rc, err := cc.client.Pick()
+		require.NoError(t, err)
+		if strings.Contains(rc.String(), deadAddr) {
+			seen = true
+			break
+		}
+	}
+	require.True(t, seen, "a restored address must rejoin the rotation")
+}
+
+// The hooks run on membership events regardless of whether a Scan or Pipeline
+// ever created the shared cluster client; they must tolerate its absence.
+func TestOlric_EmbeddedClusterClientPoolHooks_NoClient(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	require.Nil(t, db.clusterClient)
+	db.pruneEmbeddedClusterClientPool("127.0.0.1:3320")
+	db.restoreEmbeddedClusterClientPool("127.0.0.1:3320")
 	require.Nil(t, db.clusterClient)
 }
 
