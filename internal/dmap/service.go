@@ -29,11 +29,11 @@ import (
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/cluster/routingtable"
 	"github.com/tochemey/olric/internal/environment"
-	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/internal/locker"
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/service"
+	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/pkg/flog"
 	"github.com/tochemey/olric/pkg/storage"
 )
@@ -62,6 +62,14 @@ type Service struct {
 	wg        sync.WaitGroup
 	ctx       context.Context
 	cancel    context.CancelFunc
+
+	// shutdownMtx guards closed against the wg.Add/wg.Wait race. Shutdown sets
+	// closed under this lock before calling wg.Wait, and spawn takes the same
+	// lock around wg.Add, so a background goroutine spawned from an untracked
+	// caller (a request handler or the balancer) can never drive wg.Add
+	// concurrently with wg.Wait.
+	shutdownMtx sync.Mutex
+	closed      bool
 }
 
 func registerErrors() {
@@ -121,9 +129,29 @@ func getType(data interface{}) string {
 	return t.Name()
 }
 
-func (s *Service) publishEvent(e events.Event) {
-	defer s.wg.Done()
+// spawn runs fn on a background goroutine tracked by the service WaitGroup,
+// unless shutdown has already begun. It is the only sanctioned way to start a
+// tracked goroutine from a caller that is not itself counted by the WaitGroup
+// (request handlers, the balancer): taking shutdownMtx around wg.Add — with
+// closed set under the same lock before Shutdown's wg.Wait — guarantees wg.Add
+// never races wg.Wait. It reports whether fn was started; false means the
+// service is shutting down and the work was dropped, which is safe because the
+// node is leaving.
+func (s *Service) spawn(fn func()) bool {
+	s.shutdownMtx.Lock()
+	defer s.shutdownMtx.Unlock()
+	if s.closed {
+		return false
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		fn()
+	}()
+	return true
+}
 
+func (s *Service) publishEvent(e events.Event) {
 	rc := s.client.Get(s.rt.This().String())
 	data, err := e.Encode()
 	if err != nil {
@@ -168,16 +196,22 @@ func (s *Service) initialSyncCompletePublisher() {
 			Source:    s.rt.This().String(),
 			Timestamp: time.Now().UnixNano(),
 		}
-		s.wg.Add(1)
-		go s.publishEvent(e)
+		s.spawn(func() { s.publishEvent(e) })
 	case <-s.ctx.Done():
 	}
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.cancel()
-	done := make(chan struct{})
 
+	// Flip closed under shutdownMtx before waiting so no further spawn can call
+	// wg.Add once wg.Wait is in progress. Any spawn already past the guard has
+	// completed its wg.Add under the same lock, so it is counted before Wait.
+	s.shutdownMtx.Lock()
+	s.closed = true
+	s.shutdownMtx.Unlock()
+
+	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
 		close(done)

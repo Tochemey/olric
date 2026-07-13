@@ -114,8 +114,7 @@ func (f *fragment) Move(part *partitions.Partition, name string, owners []discov
 				IsBackup:      part.Kind() == partitions.BACKUP,
 				Timestamp:     time.Now().UnixNano(),
 			}
-			f.service.wg.Add(1)
-			go f.service.publishEvent(e)
+			f.service.spawn(func() { f.service.publishEvent(e) })
 		}
 
 		cmd := protocol.NewMoveFragment(value).Command(f.service.ctx)
@@ -169,8 +168,7 @@ func (f *fragment) MoveWithTargetKind(part *partitions.Partition, name string, o
 				IsBackup:      targetKind == partitions.BACKUP,
 				Timestamp:     time.Now().UnixNano(),
 			}
-			f.service.wg.Add(1)
-			go f.service.publishEvent(e)
+			f.service.spawn(func() { f.service.publishEvent(e) })
 		}
 
 		cmd := protocol.NewMoveFragment(value).Command(f.service.ctx)
