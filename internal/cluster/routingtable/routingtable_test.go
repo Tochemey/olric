@@ -1679,8 +1679,12 @@ func TestRoutingTable_CommitWithUnreachableMember(t *testing.T) {
 	require.NoError(t, err)
 
 	// The unreachable member must still be part of the cluster while the
-	// joiner bootstraps.
-	require.Equal(t, int32(4), rt1.NumMembers())
+	// joiner bootstraps. The coordinator learns about the joiner through
+	// asynchronous memberlist gossip, so poll instead of asserting instantly.
+	require.Eventually(t, func() bool {
+		return rt1.NumMembers() == 4
+	}, 15*time.Second, 100*time.Millisecond,
+		"coordinator must observe all four members, including the unreachable one")
 	require.NoError(t, rt4.CheckBootstrap())
 
 	// The coordinator must commit the new routing table and start a rebalance

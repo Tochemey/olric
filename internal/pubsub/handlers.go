@@ -18,6 +18,8 @@
 package pubsub
 
 import (
+	"context"
+
 	"github.com/tidwall/redcon"
 
 	"github.com/tochemey/olric/internal/protocol"
@@ -37,6 +39,42 @@ func (s *Service) subscribeCommandHandler(conn redcon.Conn, cmd redcon.Command) 
 	}
 }
 
+// publishToCluster delivers message to the subscribers of channel on every
+// cluster member and returns the total number of receivers. Local subscribers
+// are served in-process; remote members receive the message over
+// PUBLISH.INTERNAL.
+func (s *Service) publishToCluster(ctx context.Context, channel, message string) (int64, error) {
+	// A canceled context must not deliver anywhere, local subscribers
+	// included — the old client-side Publish path rejected it up front.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	var total int64
+	members := s.rt.Discovery().GetMembers()
+	for _, member := range members {
+		if member.CompareByID(s.rt.This()) {
+			count := s.pubsub.Publish(channel, message)
+			total += int64(count)
+			PublishedTotal.Increase(int64(count))
+			continue
+		}
+
+		pi := protocol.NewPublishInternal(channel, message).Command(ctx)
+		rc := s.client.Get(member.String())
+		if err := rc.Process(ctx, pi); err != nil {
+			return total, err
+		}
+		pcount, err := pi.Result()
+		if err != nil {
+			return total, err
+		}
+		total += pcount
+		PublishedTotal.Increase(pcount)
+	}
+	return total, nil
+}
+
 func (s *Service) publishCommandHandler(conn redcon.Conn, cmd redcon.Command) {
 	publishCmd, err := protocol.ParsePublishCommand(cmd)
 	if err != nil {
@@ -44,33 +82,13 @@ func (s *Service) publishCommandHandler(conn redcon.Conn, cmd redcon.Command) {
 		return
 	}
 
-	var total int
-	members := s.rt.Discovery().GetMembers()
-	for _, member := range members {
-		if member.CompareByID(s.rt.This()) {
-			count := s.pubsub.Publish(publishCmd.Channel, publishCmd.Message)
-			total += count
-			PublishedTotal.Increase(int64(count))
-			continue
-		}
-
-		pi := protocol.NewPublishInternal(publishCmd.Channel, publishCmd.Message).Command(s.ctx)
-		rc := s.client.Get(member.String())
-		err = rc.Process(s.ctx, pi)
-		if err != nil {
-			protocol.WriteError(conn, err)
-			return
-		}
-		pcount, err := pi.Result()
-		if err != nil {
-			protocol.WriteError(conn, err)
-			return
-		}
-		total += int(pcount)
-		PublishedTotal.Increase(pcount)
+	total, err := s.publishToCluster(s.ctx, publishCmd.Channel, publishCmd.Message)
+	if err != nil {
+		protocol.WriteError(conn, err)
+		return
 	}
 
-	conn.WriteInt(total)
+	conn.WriteInt(int(total))
 }
 
 func (s *Service) publishInternalCommandHandler(conn redcon.Conn, cmd redcon.Command) {

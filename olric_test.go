@@ -304,3 +304,45 @@ func TestOlric_EnableProactiveSyncOnJoin_Default(t *testing.T) {
 	c := config.New("local")
 	require.False(t, c.EnableProactiveSyncOnJoin)
 }
+
+// TestOlric_ClusterEvents_NodeJoinDelivery drives the real cluster-event
+// pipeline end to end: the routing table has no event transport of its own,
+// so this only passes if pubsub.NewService registered itself as the
+// publisher. Every other events test injects a fake publisher; this is the
+// wiring's only guard.
+func TestOlric_ClusterEvents_NodeJoinDelivery(t *testing.T) {
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.EnableClusterEventsChannel = true
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+
+	ctx := context.Background()
+	ps, err := db1.NewEmbeddedClient().NewPubSub(ToAddress(db1.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	defer func() {
+		require.NoError(t, rp.Close())
+	}()
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	ch := rp.Channel()
+	db2 := cluster.addMemberWithConfig(t, newConfig())
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case msg := <-ch:
+			if strings.Contains(msg.Payload, events.KindNodeJoinEvent) &&
+				strings.Contains(msg.Payload, db2.rt.This().String()) {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for NodeJoinEvent on cluster.events")
+		}
+	}
+}

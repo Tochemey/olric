@@ -88,6 +88,22 @@ func NewService(e *environment.Environment) (service.Service, error) {
 		cancel: cancel,
 	}
 	s.RegisterHandlers()
+
+	// The routing table (and services like dmap) emit cluster events but have
+	// no publishing capability of their own: register this service as their
+	// transport. The fan-out must stop when either side shuts down: the
+	// caller's context covers the emitter, and s.ctx covers this service —
+	// without the merge, events emitted between pubsub shutdown and routing
+	// table shutdown would keep dialing remote members.
+	s.rt.SetClusterEventPublisher(func(ctx context.Context, channel, message string) error {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stop := context.AfterFunc(s.ctx, cancel)
+		defer stop()
+
+		_, err := s.publishToCluster(ctx, channel, message)
+		return err
+	})
 	return s, nil
 }
 
