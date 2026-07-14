@@ -25,11 +25,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/redcon"
 
 	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/cluster/partitions"
-	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/cluster/routingtable"
 	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
 )
@@ -140,25 +139,28 @@ func TestDMap_Balancer_WrongOwnership(t *testing.T) {
 }
 
 func TestDMap_Balancer_ClusterEvents(t *testing.T) {
+	// Generously buffered with a non-blocking send: publishers run on
+	// wg-tracked goroutines, and a blocking send after the drain loop below
+	// stops reading would wedge the routing table's shutdown forever.
+	result := make(chan string, 1024)
+	collect := routingtable.ClusterEventPublisher(func(_ context.Context, channel, message string) error {
+		require.Equal(t, events.ClusterEventsChannel, channel)
+		select {
+		case result <- message:
+		default:
+		}
+		return nil
+	})
+
 	c1 := testutil.NewConfig()
 	c1.TriggerBalancerInterval = time.Millisecond
 	c1.EnableClusterEventsChannel = true
 	e1 := testcluster.NewEnvironment(c1)
+	e1.Set("cluster-event-publisher", collect)
 
 	cluster := testcluster.New(NewService)
 	db1 := cluster.AddMember(e1).(*Service)
 	defer cluster.Shutdown()
-
-	result := make(chan string, 1)
-	db1.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
-		publishCmd, err := protocol.ParsePublishCommand(cmd)
-		require.NoError(t, err)
-		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
-
-		result <- publishCmd.Message
-
-		conn.WriteInt(1)
-	})
 
 	dm, err := db1.NewDMap("mymap")
 	require.NoError(t, err)
@@ -172,20 +174,10 @@ func TestDMap_Balancer_ClusterEvents(t *testing.T) {
 
 	go func() {
 		c2 := testutil.NewConfig()
-		c1.TriggerBalancerInterval = time.Millisecond
+		c2.TriggerBalancerInterval = time.Millisecond
 		c2.EnableClusterEventsChannel = true
 		e2 := testcluster.NewEnvironment(c2)
-		s2 := testutil.NewServer(c2)
-		s2.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
-			publishCmd, err := protocol.ParsePublishCommand(cmd)
-			require.NoError(t, err)
-			require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
-
-			result <- publishCmd.Message
-
-			conn.WriteInt(1)
-		})
-		e2.Set("server", s2)
+		e2.Set("cluster-event-publisher", collect)
 		cluster.AddMember(e2)
 	}()
 

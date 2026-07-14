@@ -94,6 +94,20 @@ func (t *TestCluster) newService(e *environment.Environment) service.Service {
 	if err != nil {
 		panic(fmt.Sprintf("failed to start DMap service: %v", err))
 	}
+
+	// Tests that assert on cluster events inject a publisher through the
+	// environment. Registered after the constructor — so a pubsub service
+	// under test cannot silently clobber it — but still before the member
+	// joins, so events fired during the join are not dropped.
+	switch p := e.Get("cluster-event-publisher").(type) {
+	case nil:
+	case routingtable.ClusterEventPublisher:
+		rt.SetClusterEventPublisher(p)
+	case func(ctx context.Context, channel, message string) error:
+		rt.SetClusterEventPublisher(p)
+	default:
+		panic(fmt.Sprintf("cluster-event-publisher has unsupported type %T", p))
+	}
 	return s
 }
 

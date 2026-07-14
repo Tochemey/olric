@@ -152,13 +152,12 @@ func (s *Service) spawn(fn func()) bool {
 }
 
 func (s *Service) publishEvent(e events.Event) {
-	rc := s.client.Get(s.rt.This().String())
 	data, err := e.Encode()
 	if err != nil {
 		s.log.V(3).Printf("[ERROR] Failed to encode %s: %v", getType(e), err)
 		return
 	}
-	err = rc.Publish(s.ctx, events.ClusterEventsChannel, data).Err()
+	err = s.rt.PublishClusterEvent(s.ctx, events.ClusterEventsChannel, data)
 	if err != nil {
 		s.log.V(3).Printf("[ERROR] Failed to publish %s to %s: %v",
 			getType(e), events.ClusterEventsChannel, err)

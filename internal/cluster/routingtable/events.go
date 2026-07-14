@@ -18,16 +18,46 @@
 package routingtable
 
 import (
+	"context"
 	"time"
 
 	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/discovery"
 )
 
+// ClusterEventPublisher delivers an encoded cluster event to the subscribers
+// of channel on every cluster member. The routing table has no publishing
+// capability of its own: the pubsub service registers one at construction
+// time via SetClusterEventPublisher.
+type ClusterEventPublisher func(ctx context.Context, channel, message string) error
+
+// SetClusterEventPublisher registers publish as the transport for cluster
+// events. Until one is registered, PublishClusterEvent drops events.
+func (r *RoutingTable) SetClusterEventPublisher(publish ClusterEventPublisher) {
+	r.eventPublisherMtx.Lock()
+	defer r.eventPublisherMtx.Unlock()
+	r.eventPublisher = publish
+}
+
+// PublishClusterEvent delivers an encoded cluster event to the subscribers of
+// channel on every cluster member through the registered publisher. Without a
+// registered publisher — a deployment without the pubsub service, which only
+// happens in partial test setups — the event is dropped.
+func (r *RoutingTable) PublishClusterEvent(ctx context.Context, channel, message string) error {
+	r.eventPublisherMtx.RLock()
+	publish := r.eventPublisher
+	r.eventPublisherMtx.RUnlock()
+
+	if publish == nil {
+		r.log.V(4).Printf("[DEBUG] No cluster event publisher is registered, dropping event to %s", channel)
+		return nil
+	}
+	return publish(ctx, channel, message)
+}
+
 func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member) {
 	defer r.wg.Done()
 
-	rc := r.client.Get(r.this.String())
 	message := events.NodeJoinEvent{
 		Kind:      events.KindNodeJoinEvent,
 		Source:    r.this.String(),
@@ -40,7 +70,7 @@ func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member) {
 		r.log.V(3).Printf("[ERROR] Failed to encode NodeJoinEvent: %v", err)
 		return
 	}
-	err = rc.Publish(r.ctx, events.ClusterEventsChannel, data).Err()
+	err = r.PublishClusterEvent(r.ctx, events.ClusterEventsChannel, data)
 	if err != nil {
 		r.log.V(3).Printf("[ERROR] Failed to publish NodeJoinEvent to %s: %v", events.ClusterEventsChannel, err)
 	}
@@ -49,7 +79,6 @@ func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member) {
 func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member) {
 	defer r.wg.Done()
 
-	rc := r.client.Get(r.this.String())
 	message := events.NodeLeftEvent{
 		Kind:      events.KindNodeLeftEvent,
 		Source:    r.this.String(),
@@ -62,7 +91,7 @@ func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member) {
 		r.log.V(3).Printf("[ERROR] Failed to encode NodeLeftEvent: %v", err)
 		return
 	}
-	err = rc.Publish(r.ctx, events.ClusterEventsChannel, data).Err()
+	err = r.PublishClusterEvent(r.ctx, events.ClusterEventsChannel, data)
 	if err != nil {
 		r.log.V(3).Printf("[ERROR] Failed to publish NodeLeftEvent to %s: %v", events.ClusterEventsChannel, err)
 	}
@@ -71,7 +100,6 @@ func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member) {
 func (r *RoutingTable) publishRebalanceStartEvent(epoch uint64, reason, node string) {
 	defer r.wg.Done()
 
-	rc := r.client.Get(r.this.String())
 	message := events.RebalanceStartEvent{
 		Kind:      events.KindRebalanceStartEvent,
 		Source:    r.this.String(),
@@ -85,7 +113,7 @@ func (r *RoutingTable) publishRebalanceStartEvent(epoch uint64, reason, node str
 		r.log.V(3).Printf("[ERROR] Failed to encode RebalanceStartEvent: %v", err)
 		return
 	}
-	err = rc.Publish(r.ctx, events.ClusterEventsChannel, data).Err()
+	err = r.PublishClusterEvent(r.ctx, events.ClusterEventsChannel, data)
 	if err != nil {
 		r.log.V(3).Printf("[ERROR] Failed to publish RebalanceStartEvent to %s: %v", events.ClusterEventsChannel, err)
 	}
@@ -102,7 +130,6 @@ func (r *RoutingTable) publishRebalanceCompleteEvent(epoch uint64) {
 	default:
 	}
 
-	rc := r.client.Get(r.this.String())
 	message := events.RebalanceCompleteEvent{
 		Kind:      events.KindRebalanceCompleteEvent,
 		Source:    r.this.String(),
@@ -114,7 +141,7 @@ func (r *RoutingTable) publishRebalanceCompleteEvent(epoch uint64) {
 		r.log.V(3).Printf("[ERROR] Failed to encode RebalanceCompleteEvent: %v", err)
 		return
 	}
-	err = rc.Publish(r.ctx, events.ClusterEventsChannel, data).Err()
+	err = r.PublishClusterEvent(r.ctx, events.ClusterEventsChannel, data)
 	if err != nil {
 		// Don't log if context was canceled (expected during shutdown)
 		select {

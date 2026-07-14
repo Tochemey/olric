@@ -20,15 +20,14 @@ package routingtable
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/redcon"
 
 	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/discovery"
-	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/testutil"
 )
 
@@ -41,21 +40,17 @@ func TestRoutingTable_publishNodeJoinEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+	rt.SetClusterEventPublisher(func(_ context.Context, channel, message string) error {
 		defer cancel()
 
-		publishCmd, err := protocol.ParsePublishCommand(cmd)
-		require.NoError(t, err)
-		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
+		require.Equal(t, events.ClusterEventsChannel, channel)
 
 		v := events.NodeJoinEvent{}
-		err = json.Unmarshal([]byte(publishCmd.Message), &v)
-		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal([]byte(message), &v))
 		require.Equal(t, events.KindNodeJoinEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, rt.this.String(), v.NodeJoin)
-
-		conn.WriteInt(1)
+		return nil
 	})
 
 	m := discovery.NewMember(c)
@@ -74,20 +69,17 @@ func TestRoutingTable_publishNodeLeftEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+	rt.SetClusterEventPublisher(func(_ context.Context, channel, message string) error {
 		defer cancel()
-		publishCmd, err := protocol.ParsePublishCommand(cmd)
-		require.NoError(t, err)
-		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
+
+		require.Equal(t, events.ClusterEventsChannel, channel)
 
 		v := events.NodeLeftEvent{}
-		err = json.Unmarshal([]byte(publishCmd.Message), &v)
-		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal([]byte(message), &v))
 		require.Equal(t, events.KindNodeLeftEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, rt.this.String(), v.NodeLeft)
-
-		conn.WriteInt(1)
+		return nil
 	})
 
 	m := discovery.NewMember(c)
@@ -106,23 +98,19 @@ func TestRoutingTable_publishRebalanceStartEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+	rt.SetClusterEventPublisher(func(_ context.Context, channel, message string) error {
 		defer cancel()
 
-		publishCmd, err := protocol.ParsePublishCommand(cmd)
-		require.NoError(t, err)
-		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
+		require.Equal(t, events.ClusterEventsChannel, channel)
 
 		v := events.RebalanceStartEvent{}
-		err = json.Unmarshal([]byte(publishCmd.Message), &v)
-		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal([]byte(message), &v))
 		require.Equal(t, events.KindRebalanceStartEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, uint64(42), v.Epoch)
 		require.Equal(t, "node-left", v.Reason)
 		require.Equal(t, "127.0.0.1:9999", v.Node)
-
-		conn.WriteInt(1)
+		return nil
 	})
 
 	rt.wg.Add(1)
@@ -140,21 +128,17 @@ func TestRoutingTable_publishRebalanceCompleteEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+	rt.SetClusterEventPublisher(func(_ context.Context, channel, message string) error {
 		defer cancel()
 
-		publishCmd, err := protocol.ParsePublishCommand(cmd)
-		require.NoError(t, err)
-		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
+		require.Equal(t, events.ClusterEventsChannel, channel)
 
 		v := events.RebalanceCompleteEvent{}
-		err = json.Unmarshal([]byte(publishCmd.Message), &v)
-		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal([]byte(message), &v))
 		require.Equal(t, events.KindRebalanceCompleteEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, uint64(42), v.Epoch)
-
-		conn.WriteInt(1)
+		return nil
 	})
 
 	rt.wg.Add(1)
@@ -166,6 +150,11 @@ func TestRoutingTable_publishRebalanceCompleteEvent(t *testing.T) {
 func TestRoutingTable_publishRebalanceCompleteEvent_Canceled(t *testing.T) {
 	c := testutil.NewConfig()
 	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	rt.SetClusterEventPublisher(func(context.Context, string, string) error {
+		t.Error("nothing must be published after shutdown")
+		return nil
+	})
 
 	// The node is shutting down: nothing must be published.
 	rt.cancel()
@@ -181,11 +170,11 @@ func TestRoutingTable_publishRebalanceCompleteEvent_CanceledDuringPublish(t *tes
 	rt, err := cluster.addNode(c)
 	require.NoError(t, err)
 
-	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
+	rt.SetClusterEventPublisher(func(context.Context, string, string) error {
 		// Cancel the routing table context before failing the publish: the
 		// error must be swallowed silently because the node is shutting down.
 		rt.cancel()
-		conn.WriteError("ERR publish failed")
+		return errors.New("publish failed")
 	})
 
 	rt.wg.Add(1)

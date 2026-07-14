@@ -25,11 +25,9 @@ import (
 
 	"github.com/hashicorp/memberlist"
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/redcon"
 
 	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/discovery"
-	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/testutil"
 )
 
@@ -51,24 +49,19 @@ func TestRoutingTable_rebalanceCompleteEventOnAck(t *testing.T) {
 	rt.Members().Unlock()
 
 	done := make(chan events.RebalanceCompleteEvent, 1)
-	rt.server.ServeMux().HandleFunc(protocol.PubSub.Publish, func(conn redcon.Conn, cmd redcon.Command) {
-		publishCmd, err := protocol.ParsePublishCommand(cmd)
-		require.NoError(t, err)
-		require.Equal(t, events.ClusterEventsChannel, publishCmd.Channel)
+	rt.SetClusterEventPublisher(func(_ context.Context, channel, message string) error {
+		require.Equal(t, events.ClusterEventsChannel, channel)
 
 		var envelope struct {
 			Kind string `json:"kind"`
 		}
-		err = json.Unmarshal([]byte(publishCmd.Message), &envelope)
-		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal([]byte(message), &envelope))
 		if envelope.Kind == events.KindRebalanceCompleteEvent {
 			var ev events.RebalanceCompleteEvent
-			err = json.Unmarshal([]byte(publishCmd.Message), &ev)
-			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal([]byte(message), &ev))
 			done <- ev
 		}
-
-		conn.WriteInt(1)
+		return nil
 	})
 
 	rt.startRebalanceEpoch(42, rebalanceReasonNodeLeft, peer.String(), []uint64{rt.this.ID, peer.ID})

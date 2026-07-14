@@ -83,7 +83,12 @@ type RoutingTable struct {
 	leaveCallbacks    []func(nodeName string)
 	joinCallbacks     []func(nodeName string)
 	memberCallbackMtx sync.Mutex
-	pushPeriod       time.Duration
+	// eventPublisher delivers cluster events to subscribers on every member.
+	// It is registered by the pubsub service; the routing table cannot
+	// deliver events on its own.
+	eventPublisher    ClusterEventPublisher
+	eventPublisherMtx sync.RWMutex
+	pushPeriod        time.Duration
 	// The command handlers of the routing table service should wait for the cluster join event.
 	joined chan struct{}
 	ctx    context.Context
