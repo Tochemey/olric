@@ -514,3 +514,48 @@ L:
 
 	require.Equal(t, expected, consumed)
 }
+
+// The fan-out must reject an already-canceled context before delivering
+// anywhere, local subscribers included.
+func TestPubSub_publishToCluster_CanceledContext(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	count, err := s.publishToCluster(ctx, "my-channel", "hello, world!")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, count)
+}
+
+// When the fan-out fails, the PUBLISH handler must reply with an error
+// instead of a receiver count.
+func TestPubSub_Handler_Publish_FanOutError(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	// Cancel the service context so publishToCluster fails immediately.
+	s.cancel()
+
+	conn := &fakeConn{}
+	s.publishCommandHandler(conn, newCommand("PUBLISH", "my-channel", "hello, world!"))
+	require.NotEmpty(t, conn.errs)
+	require.Empty(t, conn.ints)
+}
+
+// A member whose RESP server is dead (but whose memberlist is still alive)
+// must surface a fan-out error to the publisher.
+func TestPubSub_publishToCluster_UnreachableMember(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s1 := cluster.AddMember(nil).(*Service)
+	s2 := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	require.NoError(t, s2.server.Shutdown(context.Background()))
+
+	_, err := s1.publishToCluster(context.Background(), "my-channel", "hello, world!")
+	require.Error(t, err)
+}
