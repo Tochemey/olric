@@ -21,9 +21,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
@@ -154,6 +157,153 @@ func TestDMap_Delete_MultiKeyDifferentRemoteOwners(t *testing.T) {
 		_, _, err = dm1.Get(ctx, testutil.ToKey(i))
 		require.ErrorIs(t, err, ErrKeyNotFound)
 	}
+}
+
+// newUnreachableMember returns a member whose address is a free local port with
+// nothing listening on it, so every attempt to dial it fails immediately with
+// connection refused. It is used to drive the remote failure branches of the
+// delete path without tearing a live member down.
+func newUnreachableMember(t *testing.T) discovery.Member {
+	t.Helper()
+
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+
+	name := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	return discovery.Member{
+		Name:      name,
+		NameHash:  xxhash.Sum64([]byte(name)),
+		ID:        discovery.MemberID(name, 1),
+		Birthdate: 1,
+	}
+}
+
+func TestDMap_Delete_RemoteOwnerUnreachable(t *testing.T) {
+	// deleteKeys' remote branch has to surface a dial failure instead of
+	// swallowing it, and g.Wait's error has to reach the caller.
+	cluster := testcluster.New(NewService)
+	s1 := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	dm, err := s1.NewDMap("mymap")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	key := testutil.ToKey(1)
+	require.NoError(t, dm.Put(ctx, key, testutil.ToVal(1), nil))
+
+	// Hand the partition to a member that isn't listening, so the key is
+	// routed to a remote owner that cannot be dialed.
+	hkey := partitions.HKey("mymap", key)
+	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{newUnreachableMember(t)})
+
+	count, err := dm.Delete(ctx, key)
+	require.Error(t, err)
+	require.Zero(t, count)
+}
+
+func TestDMap_Delete_PreviousOwnerUnreachable(t *testing.T) {
+	// The local owner branch delegates to deleteKey, which asks every previous
+	// owner to drop the key first. A previous owner that cannot be dialed must
+	// fail the whole delete rather than be skipped.
+	cluster := testcluster.New(NewService)
+	s1 := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	dm, err := s1.NewDMap("mymap")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	key := testutil.ToKey(1)
+	require.NoError(t, dm.Put(ctx, key, testutil.ToVal(1), nil))
+
+	// Owner() is the last entry, so this node stays the current owner while the
+	// unreachable member becomes a previous owner.
+	hkey := partitions.HKey("mymap", key)
+	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{
+		newUnreachableMember(t),
+		s1.rt.This(),
+	})
+
+	count, err := dm.Delete(ctx, key)
+	require.Error(t, err)
+	require.Zero(t, count)
+}
+
+func TestDMap_Delete_BackupOwnerUnreachable(t *testing.T) {
+	// ReplicaCount is 1 by default, so deleteOnCluster fans the deletion out to
+	// the backup owners. A backup owner that cannot be dialed must fail the
+	// delete instead of leaving a stale replica behind silently.
+	cluster := testcluster.New(NewService)
+	s1 := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	dm, err := s1.NewDMap("mymap")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	key := testutil.ToKey(1)
+	require.NoError(t, dm.Put(ctx, key, testutil.ToVal(1), nil))
+
+	hkey := partitions.HKey("mymap", key)
+	s1.backup.PartitionByHKey(hkey).SetOwners([]discovery.Member{newUnreachableMember(t)})
+
+	count, err := dm.Delete(ctx, key)
+	require.Error(t, err)
+	require.Zero(t, count)
+}
+
+func TestDMap_Delete_PanicsWhenPartitionHasNoOwner(t *testing.T) {
+	// An empty owners list is a programming error: deleteOnCluster panics
+	// rather than deleting data whose replication targets are unknown.
+	cluster := testcluster.New(NewService)
+	s1 := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	dm, err := s1.NewDMap("mymap")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	key := testutil.ToKey(1)
+	require.NoError(t, dm.Put(ctx, key, testutil.ToVal(1), nil))
+
+	hkey := partitions.HKey("mymap", key)
+	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{})
+
+	// Delete cannot be used here: grouping the keys by owner would panic in
+	// Partition.Owner before deleteOnCluster is ever reached.
+	require.Panics(t, func() {
+		_ = dm.deleteKey(key)
+	})
+}
+
+func TestDMap_Delete_MixedOwnersOneUnreachable(t *testing.T) {
+	// deleteKeys fans out to every owner. When one of them fails, the error has
+	// to win over the successful owners so the caller never reads a partial
+	// delete as a complete one.
+	cluster := testcluster.New(NewService)
+	s1 := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	dm, err := s1.NewDMap("mymap")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	const keyCount = 10
+	keys := make([]string, keyCount)
+	for i := 0; i < keyCount; i++ {
+		keys[i] = testutil.ToKey(i)
+		require.NoError(t, dm.Put(ctx, keys[i], testutil.ToVal(i), nil))
+	}
+
+	// Only the first key moves to an unreachable owner. The rest stay local, so
+	// the fan-out has both a healthy and a failing group.
+	hkey := partitions.HKey("mymap", keys[0])
+	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{newUnreachableMember(t)})
+
+	count, err := dm.Delete(ctx, keys...)
+	require.Error(t, err)
+	require.Zero(t, count)
 }
 
 func TestDMap_Delete_Lookup(t *testing.T) {

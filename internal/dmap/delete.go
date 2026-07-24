@@ -152,12 +152,11 @@ func (dm *DMap) deleteKeys(ctx context.Context, keys ...string) (int, error) {
 		members[member] = append(members[member], key)
 	}
 
-	// Fan out to every owner instead of stopping at the first remote one -
-	// see the errgroup pattern used by deleteBackupOnCluster/deleteOnCluster.
+	// Fan out to every owner instead of stopping at the first remote one,
+	// following the errgroup pattern used by deleteBackupOnCluster.
 	var count int64
 	var g errgroup.Group
 	for member, distributedKeys := range members {
-		member, distributedKeys := member, distributedKeys
 		if member.CompareByName(dm.s.rt.This()) {
 			g.Go(func() error {
 				for _, key := range distributedKeys {
