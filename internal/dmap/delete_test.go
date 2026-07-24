@@ -101,6 +101,61 @@ func TestDMap_Delete_Cluster(t *testing.T) {
 	}
 }
 
+func TestDMap_Delete_MultiKeyDifferentRemoteOwners(t *testing.T) {
+	// Ported from the same fix on olric-data/olric (upstream PR
+	// https://github.com/olric-data/olric/pull/287): deleteKeys groups keys
+	// by partition owner and previously returned unconditionally after
+	// handling the first remote owner, silently skipping every remote owner
+	// after that. This reproduces the bug on a 3-node cluster by asserting
+	// the key set actually hashes to at least two different remote owners
+	// before calling Delete, so the multi-owner fan-out path is exercised.
+	cluster := testcluster.New(NewService)
+	s1 := cluster.AddMember(nil).(*Service)
+	cluster.AddMember(nil)
+	cluster.AddMember(nil)
+	defer cluster.Shutdown()
+
+	dm1, err := s1.NewDMap("mymap")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	const keyCount = 30
+	for i := 0; i < keyCount; i++ {
+		err = dm1.Put(ctx, testutil.ToKey(i), testutil.ToVal(i), nil)
+		require.NoError(t, err)
+	}
+
+	// Sanity check: the keys must hash to at least two different owners other
+	// than s1 itself. Otherwise, deleteKeys' per-owner fan-out only has a
+	// single remote entry and this test wouldn't exercise the multi-owner
+	// code path where a bug could silently drop keys past the first remote
+	// owner.
+	remoteOwners := make(map[string]struct{})
+	for i := 0; i < keyCount; i++ {
+		hkey := partitions.HKey("mymap", testutil.ToKey(i))
+		owner := s1.primary.PartitionByHKey(hkey).Owner()
+		if !owner.CompareByName(s1.rt.This()) {
+			remoteOwners[owner.String()] = struct{}{}
+		}
+	}
+	require.GreaterOrEqual(t, len(remoteOwners), 2,
+		"test setup must distribute keys across at least two remote owners")
+
+	keys := make([]string, keyCount)
+	for i := 0; i < keyCount; i++ {
+		keys[i] = testutil.ToKey(i)
+	}
+
+	count, err := dm1.Delete(ctx, keys...)
+	require.NoError(t, err)
+	require.Equal(t, keyCount, count)
+
+	for i := 0; i < keyCount; i++ {
+		_, _, err = dm1.Get(ctx, testutil.ToKey(i))
+		require.ErrorIs(t, err, ErrKeyNotFound)
+	}
+}
+
 func TestDMap_Delete_Lookup(t *testing.T) {
 	cluster := testcluster.New(NewService)
 	s1 := cluster.AddMember(nil).(*Service)
