@@ -3,7 +3,7 @@ module github.com/tochemey/olric
 go 1.26.0
 
 require (
-	github.com/RoaringBitmap/roaring/v2 v2.21.0
+	github.com/RoaringBitmap/roaring/v2 v2.24.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/go-sockaddr v1.0.7
@@ -15,7 +15,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/btree v1.8.1
 	github.com/tidwall/match v1.2.0
-	github.com/tidwall/redcon v1.6.2
+	github.com/tidwall/redcon v1.6.4
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/sync v0.22.0
 )

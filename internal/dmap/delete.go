@@ -20,6 +20,7 @@ package dmap
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -151,26 +152,43 @@ func (dm *DMap) deleteKeys(ctx context.Context, keys ...string) (int, error) {
 		members[member] = append(members[member], key)
 	}
 
+	// Fan out to every owner instead of stopping at the first remote one,
+	// following the errgroup pattern used by deleteBackupOnCluster.
+	var count int64
+	var g errgroup.Group
 	for member, distributedKeys := range members {
 		if member.CompareByName(dm.s.rt.This()) {
-			for _, key := range distributedKeys {
-				if err := dm.deleteKey(key); err != nil {
-					return 0, err
+			g.Go(func() error {
+				for _, key := range distributedKeys {
+					if err := dm.deleteKey(key); err != nil {
+						return err
+					}
 				}
-			}
-		} else {
+				atomic.AddInt64(&count, int64(len(distributedKeys)))
+				return nil
+			})
+			continue
+		}
+
+		g.Go(func() error {
 			cmd := protocol.NewDel(dm.name, distributedKeys...).Command(dm.s.ctx)
 			rc := dm.s.client.Get(member.String())
-			err := rc.Process(ctx, cmd)
-			if err != nil {
-				return 0, protocol.ConvertError(err)
+			if err := rc.Process(ctx, cmd); err != nil {
+				return protocol.ConvertError(err)
 			}
-
-			return 0, protocol.ConvertError(cmd.Err())
-		}
+			if err := cmd.Err(); err != nil {
+				return protocol.ConvertError(err)
+			}
+			atomic.AddInt64(&count, int64(len(distributedKeys)))
+			return nil
+		})
 	}
 
-	return len(keys), nil
+	if err := g.Wait(); err != nil {
+		return 0, err
+	}
+
+	return int(count), nil
 }
 
 // Delete deletes the value for the given key. Delete will not return error if key doesn't exist. It's thread-safe.
