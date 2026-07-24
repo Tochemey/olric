@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `DMap.Delete(ctx, keys...)` no longer silently drops keys owned by remote partition owners past the first one. `deleteKeys` groups the requested keys by partition owner, then looped over that map to delete each group; the remote-owner branch returned unconditionally after handling the first remote owner (on both success and error), so any additional remote owners in the map were never processed and no error was returned. On a multi-node cluster, a multi-key delete spanning more than one remote owner beyond the first left the keys on every owner after that one untouched. The fan-out now uses `errgroup`, matching the pattern already used by `deleteBackupOnCluster`: every owner, local and remote, is processed, and the first error (if any) is returned only after all owners have been attempted; the returned count reflects the keys actually processed across every owner.
+
 ## v0.3.15 - 2026-07-13
 
 ### Fixed
