@@ -20,6 +20,7 @@ package pubsub
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -46,6 +47,7 @@ func (c *fakeConn) WriteError(msg string)          { c.errs = append(c.errs, msg
 func (c *fakeConn) WriteString(string)             {}
 func (c *fakeConn) WriteBulk([]byte)               {}
 func (c *fakeConn) WriteBulkString(string)         {}
+func (c *fakeConn) WriteBulkFrom(int64, io.Reader) {}
 func (c *fakeConn) WriteInt(num int)               { c.ints = append(c.ints, num) }
 func (c *fakeConn) WriteInt64(int64)               {}
 func (c *fakeConn) WriteUint64(uint64)             {}
