@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.18 - 2026-07-24
+
+### Fixed
+
+- `RoutingTable.Start()` no longer waits on member-count quorum passively. When `MemberCountQuorum` is greater than 1 and this node bootstraps alone (its only configured peer, or the `ServiceDiscovery` backend's result, was unresolvable at `Join()` time), the quorum gate previously relied solely on memberlist gossip surfacing a peer, and could block for the full one-hour timeout — or forever, in practice, if no other node ever dialed in first — even though the peer became resolvable moments later. The gate now calls the same active re-resolution `discovery.Join()` performs, at `RejoinInterval` cadence, on every failed quorum check, so a node exits the gate as soon as a peer becomes reachable through gossip, static `Peers`, or `ServiceDiscovery`, instead of only waiting to be found. `rejoinLoop`'s per-tick body was extracted into a shared `tryRejoin()` method so the gate and the loop call one implementation instead of duplicating the rejoin logic. Behavior is unchanged for the default `MemberCountQuorum` of 1, where the quorum check already succeeds immediately and the active-rejoin branch never runs.
+
 ## v0.3.15 - 2026-07-13
 
 ### Fixed

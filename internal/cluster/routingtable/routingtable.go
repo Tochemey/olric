@@ -528,11 +528,26 @@ func (r *RoutingTable) Start() error {
 	// 1 Hour
 	ctx, cancel := context.WithTimeout(r.ctx, time.Hour)
 	defer cancel()
+
+	var lastRejoinAttempt time.Time
 	err := r.tryWithInterval(ctx, time.Second, func() error {
 		// Check member count quorum now. If there is no enough peers to work, wait forever.
 		err := r.CheckMemberCountQuorum()
 		if err != nil {
 			r.log.V(2).Printf("[ERROR] Inoperable node: %v", err)
+			// Passive gossip alone may never surface a live peer during a cold
+			// start (e.g. this node bootstrapped alone because its only
+			// configured peer, or service discovery result, was unresolvable
+			// at Join() time). Actively re-resolve and contact peers at
+			// RejoinInterval cadence, reusing the same call rejoinLoop makes
+			// once it's running, instead of only waiting to be found. This is
+			// skipped for the default MemberCountQuorum=1, where the check
+			// above already returns nil and this branch never runs.
+			if r.config.MemberCountQuorum > config.MinimumMemberCountQuorum &&
+				(lastRejoinAttempt.IsZero() || time.Since(lastRejoinAttempt) >= r.config.RejoinInterval) {
+				lastRejoinAttempt = time.Now()
+				r.tryRejoin()
+			}
 		}
 		return err
 	})

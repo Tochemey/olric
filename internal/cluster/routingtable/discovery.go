@@ -87,12 +87,30 @@ func (r *RoutingTable) attemptToJoin() error {
 	return ErrClusterJoin
 }
 
+// tryRejoin actively re-resolves and contacts live peers when the member
+// count quorum is not currently satisfied. It queries the configured service
+// discovery backend or static peers via discovery.Join, exactly like a fresh
+// Join() call would. It is a no-op when quorum is already satisfied. Both
+// rejoinLoop and the quorum gate in Start() call this so the two places
+// share one rejoin implementation instead of duplicating it.
+func (r *RoutingTable) tryRejoin() {
+	if r.CheckMemberCountQuorum() == nil {
+		return
+	}
+	r.log.V(2).Printf("[INFO] Minority partition detected (%d/%d members). Attempting to rejoin cluster.",
+		r.NumMembers(), r.config.MemberCountQuorum)
+	n, err := r.discovery.Join()
+	if err != nil {
+		r.log.V(3).Printf("[WARN] Rejoin attempt failed: %v", err)
+		return
+	}
+	r.log.V(2).Printf("[INFO] Rejoin contacted %d node(s)", n)
+}
+
 // rejoinLoop periodically attempts to rejoin the cluster when the node is in a
-// minority partition. It calls discovery.Join on each tick, which queries the
-// configured service discovery backend or static peers for live addresses.
-// The loop only fires when CheckMemberCountQuorum reports a quorum failure;
-// it is silent when quorum is satisfied. The goroutine is started only when
-// MemberCountQuorum is greater than MinimumMemberCountQuorum.
+// minority partition. It calls tryRejoin on each tick, which is silent when
+// quorum is satisfied. The goroutine is started only when MemberCountQuorum
+// is greater than MinimumMemberCountQuorum.
 func (r *RoutingTable) rejoinLoop() {
 	defer r.wg.Done()
 
@@ -104,17 +122,7 @@ func (r *RoutingTable) rejoinLoop() {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
-			if r.CheckMemberCountQuorum() == nil {
-				continue
-			}
-			r.log.V(2).Printf("[INFO] Minority partition detected (%d/%d members). Attempting to rejoin cluster.",
-				r.NumMembers(), r.config.MemberCountQuorum)
-			n, err := r.discovery.Join()
-			if err != nil {
-				r.log.V(3).Printf("[WARN] Rejoin attempt failed: %v", err)
-				continue
-			}
-			r.log.V(2).Printf("[INFO] Rejoin contacted %d node(s)", n)
+			r.tryRejoin()
 		}
 	}
 }
