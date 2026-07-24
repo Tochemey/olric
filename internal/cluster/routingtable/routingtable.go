@@ -525,29 +525,29 @@ func (r *RoutingTable) Start() error {
 	r.wg.Add(1)
 	go r.listenClusterEvents(r.discovery.ClusterEvents)
 
+	// The rejoin loop has to run before the quorum gate below, not after it.
+	// A node that bootstrapped alone, because its only configured peer or the
+	// service discovery result was unresolvable at Join() time, has nobody to
+	// hear from: passive gossip never surfaces a peer and the gate would block
+	// for its full one-hour ceiling even after that peer became reachable
+	// again. The loop re-resolves and dials peers itself, and is a no-op once
+	// quorum is satisfied, so one mechanism covers both the cold start and the
+	// minority partition it was originally written for. Running it on its own
+	// goroutine also keeps discovery.Join, which blocks while it dials, off
+	// the gate, so the gate stays responsive to context cancellation.
+	if r.config.MemberCountQuorum > config.MinimumMemberCountQuorum {
+		r.wg.Add(1)
+		go r.rejoinLoop()
+	}
+
 	// 1 Hour
 	ctx, cancel := context.WithTimeout(r.ctx, time.Hour)
 	defer cancel()
-
-	var lastRejoinAttempt time.Time
 	err := r.tryWithInterval(ctx, time.Second, func() error {
 		// Check member count quorum now. If there is no enough peers to work, wait forever.
 		err := r.CheckMemberCountQuorum()
 		if err != nil {
 			r.log.V(2).Printf("[ERROR] Inoperable node: %v", err)
-			// Passive gossip alone may never surface a live peer during a cold
-			// start (e.g. this node bootstrapped alone because its only
-			// configured peer, or service discovery result, was unresolvable
-			// at Join() time). Actively re-resolve and contact peers at
-			// RejoinInterval cadence, reusing the same call rejoinLoop makes
-			// once it's running, instead of only waiting to be found. This is
-			// skipped for the default MemberCountQuorum=1, where the check
-			// above already returns nil and this branch never runs.
-			if r.config.MemberCountQuorum > config.MinimumMemberCountQuorum &&
-				(lastRejoinAttempt.IsZero() || time.Since(lastRejoinAttempt) >= r.config.RejoinInterval) {
-				lastRejoinAttempt = time.Now()
-				r.tryRejoin()
-			}
 		}
 		return err
 	})
@@ -573,11 +573,6 @@ func (r *RoutingTable) Start() error {
 
 	r.wg.Add(1)
 	go r.pushPeriodically()
-
-	if r.config.MemberCountQuorum > config.MinimumMemberCountQuorum {
-		r.wg.Add(1)
-		go r.rejoinLoop()
-	}
 
 	if r.config.MemberlistInterface != "" {
 		r.log.V(2).Printf("[INFO] Memberlist uses interface: %s", r.config.MemberlistInterface)

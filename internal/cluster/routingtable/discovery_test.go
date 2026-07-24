@@ -33,21 +33,25 @@ import (
 // fakeServiceDiscovery is a minimal, concurrency-safe ServiceDiscovery plugin
 // used to simulate a peer that becomes resolvable after Start() has already
 // begun waiting on the quorum gate, without racing on config.Peers.
+// It also counts DiscoverPeers calls, which is how many times discovery.Join
+// has re-resolved peers, so a test can assert that no extra join happened.
 type fakeServiceDiscovery struct {
-	mu    sync.Mutex
-	peers []string
+	mu      sync.Mutex
+	peers   []string
+	lookups int
 }
 
-func (f *fakeServiceDiscovery) Initialize() error                      { return nil }
-func (f *fakeServiceDiscovery) SetConfig(map[string]interface{}) error { return nil }
-func (f *fakeServiceDiscovery) SetLogger(*log.Logger)                  {}
-func (f *fakeServiceDiscovery) Register() error                        { return nil }
-func (f *fakeServiceDiscovery) Deregister() error                      { return nil }
-func (f *fakeServiceDiscovery) Close() error                           { return nil }
+func (f *fakeServiceDiscovery) Initialize() error              { return nil }
+func (f *fakeServiceDiscovery) SetConfig(map[string]any) error { return nil }
+func (f *fakeServiceDiscovery) SetLogger(*log.Logger)          {}
+func (f *fakeServiceDiscovery) Register() error                { return nil }
+func (f *fakeServiceDiscovery) Deregister() error              { return nil }
+func (f *fakeServiceDiscovery) Close() error                   { return nil }
 
 func (f *fakeServiceDiscovery) DiscoverPeers() ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lookups++
 	return append([]string(nil), f.peers...), nil
 }
 
@@ -55,6 +59,12 @@ func (f *fakeServiceDiscovery) setPeers(peers []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.peers = peers
+}
+
+func (f *fakeServiceDiscovery) lookupCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lookups
 }
 
 func TestRoutingTable_tryWithInterval(t *testing.T) {
@@ -162,18 +172,17 @@ func TestRoutingTable_tryWithInterval_SucceedsOnRetry(t *testing.T) {
 	}
 }
 
-func TestRoutingTable_Start_QuorumGateActivelyRejoinsDuringWait(t *testing.T) {
+func TestRoutingTable_Start_RejoinLoopUnblocksQuorumGate(t *testing.T) {
 	// Cold-start scenario: node1 boots with MemberCountQuorum=2, but its
-	// ServiceDiscovery backend has no peers to offer yet at Join() time, so
-	// it ends up alone. Before this fix, the quorum gate in Start() only
-	// waited passively for gossip to surface a peer, which never happens
-	// here since node2 doesn't know about node1 either. With the fix, the
-	// gate actively calls discovery.Join() (via tryRejoin, the same call
-	// rejoinLoop makes) at RejoinInterval cadence, re-querying the
-	// ServiceDiscovery backend on every attempt. Once node2 becomes
-	// resolvable — simulated here by making the fake backend return its
-	// address — the gate must pick it up and exit well before the 1-hour
-	// ceiling.
+	// ServiceDiscovery backend has no peers to offer yet at Join() time, so it
+	// ends up alone. Before this fix, the quorum gate in Start() waited
+	// passively for gossip to surface a peer, and rejoinLoop — the only thing
+	// that re-queries the backend — was started after the gate, so it could
+	// not help. Gossip never surfaces anything here because node2 doesn't know
+	// about node1 either. With the fix, rejoinLoop runs during the gate and
+	// re-queries the backend every RejoinInterval. Once node2 becomes
+	// resolvable — simulated by making the fake backend return its address —
+	// the gate must pick it up and exit well before the 1-hour ceiling.
 	node2Port, err := testutil.GetFreePort()
 	if err != nil {
 		t.Fatalf("GetFreePort: %v", err)
@@ -237,18 +246,24 @@ func TestRoutingTable_Start_QuorumGateActivelyRejoinsDuringWait(t *testing.T) {
 	}
 
 	if n := rt1.NumMembers(); n < 2 {
-		t.Fatalf("Expected rt1 to see 2 members after the gate actively rejoined. Got: %d", n)
+		t.Fatalf("Expected rt1 to see 2 members after the rejoin loop reached node2. Got: %d", n)
 	}
 }
 
-func TestRoutingTable_Start_NoActiveJoinWhenQuorumDefault(t *testing.T) {
-	// MemberCountQuorum defaults to 1: the quorum check inside the gate is
-	// satisfied on the very first invocation, before the active-rejoin branch
-	// added by this fix even gets a chance to run. This guards against the
-	// fix introducing superfluous Join() calls in the common single-node/
-	// default-quorum case, by asserting Start() still returns essentially
-	// immediately rather than waiting out any rejoin cadence.
+func TestRoutingTable_Start_NoRejoinLoopWhenQuorumDefault(t *testing.T) {
+	// MemberCountQuorum defaults to 1, so the quorum check is satisfied on the
+	// gate's very first invocation and rejoinLoop is never started. This guards
+	// against moving the loop ahead of the gate introducing superfluous Join()
+	// calls in the common single-node / default-quorum case: Start() must
+	// return essentially immediately and, more directly, neither it nor
+	// anything it leaves running may re-query the ServiceDiscovery backend
+	// beyond the lookups Join() itself made. RejoinInterval is tiny so the
+	// settle window below covers many ticks of a loop started by mistake.
+	sd := &fakeServiceDiscovery{}
+
 	c := testutil.NewConfig()
+	c.RejoinInterval = 10 * time.Millisecond
+	c.ServiceDiscovery = map[string]any{"plugin": sd}
 	srv := testutil.NewServer(c)
 	rt := newRoutingTableForTest(c, srv)
 
@@ -260,12 +275,59 @@ func TestRoutingTable_Start_NoActiveJoinWhenQuorumDefault(t *testing.T) {
 		_ = srv.Shutdown(context.Background())
 	}()
 
+	lookupsAfterJoin := sd.lookupCount()
+
 	start := time.Now()
 	if err := rt.Start(); err != nil {
 		t.Fatalf("rt.Start: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("Start took %s with default quorum; the gate should be satisfied immediately", elapsed)
+	}
+
+	// Well past several RejoinInterval ticks: nothing may have re-resolved.
+	time.Sleep(200 * time.Millisecond)
+	if n := sd.lookupCount(); n != lookupsAfterJoin {
+		t.Fatalf("Expected no peer re-resolution with the default quorum. Got %d extra lookup(s)", n-lookupsAfterJoin)
+	}
+}
+
+func TestRoutingTable_tryRejoin(t *testing.T) {
+	// tryRejoin is what makes the rejoin loop useful ahead of the quorum gate:
+	// it must re-query the discovery backend exactly when quorum is short, and
+	// stay entirely silent otherwise. rejoinLoop calls it on every tick for the
+	// life of the node, so a tryRejoin that dialed while quorum was satisfied
+	// would put the whole cluster into a permanent join storm.
+	sd := &fakeServiceDiscovery{}
+
+	c := testutil.NewConfig()
+	c.MemberCountQuorum = 2
+	c.ServiceDiscovery = map[string]any{"plugin": sd}
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+
+	if err := rt.Join(); err != nil {
+		t.Fatalf("rt.Join: %v", err)
+	}
+	defer func() {
+		_ = rt.Shutdown(context.Background())
+		_ = srv.Shutdown(context.Background())
+	}()
+
+	// Start() is deliberately not called: no rejoin loop is running, so every
+	// lookup below is attributable to an explicit tryRejoin call.
+	baseline := sd.lookupCount()
+
+	rt.SetNumMembersEagerly(2) // quorum satisfied
+	rt.tryRejoin()
+	if n := sd.lookupCount(); n != baseline {
+		t.Fatalf("tryRejoin must not re-resolve peers while quorum is satisfied. Got %d lookup(s)", n-baseline)
+	}
+
+	rt.SetNumMembersEagerly(1) // quorum lost
+	rt.tryRejoin()
+	if n := sd.lookupCount(); n != baseline+1 {
+		t.Fatalf("Expected exactly one peer re-resolution while quorum is short. Got %d", n-baseline)
 	}
 }
 

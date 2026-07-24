@@ -87,17 +87,20 @@ func (r *RoutingTable) attemptToJoin() error {
 	return ErrClusterJoin
 }
 
-// tryRejoin actively re-resolves and contacts live peers when the member
-// count quorum is not currently satisfied. It queries the configured service
+// tryRejoin actively re-resolves and contacts live peers when the member count
+// quorum is not currently satisfied. It queries the configured service
 // discovery backend or static peers via discovery.Join, exactly like a fresh
-// Join() call would. It is a no-op when quorum is already satisfied. Both
-// rejoinLoop and the quorum gate in Start() call this so the two places
-// share one rejoin implementation instead of duplicating it.
+// Join() call would, so a peer that was unresolvable earlier is picked up as
+// soon as it comes back. It is a no-op when quorum is already satisfied. The
+// quorum can be short of its target either because this node never found a
+// peer at startup or because it fell into a minority partition later, so the
+// log message covers both rather than naming one.
 func (r *RoutingTable) tryRejoin() {
 	if r.CheckMemberCountQuorum() == nil {
 		return
 	}
-	r.log.V(2).Printf("[INFO] Minority partition detected (%d/%d members). Attempting to rejoin cluster.",
+
+	r.log.V(2).Printf("[INFO] Member count quorum is not satisfied (%d/%d members). Attempting to join the cluster.",
 		r.NumMembers(), r.config.MemberCountQuorum)
 	n, err := r.discovery.Join()
 	if err != nil {
@@ -107,10 +110,11 @@ func (r *RoutingTable) tryRejoin() {
 	r.log.V(2).Printf("[INFO] Rejoin contacted %d node(s)", n)
 }
 
-// rejoinLoop periodically attempts to rejoin the cluster when the node is in a
-// minority partition. It calls tryRejoin on each tick, which is silent when
-// quorum is satisfied. The goroutine is started only when MemberCountQuorum
-// is greater than MinimumMemberCountQuorum.
+// rejoinLoop periodically attempts to (re)join the cluster while the member
+// count quorum is unsatisfied. It calls tryRejoin on each tick, which is
+// silent when quorum is satisfied. Start starts this goroutine before the
+// quorum gate it has to unblock, and only when MemberCountQuorum is greater
+// than MinimumMemberCountQuorum. It runs until the node's context is canceled.
 func (r *RoutingTable) rejoinLoop() {
 	defer r.wg.Done()
 
