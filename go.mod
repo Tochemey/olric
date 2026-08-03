@@ -11,7 +11,7 @@ require (
 	github.com/hashicorp/memberlist v0.6.0
 	github.com/kapetan-io/tackle v0.15.0
 	github.com/pkg/errors v0.9.1
-	github.com/redis/go-redis/v9 v9.21.0
+	github.com/redis/go-redis/v9 v9.22.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/btree v1.8.1
 	github.com/tidwall/match v1.2.0
