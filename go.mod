@@ -3,7 +3,7 @@ module github.com/tochemey/olric
 go 1.26.0
 
 require (
-	github.com/RoaringBitmap/roaring/v2 v2.25.0
+	github.com/RoaringBitmap/roaring/v2 v2.26.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/go-sockaddr v1.0.7
