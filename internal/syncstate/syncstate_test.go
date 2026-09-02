@@ -44,6 +44,25 @@ func TestState_Reconcile_WithPartitions(t *testing.T) {
 	require.False(t, s.IsDone())
 }
 
+// TestState_Expired guards the expiry query: only a tracked partition whose
+// escape deadline elapsed is expired, and a reconcile keeps the deadline clock
+// of partitions already tracked.
+func TestState_Expired(t *testing.T) {
+	s := New()
+	require.False(t, s.Expired(1), "an untracked partition is not expired")
+
+	s.Reconcile([]uint64{1}, time.Hour)
+	require.False(t, s.Expired(1), "a tracked partition inside its escape window is not expired")
+
+	// Partition 1 keeps its original deadline clock, partition 2 starts now;
+	// with a one nanosecond escape both outlive it immediately.
+	s.Reconcile([]uint64{1, 2}, time.Nanosecond)
+	time.Sleep(time.Millisecond)
+	require.True(t, s.Expired(1))
+	require.True(t, s.Expired(2))
+	require.False(t, s.Expired(3), "a partition that was never tracked is not expired")
+}
+
 func TestState_MarkReceived(t *testing.T) {
 	s := New()
 	s.Reconcile([]uint64{1, 2, 3}, time.Second)

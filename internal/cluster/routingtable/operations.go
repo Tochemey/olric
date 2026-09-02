@@ -112,11 +112,12 @@ func (r *RoutingTable) applyRoutingTablePayload(payload []byte, coordinatorID ui
 	r.markBootstrapped()
 
 	// Reconcile sync state for partitions we need to receive data for.
-	// Partitions already pending keep their original escape deadline, so
-	// routing updates arriving faster than the escape delay cannot starve
-	// the rebalance ACK.
+	// Partitions no live owner holds data for are left out: nothing can
+	// arrive for them, so they must not delay the rebalance ACK. Partitions
+	// already pending keep their original escape deadline, so routing
+	// updates arriving faster than the escape delay cannot starve the ACK.
 	if r.syncState != nil {
-		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
+		r.syncState.Reconcile(r.partitionsAwaitingData(), r.config.InitialSyncEmptyPartitionTimeout)
 	}
 
 	// Collect report

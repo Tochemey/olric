@@ -88,6 +88,22 @@ func (s *State) Reconcile(partitionIDs []uint64, escape time.Duration) {
 	s.refreshLocked(now)
 }
 
+// Expired reports whether partID is tracked and has outlived its escape
+// deadline. Such a partition no longer holds back PendingEmpty.
+func (x *State) Expired(partID uint64) bool {
+	now := time.Now()
+
+	x.mu.Lock()
+	defer x.mu.Unlock()
+
+	first, ok := x.pending[partID]
+	if !ok || x.escape <= 0 {
+		return false
+	}
+
+	return now.Sub(first) >= x.escape
+}
+
 // MarkReceived marks partition partID as having received data.
 func (s *State) MarkReceived(partID uint64) {
 	now := time.Now()
