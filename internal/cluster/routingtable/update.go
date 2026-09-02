@@ -61,7 +61,7 @@ func (r *RoutingTable) buildRoutingTablePayload() ([]byte, uint64, error) {
 	if err := enc.EncodeMapLen(len(partIDs)); err != nil {
 		return nil, 0, err
 	}
-	
+
 	for _, partID := range partIDs {
 		if err := enc.EncodeUint64(partID); err != nil {
 			return nil, 0, err

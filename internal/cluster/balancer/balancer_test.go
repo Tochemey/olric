@@ -511,23 +511,49 @@ func TestTryAckRebalance_Guards(t *testing.T) {
 	e := newTestEnvironment(nil)
 	b := cluster.addNode(e)
 
-	// Signature 0 must be a no-op (no panic, lastAckedSignature stays 0).
-	b.tryAckRebalance(0)
-	require.Equal(t, uint64(0), b.lastAckedSignature)
+	// Signature 0 must be a no-op (no panic, lastAckedGeneration stays 0).
+	b.tryAckRebalance(0, 1)
+	require.Equal(t, uint64(0), b.lastAckedGeneration)
 
 	// When syncState reports pending data, ack is skipped.
 	pending := syncstate.New()
 	pending.Reconcile([]uint64{1}, time.Minute)
 	b.syncState = pending
 	require.False(t, b.syncState.PendingEmpty())
-	b.tryAckRebalance(1234)
-	require.Equal(t, uint64(0), b.lastAckedSignature)
+	b.tryAckRebalance(1234, 1)
+	require.Equal(t, uint64(0), b.lastAckedGeneration)
 
 	// When the context is cancelled, ack is skipped even with empty pending.
 	b.syncState = syncstate.New()
 	b.cancel()
-	b.tryAckRebalance(5678)
-	require.Equal(t, uint64(0), b.lastAckedSignature)
+	b.tryAckRebalance(5678, 1)
+	require.Equal(t, uint64(0), b.lastAckedGeneration)
+}
+
+// TestTryAckRebalance_AcksOncePerGeneration guards the ack marker against
+// content-derived signatures that repeat: the balancer acks once per installed
+// routing table generation, not once per signature value, so a table that
+// returns to an earlier state (same signature, new generation) is acked
+// again. Keying on the signature would leave the marker at the first
+// generation.
+func TestTryAckRebalance_AcksOncePerGeneration(t *testing.T) {
+	cluster := newMockCluster(t)
+	defer cluster.shutdown()
+
+	e := newTestEnvironment(nil)
+	b := cluster.addNode(e)
+
+	sign, generation := b.rt.Version()
+	require.NotZero(t, sign)
+	require.NotZero(t, generation)
+
+	// The first ack for this generation is sent and recorded.
+	b.tryAckRebalance(sign, generation)
+	require.Equal(t, generation, b.lastAckedGeneration)
+
+	// The same signature under a new generation is acked again.
+	b.tryAckRebalance(sign, generation+1)
+	require.Equal(t, generation+1, b.lastAckedGeneration)
 }
 
 // TestBalanceEagerly exercises the proactive node-join balance path including

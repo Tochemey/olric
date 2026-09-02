@@ -19,6 +19,7 @@ package olric
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -409,4 +410,101 @@ func TestOlric_PeriodicPush_UnchangedTableStartsNoEpoch(t *testing.T) {
 	time.Sleep(10 * pushInterval)
 	require.Equal(t, signature, db1.rt.Signature())
 	require.Zero(t, starts.Load(), "periodic pushes of an unchanged routing table started rebalance epochs")
+}
+
+// TestOlric_NodeLeftEpochCompletes_WhenTableReturnsToEarlierState guards the
+// balancer's ack marker reset against content-derived epoch ids that repeat.
+// On an empty cluster a member that joins and leaves before any data moves
+// returns the routing table to its previous state, so the node-left epoch
+// runs under the same id as the epoch the survivors acked before the join.
+// The join hands the survivors new backup partitions whose sync escape has
+// not elapsed when the member leaves, so they never ack the join epoch and
+// still remember the initial signature as their last ack. Unless that marker
+// is cleared when the table is installed again, they skip the ack and the
+// node-left epoch never completes.
+func TestOlric_NodeLeftEpochCompletes_WhenTableReturnsToEarlierState(t *testing.T) {
+	const escape = 4 * time.Second
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		// Enough partitions that the joiner always takes ownership, so both
+		// the join and the leave change the table.
+		c.PartitionCount = config.DefaultPartitionCount
+		c.ReplicaCount = 2
+		c.WriteQuorum = 1
+		c.ReadQuorum = 1
+		c.EnableClusterEventsChannel = true
+		c.InitialSyncEmptyPartitionTimeout = escape
+		c.TriggerBalancerInterval = 100 * time.Millisecond
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+
+	// Cluster events are published on the coordinator's Pub/Sub. db1 is the
+	// oldest member, so it stays coordinator for the whole test.
+	ctx := context.Background()
+	ps, err := db1.NewEmbeddedClient().NewPubSub(ToAddress(db1.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	defer func() {
+		require.NoError(t, rp.Close())
+	}()
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	var mtx sync.Mutex
+	completed := make(map[uint64]struct{})
+	completedFor := func(epoch uint64) bool {
+		mtx.Lock()
+		defer mtx.Unlock()
+		_, ok := completed[epoch]
+		return ok
+	}
+	ch := rp.Channel()
+	go func() {
+		for msg := range ch {
+			if !strings.Contains(msg.Payload, events.KindRebalanceCompleteEvent) {
+				continue
+			}
+			var ev events.RebalanceCompleteEvent
+			if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {
+				continue
+			}
+			mtx.Lock()
+			completed[ev.Epoch] = struct{}{}
+			mtx.Unlock()
+		}
+	}()
+
+	// Let the initial table settle: its empty partitions escape once and
+	// every member acks it, so each survivor now remembers the initial
+	// signature as its last ack.
+	require.Eventually(t, func() bool {
+		return completedFor(db1.rt.Signature())
+	}, escape+15*time.Second, 100*time.Millisecond,
+		"initial rebalance epoch must complete")
+	initial := db1.rt.Signature()
+	mtx.Lock()
+	completed = make(map[uint64]struct{})
+	mtx.Unlock()
+
+	// The joiner takes ownership and hands the survivors new backup
+	// partitions whose escape has not elapsed when it leaves again, so no
+	// survivor acks the join epoch.
+	db4 := cluster.addMemberWithConfig(t, newConfig())
+	require.Eventually(t, func() bool {
+		return db1.rt.Signature() != initial
+	}, 5*time.Second, 50*time.Millisecond, "joiner must change the routing table")
+	require.NoError(t, db4.Shutdown(context.Background()))
+
+	// Without the joiner the table is back in its initial state and the
+	// node-left epoch runs under the initial signature. It must complete.
+	require.Eventually(t, func() bool {
+		return db1.rt.Signature() == initial && completedFor(initial)
+	}, escape+15*time.Second, 100*time.Millisecond,
+		"node-left epoch must complete although its id matches an epoch acked before the join")
 }

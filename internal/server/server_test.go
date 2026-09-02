@@ -51,39 +51,65 @@ func getFreePort() (int, error) {
 	return port, nil
 }
 
+// newServerWithPreConditionFunc starts a server on a free port and returns it
+// once it is listening.
+//
+// getFreePort releases the port before the server binds it, so another
+// process, or another server started by the same test, can take it in
+// between. A server that fails to bind returns from ListenAndServe without
+// ever signalling StartedCtx, and a test waiting on that context would block
+// forever (observed on CI). The bind outcome is therefore awaited here, with
+// a fresh port on failure.
 func newServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Conn, cmd redcon.Command) bool) *Server {
-	bindPort, err := getFreePort()
-	if err != nil {
-		t.Fatalf("Expected nil. Got: %v", err)
-	}
-
 	l := log.New(os.Stdout, "server-test: ", log.LstdFlags)
 	fl := flog.New(l)
 	fl.SetLevel(6)
 	fl.ShowLineNumber(1)
-	c := &Config{
-		BindAddr:        "127.0.0.1",
-		BindPort:        bindPort,
-		KeepAlivePeriod: time.Second,
-	}
-	s := New(c, fl, nil)
-	s.SetPreConditionFunc(preCond)
 
-	go func() {
-		err := s.ListenAndServe()
-		if err != nil {
-			t.Errorf("Expected nil. Got: %v", err)
-		}
-	}()
-
-	t.Cleanup(func() {
-		err = s.Shutdown(context.Background())
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		bindPort, err := getFreePort()
 		if err != nil {
 			t.Fatalf("Expected nil. Got: %v", err)
 		}
-	})
+		c := &Config{
+			BindAddr:        "127.0.0.1",
+			BindPort:        bindPort,
+			KeepAlivePeriod: time.Second,
+		}
+		s := New(c, fl, nil)
+		s.SetPreConditionFunc(preCond)
 
-	return s
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- s.ListenAndServe()
+		}()
+
+		select {
+		case <-s.StartedCtx.Done():
+			t.Cleanup(func() {
+				if err := s.Shutdown(context.Background()); err != nil {
+					t.Fatalf("Expected nil. Got: %v", err)
+				}
+				// ListenAndServe returns once Shutdown closed the listener;
+				// a graceful stop yields nil.
+				if err := <-errCh; err != nil {
+					t.Errorf("Expected nil. Got: %v", err)
+				}
+			})
+			return s
+		case err := <-errCh:
+			// Release whatever the failed start allocated before retrying.
+			_ = s.Shutdown(context.Background())
+			if attempt == attempts {
+				t.Fatalf("Expected nil. Got: %v", err)
+			}
+			t.Logf("server failed to start on port %d, retrying: %v", bindPort, err)
+		case <-time.After(10 * time.Second):
+			_ = s.Shutdown(context.Background())
+			t.Fatalf("server did not start within 10s")
+		}
+	}
 }
 
 func newTLSServerWithPreConditionFunc(t *testing.T, preCond func(conn redcon.Conn, cmd redcon.Command) bool) (*Server, *redis.Client) {

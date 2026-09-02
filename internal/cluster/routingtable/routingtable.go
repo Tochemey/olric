@@ -34,14 +34,29 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/service"
+	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/pkg/flog"
 
 	"github.com/tochemey/olric/internal/cluster/partitions"
-	"github.com/tochemey/olric/internal/syncstate"
 )
 
 // ErrClusterQuorum means that the cluster could not reach a healthy numbers of members to operate.
 var ErrClusterQuorum = errors.New("cannot be reached cluster quorum to operate")
+
+// tableVersion identifies the routing table installed on a member. It is
+// published as an immutable snapshot so that signature and generation are
+// always read together.
+type tableVersion struct {
+	// signature is the xxhash of the installed payload. It doubles as the
+	// rebalance epoch id and is a pure function of the table content, so it
+	// repeats when the table returns to an earlier state.
+	signature uint64
+	// generation counts the installs whose signature differed from the
+	// previously installed one. Unlike the signature it never repeats: a
+	// change back to an earlier signature advances it, an unchanged table
+	// pushed again does not.
+	generation uint64
+}
 
 type route struct {
 	Owners  []discovery.Member
@@ -54,7 +69,9 @@ type RoutingTable struct {
 	// Currently owned partition count. Approximate LRU implementation
 	// uses that.
 	ownedPartitionCount uint64
-	signature           uint64
+	// version is the installed routing table's signature and generation,
+	// see tableVersion and Version.
+	version atomic.Pointer[tableVersion]
 	// numMembers is used to check cluster quorum.
 	numMembers int32
 
@@ -201,12 +218,49 @@ func (r *RoutingTable) Members() *Members {
 	return r.members
 }
 
+// setSignature records the installation of a routing table with the given
+// signature and advances the generation when the signature changed. Installs
+// are serialized by updateRoutingMtx.
 func (r *RoutingTable) setSignature(s uint64) {
-	atomic.StoreUint64(&r.signature, s)
+	var generation uint64
+	changed := true
+	if current := r.version.Load(); current != nil {
+		generation = current.generation
+		changed = current.signature != s
+	}
+	if changed {
+		generation++
+	}
+	r.version.Store(&tableVersion{signature: s, generation: generation})
 }
 
+// Signature returns the signature of the installed routing table, zero before
+// the first install.
 func (r *RoutingTable) Signature() uint64 {
-	return atomic.LoadUint64(&r.signature)
+	signature, _ := r.Version()
+	return signature
+}
+
+// Generation returns the generation of the installed routing table, zero
+// before the first install. See tableVersion for how it relates to the
+// signature.
+func (r *RoutingTable) Generation() uint64 {
+	_, generation := r.Version()
+	return generation
+}
+
+// Version returns the signature and generation of the installed routing table
+// as one consistent snapshot. Consumers that key work on the generation but
+// report the signature, such as the balancer's rebalance ack, must read both
+// here rather than through Signature and Generation separately, otherwise an
+// install landing between the two reads pairs a stale signature with a fresh
+// generation.
+func (r *RoutingTable) Version() (signature, generation uint64) {
+	current := r.version.Load()
+	if current == nil {
+		return 0, 0
+	}
+	return current.signature, current.generation
 }
 
 func (r *RoutingTable) setOwnedPartitionCount() {
