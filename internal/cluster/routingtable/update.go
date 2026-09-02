@@ -304,13 +304,6 @@ func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.M
 			defer sem.Release(1)
 
 			report, err := r.updateRoutingTableOnMember(data, member)
-			// TODO: temporary diagnostic logging for the routing table push
-			// investigation. Remove once the silent push failure is understood.
-			if err != nil {
-				r.log.V(1).Printf("[WARN] Failed to push routing table to %s: %v", member, err)
-			} else {
-				r.log.V(1).Printf("[DEBUG] Routing table pushed to %s", member)
-			}
 			if err != nil {
 				// The coordinator must apply its own table, otherwise the
 				// committed epoch would reference a table this node never

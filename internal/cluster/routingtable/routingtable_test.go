@@ -124,6 +124,20 @@ func (t *testCluster) shutdown() error {
 	return t.errGr.Wait()
 }
 
+// TestRoutingTable_spawnDropsWorkAfterShutdown guards the shutdown gate: work
+// spawned while the routing table runs is accounted and awaited, and work
+// spawned once Shutdown has begun is dropped instead of racing wg.Wait.
+func TestRoutingTable_spawnDropsWorkAfterShutdown(t *testing.T) {
+	rt := newLoneNodeWithSyncState(t, time.Minute)
+
+	ran := make(chan struct{})
+	require.True(t, rt.spawn(func() { close(ran) }))
+	<-ran
+
+	require.NoError(t, rt.Shutdown(context.Background()))
+	require.False(t, rt.spawn(func() { t.Error("work spawned after shutdown must not run") }))
+}
+
 func TestRoutingTable_IsJoined(t *testing.T) {
 	c := testutil.NewConfig()
 	port, err := testutil.GetFreePort()

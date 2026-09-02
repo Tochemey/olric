@@ -44,7 +44,7 @@ type Event interface {
 }
 
 // encodeEvents encodes given interface to its JSON representation and preserves the order in fields slice.
-func encodeEvent(data interface{}, fields []string, valueExtractor func(r reflect.Value, field string) (interface{}, error)) (string, error) {
+func encodeEvent(data any, fields []string, valueExtractor func(r reflect.Value, field string) (any, error)) (string, error) {
 	buf := bytes.NewBuffer(nil)
 	buf.WriteString("{")
 	r := reflect.Indirect(reflect.ValueOf(data))
@@ -88,21 +88,33 @@ func encodeEvent(data interface{}, fields []string, valueExtractor func(r reflec
 	return util.BytesToString(buf.Bytes()), nil
 }
 
+// NodeJoinEvent announces a member that joined the cluster. Every member
+// publishes it for the joins it observes, so a subscriber receives one per
+// publisher; Source tells them apart.
 type NodeJoinEvent struct {
-	Kind      string `json:"kind"`
-	Source    string `json:"source"`
-	NodeJoin  string `json:"node_join"`
-	NodeMeta  string `json:"node_meta"`
-	Timestamp int64  `json:"timestamp"`
+	Kind     string `json:"kind"`
+	Source   string `json:"source"`
+	NodeJoin string `json:"node_join"`
+	NodeMeta string `json:"node_meta"`
+	// Generation is the install generation of the routing table the publisher
+	// held when it observed the join (see RoutingTable.Generation). On the
+	// coordinator, every rebalance epoch started for a table that reflects
+	// the join carries a higher generation than this value; if the join
+	// leaves the table unchanged no epoch starts. Generations are comparable
+	// only between events of the same Source.
+	Generation uint64 `json:"generation"`
+	Timestamp  int64  `json:"timestamp"`
 }
 
 func (n *NodeJoinEvent) Encode() (string, error) {
-	fields := []string{"Timestamp", "Source", "Kind", "NodeJoin", "NodeMeta"}
-	return encodeEvent(n, fields, func(r reflect.Value, field string) (interface{}, error) {
-		var value interface{}
+	fields := []string{"Timestamp", "Source", "Kind", "NodeJoin", "NodeMeta", "Generation"}
+	return encodeEvent(n, fields, func(r reflect.Value, field string) (any, error) {
+		var value any
 		switch field {
 		case "Timestamp":
 			value = r.FieldByName(field).Int()
+		case "Generation":
+			value = r.FieldByName(field).Uint()
 		case "Source", "Kind", "NodeJoin", "NodeMeta":
 			value = r.FieldByName(field).String()
 		default:
@@ -112,21 +124,33 @@ func (n *NodeJoinEvent) Encode() (string, error) {
 	})
 }
 
+// NodeLeftEvent announces a member that left the cluster. Every member
+// publishes it for the departures it observes, so a subscriber receives one
+// per publisher; Source tells them apart.
 type NodeLeftEvent struct {
-	Kind      string `json:"kind"`
-	Source    string `json:"source"`
-	NodeLeft  string `json:"node_left"`
-	NodeMeta  string `json:"node_meta"`
-	Timestamp int64  `json:"timestamp"`
+	Kind     string `json:"kind"`
+	Source   string `json:"source"`
+	NodeLeft string `json:"node_left"`
+	NodeMeta string `json:"node_meta"`
+	// Generation is the install generation of the routing table the publisher
+	// held when it observed the departure (see RoutingTable.Generation). On
+	// the coordinator, every rebalance epoch started for a table that reflects
+	// the departure carries a higher generation than this value; if the
+	// departure leaves the table unchanged no epoch starts. Generations are
+	// comparable only between events of the same Source.
+	Generation uint64 `json:"generation"`
+	Timestamp  int64  `json:"timestamp"`
 }
 
 func (n *NodeLeftEvent) Encode() (string, error) {
-	fields := []string{"Timestamp", "Source", "Kind", "NodeLeft", "NodeMeta"}
-	return encodeEvent(n, fields, func(r reflect.Value, field string) (interface{}, error) {
-		var value interface{}
+	fields := []string{"Timestamp", "Source", "Kind", "NodeLeft", "NodeMeta", "Generation"}
+	return encodeEvent(n, fields, func(r reflect.Value, field string) (any, error) {
+		var value any
 		switch field {
 		case "Timestamp":
 			value = r.FieldByName(field).Int()
+		case "Generation":
+			value = r.FieldByName(field).Uint()
 		case "Source", "Kind", "NodeLeft", "NodeMeta":
 			value = r.FieldByName(field).String()
 		default:
@@ -160,8 +184,8 @@ func (f *FragmentMigrationEvent) Encode() (string, error) {
 		"IsBackup",
 		"Length",
 	}
-	return encodeEvent(f, fields, func(r reflect.Value, field string) (interface{}, error) {
-		var value interface{}
+	return encodeEvent(f, fields, func(r reflect.Value, field string) (any, error) {
+		var value any
 		switch field {
 		case "IsBackup":
 			value = r.FieldByName(field).Bool()
@@ -200,8 +224,8 @@ func (f *FragmentReceivedEvent) Encode() (string, error) {
 		"IsBackup",
 		"Length",
 	}
-	return encodeEvent(f, fields, func(r reflect.Value, field string) (interface{}, error) {
-		var value interface{}
+	return encodeEvent(f, fields, func(r reflect.Value, field string) (any, error) {
+		var value any
 		switch field {
 		case "IsBackup":
 			value = r.FieldByName(field).Bool()
@@ -226,31 +250,41 @@ func (f *FragmentReceivedEvent) Encode() (string, error) {
 //   - Kind: event type identifier, always KindRebalanceStartEvent.
 //   - Source: coordinator address that emitted the event.
 //   - Epoch: routing table signature for this rebalance cycle. Correlate this
-//     with RebalanceCompleteEvent.Epoch to know when the cycle finishes.
+//     with RebalanceCompleteEvent.Epoch to know when the cycle finishes. The
+//     signature is derived from the table content, so it recurs when the
+//     table returns to an earlier state; use Generation to tell such epochs
+//     apart.
+//   - Generation: install generation of the table the coordinator pushed for
+//     this epoch (see RoutingTable.Generation). It never recurs on a given
+//     coordinator and is comparable only between events of the same Source.
 //   - Reason: why the rebalance started (e.g., "node-join", "node-left",
 //     "node-update", "periodic", "manual").
 //   - Node: the node associated with the trigger, if any (for example the
 //     joined or left node). May be empty for periodic/manual updates.
-//   - Timestamp: coordinator wall-clock time in nanoseconds since epoch.
+//   - Timestamp: coordinator wall-clock time in nanoseconds since epoch,
+//     taken before the epoch could complete, so a completion never carries
+//     an earlier timestamp than its start even when it is delivered first.
 //
 // Application guidance: treat this as the start of data convergence for the
 // routing table epoch. Do not use node-left events as completion signals;
-// instead, wait for a matching RebalanceCompleteEvent with the same Epoch.
+// instead, wait for a matching RebalanceCompleteEvent with the same Epoch
+// and Generation.
 type RebalanceStartEvent struct {
-	Kind      string `json:"kind"`
-	Source    string `json:"source"`
-	Epoch     uint64 `json:"epoch"`
-	Reason    string `json:"reason"`
-	Node      string `json:"node"`
-	Timestamp int64  `json:"timestamp"`
+	Kind       string `json:"kind"`
+	Source     string `json:"source"`
+	Epoch      uint64 `json:"epoch"`
+	Generation uint64 `json:"generation"`
+	Reason     string `json:"reason"`
+	Node       string `json:"node"`
+	Timestamp  int64  `json:"timestamp"`
 }
 
 func (r *RebalanceStartEvent) Encode() (string, error) {
-	fields := []string{"Timestamp", "Source", "Kind", "Epoch", "Reason", "Node"}
+	fields := []string{"Timestamp", "Source", "Kind", "Epoch", "Generation", "Reason", "Node"}
 	return encodeEvent(r, fields, func(rv reflect.Value, field string) (any, error) {
 		var value any
 		switch field {
-		case "Epoch":
+		case "Epoch", "Generation":
 			value = rv.FieldByName(field).Uint()
 		case "Timestamp":
 			value = rv.FieldByName(field).Int()
@@ -271,26 +305,38 @@ func (r *RebalanceStartEvent) Encode() (string, error) {
 //   - Kind: event type identifier, always KindRebalanceCompleteEvent.
 //   - Source: coordinator address that emitted the event.
 //   - Epoch: routing table signature for the completed rebalance cycle. Match
-//     against RebalanceStartEvent.Epoch.
+//     against RebalanceStartEvent.Epoch together with Generation, because the
+//     content-derived signature recurs when the table returns to an earlier
+//     state.
+//   - Generation: install generation of the table this epoch converged on
+//     (see RoutingTable.Generation). It identifies the epoch even when Epoch
+//     recurs and is comparable only between events of the same Source.
+//   - Members: sorted addresses of the members the coordinator knew when it
+//     computed the converged table, so a subscriber can tell which joins and
+//     departures the table reflects.
 //   - Timestamp: coordinator wall-clock time in nanoseconds since epoch.
 //
 // Application guidance: treat this as the point when rebalancing is complete
 // for the given epoch. If a newer rebalance-start arrives before completion,
 // the previous epoch should be considered superseded.
 type RebalanceCompleteEvent struct {
-	Kind      string `json:"kind"`
-	Source    string `json:"source"`
-	Epoch     uint64 `json:"epoch"`
-	Timestamp int64  `json:"timestamp"`
+	Kind       string   `json:"kind"`
+	Source     string   `json:"source"`
+	Epoch      uint64   `json:"epoch"`
+	Generation uint64   `json:"generation"`
+	Members    []string `json:"members"`
+	Timestamp  int64    `json:"timestamp"`
 }
 
 func (r *RebalanceCompleteEvent) Encode() (string, error) {
-	fields := []string{"Timestamp", "Source", "Kind", "Epoch"}
+	fields := []string{"Timestamp", "Source", "Kind", "Epoch", "Generation", "Members"}
 	return encodeEvent(r, fields, func(rv reflect.Value, field string) (any, error) {
 		var value any
 		switch field {
-		case "Epoch":
+		case "Epoch", "Generation":
 			value = rv.FieldByName(field).Uint()
+		case "Members":
+			value = rv.FieldByName(field).Interface()
 		case "Timestamp":
 			value = rv.FieldByName(field).Int()
 		case "Source", "Kind":

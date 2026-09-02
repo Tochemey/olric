@@ -35,7 +35,6 @@ func TestRoutingTable_Callback(t *testing.T) {
 		atomic.AddInt32(&num, 1)
 	}
 	rt.AddCallback(increase)
-	rt.wg.Add(1)
 	go rt.runCallbacks()
 	<-time.After(100 * time.Millisecond)
 	modified := atomic.LoadInt32(&num)
@@ -100,7 +99,6 @@ func TestRoutingTable_Callback_CanceledContext(t *testing.T) {
 	// Cancel the routing table context: runCallbacks must return without
 	// invoking any callback.
 	rt.cancel()
-	rt.wg.Add(1)
 	rt.runCallbacks()
 
 	if modified := atomic.LoadInt32(&num); modified != 0 {

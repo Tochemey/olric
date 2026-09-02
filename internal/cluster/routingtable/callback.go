@@ -86,8 +86,6 @@ func (r *RoutingTable) fireMemberCallbacks(callbacks []func(string), nodeName st
 }
 
 func (r *RoutingTable) runCallbacks() {
-	defer r.wg.Done()
-
 	r.callbackMtx.Lock()
 	defer r.callbackMtx.Unlock()
 

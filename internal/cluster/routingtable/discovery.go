@@ -36,6 +36,9 @@ func (r *RoutingTable) bootstrapCoordinator() error {
 	r.Lock()
 	defer r.Unlock()
 
+	// See updateRoutingWithReason for why the membership is snapshotted
+	// before the table is computed.
+	members := r.memberNames()
 	r.fillRoutingTable()
 	data, signature, err := r.buildRoutingTablePayload()
 	if err != nil {
@@ -50,7 +53,7 @@ func (r *RoutingTable) bootstrapCoordinator() error {
 	for member := range reports {
 		updated = append(updated, member.ID)
 	}
-	r.startRebalanceEpoch(signature, rebalanceReasonBootstrap, "", updated)
+	r.startRebalanceEpoch(signature, rebalanceReasonBootstrap, "", updated, members)
 	// The coordinator bootstraps itself.
 	r.markBootstrapped()
 	r.log.V(2).Printf("[INFO] The cluster coordinator has been bootstrapped")

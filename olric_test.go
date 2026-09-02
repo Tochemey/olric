@@ -345,18 +345,37 @@ func TestOlric_ClusterEvents_NodeJoinDelivery(t *testing.T) {
 	ch := rp.Channel()
 	db2 := cluster.addMemberWithConfig(t, newConfig())
 
+	// The coordinator stamps the join with the generation it held before the
+	// table changed, and the epoch it then starts for the join carries a
+	// higher one. Only db1's own events are considered: every member
+	// publishes the join it observes, each with its own generation.
+	var joinGeneration, startGeneration uint64
+	var sawJoin, sawStart bool
 	deadline := time.After(10 * time.Second)
-	for {
+
+	for !sawJoin || !sawStart {
 		select {
 		case msg := <-ch:
-			if strings.Contains(msg.Payload, events.KindNodeJoinEvent) &&
-				strings.Contains(msg.Payload, db2.rt.This().String()) {
-				return
+			switch {
+			case strings.Contains(msg.Payload, events.KindNodeJoinEvent):
+				var ev events.NodeJoinEvent
+				require.NoError(t, json.Unmarshal([]byte(msg.Payload), &ev))
+				if ev.Source == db1.rt.This().String() && ev.NodeJoin == db2.rt.This().String() {
+					joinGeneration, sawJoin = ev.Generation, true
+				}
+			case strings.Contains(msg.Payload, events.KindRebalanceStartEvent):
+				var ev events.RebalanceStartEvent
+				require.NoError(t, json.Unmarshal([]byte(msg.Payload), &ev))
+				if ev.Node == db2.rt.This().String() {
+					startGeneration, sawStart = ev.Generation, true
+				}
 			}
 		case <-deadline:
-			t.Fatal("timed out waiting for NodeJoinEvent on cluster.events")
+			t.Fatal("timed out waiting for the join and its rebalance start on cluster.events")
 		}
 	}
+
+	require.Greater(t, startGeneration, joinGeneration)
 }
 
 // TestOlric_PeriodicPush_UnchangedTableStartsNoEpoch guards the end-to-end

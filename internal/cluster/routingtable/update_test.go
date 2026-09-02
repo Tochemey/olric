@@ -316,7 +316,7 @@ func TestBuildRoutingTablePayload_Deterministic(t *testing.T) {
 	// The signature is the rebalance epoch id, so it must be a pure function
 	// of the table content: encoding an unchanged table again has to yield
 	// the same bytes and the same signature.
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		data, sign, err := rt.buildRoutingTablePayload()
 		require.NoError(t, err)
 		require.Equal(t, first, data)

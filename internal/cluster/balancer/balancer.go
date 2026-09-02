@@ -459,14 +459,14 @@ func (b *Balancer) tryAckRebalance(sign, generation uint64) bool {
 	return false
 }
 
-// BalanceEagerly is the callback registered for node-join events. It runs the
-// full balance cycle AND the proactive primary-to-backup push for new nodes,
-// all under a single lock so tryAckRebalance fires only after the push.
-//
-// It must NOT be called on node-leave events: the write-lock held during the
-// network transfer in pushPrimaryToBackups would block concurrent reads for
-// the entire push duration, causing read timeouts. The routing table ensures
-// this by only triggering runCallbacks on rebalanceReasonNodeJoin.
+// BalanceEagerly runs the full balance cycle AND the proactive primary-to-backup
+// push, all under a single lock so tryAckRebalance fires only after the push.
+// It is registered as the routing table callback when EnableProactiveSyncOnJoin
+// is set, and then runs on every member after each installed routing table
+// and, on the coordinator, after a node-join push. The push itself runs once
+// per installed table, see lastProactiveSyncGeneration, and holds the fragment
+// write-lock for the duration of the network transfer, which blocks concurrent
+// reads of that fragment; that cost is why the flag is opt-in.
 func (b *Balancer) BalanceEagerly() {
 	b.runBalance(true)
 }

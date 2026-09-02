@@ -111,6 +111,11 @@ type RoutingTable struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// shutdownMtx guards closed against the wg.Add/wg.Wait race: Shutdown sets
+	// closed under it before waiting on wg, and spawn checks it under the same
+	// lock before adding to wg.
+	shutdownMtx sync.Mutex
+	closed      bool
 
 	rebalanceMtx   sync.Mutex
 	rebalanceState rebalanceState
@@ -358,6 +363,11 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 		return
 	}
 
+	// Snapshot the membership before computing the table, so that the list
+	// reported with the epoch's completion names the members the table was
+	// computed for: a member that joins while the table is being computed
+	// is only reported by the next epoch, which surely reflects it.
+	members := r.memberNames()
 	r.fillRoutingTable()
 	if r.syncState != nil {
 		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
@@ -382,14 +392,13 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 		for member := range reports {
 			updated = append(updated, member.ID)
 		}
-		r.startRebalanceEpoch(signature, reason, node, updated)
+		r.startRebalanceEpoch(signature, reason, node, updated, members)
 		// Proactive sync pushes primary data to newly joined backup owners.
 		// It must NOT run on node-leave events: when nodes die the fragment
 		// write-lock held during the network transfer would block concurrent
 		// reads for the entire push duration, causing read timeouts.
 		if r.config.EnableProactiveSyncOnJoin && reason == rebalanceReasonNodeJoin {
-			r.wg.Add(1)
-			go r.runCallbacks()
+			r.spawn(r.runCallbacks)
 		}
 	}
 }
@@ -414,8 +423,11 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) (notif
 		notify = func() { r.notifyNodeJoinCallbacks(event.NodeName) }
 
 		if r.config.EnableClusterEventsChannel {
-			r.wg.Add(1)
-			go r.publishNodeJoinEvent(&member)
+			// Captured here, not in the goroutine: the table may change
+			// before the publish runs, and the event must carry the
+			// generation held when the join was observed.
+			generation := r.Generation()
+			r.spawn(func() { r.publishNodeJoinEvent(&member, generation) })
 		}
 	case memberlist.NodeLeave:
 		if _, err := r.Members().Get(member.ID); err != nil {
@@ -434,8 +446,9 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) (notif
 		notify = func() { r.notifyNodeLeaveCallbacks(event.NodeName) }
 
 		if r.config.EnableClusterEventsChannel {
-			r.wg.Add(1)
-			go r.publishNodeLeftEvent(&member)
+			// Captured here for the same reason as on join.
+			generation := r.Generation()
+			r.spawn(func() { r.publishNodeLeftEvent(&member, generation) })
 		}
 	case memberlist.NodeUpdate:
 		// Node's birthdate may be changed. Close the pool and re-add to the hash ring.
@@ -650,6 +663,13 @@ func (r *RoutingTable) Shutdown(ctx context.Context) error {
 	}
 
 	r.cancel()
+
+	// Flip closed under shutdownMtx before waiting, so no spawn can add to wg
+	// once Wait has started.
+	r.shutdownMtx.Lock()
+	r.closed = true
+	r.shutdownMtx.Unlock()
+
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
@@ -664,6 +684,23 @@ func (r *RoutingTable) Shutdown(ctx context.Context) error {
 	case <-done:
 	}
 	return nil
+}
+
+// spawn runs fn on its own goroutine accounted in wg, unless the routing table
+// is shutting down. closed is checked under shutdownMtx, the lock Shutdown sets
+// it under before waiting on wg, so wg.Add never races wg.Wait. It reports
+// whether fn was started; false means the work was dropped, which is safe
+// because the node is leaving.
+func (x *RoutingTable) spawn(fn func()) bool {
+	x.shutdownMtx.Lock()
+	defer x.shutdownMtx.Unlock()
+
+	if x.closed {
+		return false
+	}
+
+	x.wg.Go(fn)
+	return true
 }
 
 var _ service.Service = (*RoutingTable)(nil)

@@ -54,6 +54,13 @@ are not specific to the changes described here.
   live member that is briefly flapping is never skipped mid-scan, and it reads that data from the promoted replica.
   Crash-recovery scans are bounded by failure detection plus one scan instead of the routing table repair window. See
   [SCAN on DMaps](README.md#scan-on-dmaps).
+* **No sync wait on partitions nobody holds data for.** A member could not tell an owned partition that was empty
+  everywhere from one whose data was still in flight, so after a membership change every owned-but-empty partition held
+  back its rebalance ack for the full `InitialSyncEmptyPartitionTimeout`. When a routing table is installed, the member
+  now asks each other owner of its owned-but-empty partitions for their key counts, in one pipelined round trip per
+  owner, and waits only on partitions where some owner holds data or could not be answered for. Partitions whose wait
+  already elapsed are not asked about again, so a stable cluster issues no extra requests. On an empty cluster a
+  departure's epoch completes on the survivors' next balancer tick instead of seconds later.
 
 ## Data Safety Fixes
 
@@ -111,6 +118,12 @@ are not specific to the changes described here.
   is leaving.
 * **The eviction worker treats context cancellation during graceful shutdown as expected**, so it no longer logs
   misleading warnings.
+* **Shutdown-safe background goroutines in the routing table.** Cluster event publication and the balancer callbacks
+  were started from request handlers and membership events with a bare `wg.Add(1)`, with nothing gating them against
+  the `wg.Wait()` in `RoutingTable.Shutdown`, the same `sync.WaitGroup` misuse fixed earlier in the dmap service. A
+  routing table push or a membership event arriving as a member shut down could call `Add` concurrently with `Wait`.
+  Those spawns now go through one guarded helper, and `Shutdown` flips a `closed` flag under the same mutex before
+  waiting, so work arriving after shutdown has begun is dropped.
 
 ## Cluster Events
 
@@ -118,6 +131,27 @@ are not specific to the changes described here.
 * **Rebalance coordination acknowledgements** are tracked, so completion is emitted only after every member acks.
 * **Rebalance coordinator mismatch errors** return the `ErrNotCoordinator` sentinel, which cuts log noise during
   coordinator transitions.
+* **Deterministic routing table signature.** The signature, which doubles as the rebalance epoch id, was the hash of a
+  msgpack-encoded Go map, so an unchanged table hashed differently on almost every push and every periodic push started
+  a new epoch, dropping whichever node-join or node-left epoch was still in flight. The table is now encoded in
+  ascending partition order, so the signature is a pure function of the table content: pushing an unchanged table
+  starts no epoch and publishes no rebalance events, and an epoch started for a membership change stays active until
+  every live member acks it or a genuine table change supersedes it. The wire format is unchanged, so members running
+  an older version keep decoding pushed tables during a rolling upgrade.
+* **Rebalance acks once per installed table.** Because the signature derives from the table content, it recurs when the
+  table returns to an earlier state, for example after a member joined and left before any data moved. Keyed on the
+  signature, a member that had acked it before skipped the ack and the node-left epoch never completed. The routing
+  table now exposes an install generation that advances on every signature change, including a change back to an
+  earlier one, and the balancer acks, and runs the proactive primary-to-backup push, once per generation.
+* **Epoch identity and membership in cluster events.** `rebalance-start-event` and `rebalance-complete-event` carry
+  `generation`, the coordinator's install generation of the pushed table, which unlike `epoch` never recurs on a given
+  coordinator; `rebalance-complete-event` also carries `members`, the sorted addresses of the members the coordinator
+  knew when it computed the converged table, so a subscriber can tell which joins and departures the table reflects;
+  and `node-join-event` and `node-left-event` carry the `generation` the publisher held when it observed the change,
+  so on the coordinator every epoch that reflects the change carries a higher one. Generations are comparable only
+  between events of the same `source`. A completion published from the epoch start, when every ack had already
+  arrived, can no longer carry an earlier timestamp than its own start event, and it is published only after the
+  start has been, so subscribers never see a completion before its start.
 * **In-process cluster event publishing.** Cluster events (`node-join-event`, `node-left-event`, rebalance and fragment
   events) were published by each service dialing its own RESP server with a `PUBLISH` command. That cost a loopback TCP
   round trip per event and hard-wired a hidden dependency: the routing table and dmap services assumed the pubsub
@@ -140,3 +174,6 @@ are not specific to the changes described here.
   tables, for example) let allocated memory grow several times past the configured limit. A config that violates these
   bounds now fails at startup even if it was accepted before. Raise `MaxInuse` or `MaxKeys`, reduce `PartitionCount`, or
   lower `tableSize`.
+* **`InitialSyncEmptyPartitionTimeout` bounds a narrower wait.** It is now the maximum time a member waits on an owned
+  but empty partition whose other owners hold data or could not be answered for. Partitions no owner holds data for
+  are not waited on at all. The default is unchanged at `15s`.
