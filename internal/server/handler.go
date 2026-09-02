@@ -26,6 +26,14 @@ import (
 	"github.com/tochemey/olric/internal/util"
 )
 
+// preconditionExempt lists the internal commands served regardless of the
+// node's operability precondition, see Handler.ServeRESP.
+var preconditionExempt = map[string]struct{}{
+	protocol.Internal.UpdateRouting: {},
+	protocol.Internal.LengthOfPart:  {},
+	protocol.PubSub.PublishInternal: {},
+}
+
 type ServeMuxWrapper struct {
 	mux     *ServeMux
 	precond func(conn redcon.Conn, cmd redcon.Command) bool
@@ -55,9 +63,12 @@ func (h Handler) ServeRESP(conn redcon.Conn, cmd redcon.Command) {
 	if command == "pubsub" || command == "PUBSUB" {
 		command = fmt.Sprintf("%s %s", command, util.BytesToString(cmd.Args[1]))
 	}
-	// The node is updated by UpdateRoutingCmd. So it's a precondition for
-	// an operable node.
-	if command == protocol.Internal.UpdateRouting {
+	// Internal plumbing that must be served while the node is not operable
+	// yet: the routing table push that makes it operable, the key count probe
+	// other members run while installing that push, and the delivery of
+	// cluster events to its local subscribers. None of them touches user
+	// data, so the operability gate has nothing to protect.
+	if _, exempt := preconditionExempt[command]; exempt {
 		h.handler(conn, cmd)
 		return
 	}

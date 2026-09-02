@@ -71,6 +71,10 @@ func TestHandler_ServeRESP_PreCondition(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&precond))
 }
 
+// TestHandler_ServeRESP_PreCondition_DontCheck guards the precondition
+// exemption: the routing table push, the key count probe and the internal
+// publish are served without consulting the precondition, because they must
+// work on a node that is not operable yet.
 func TestHandler_ServeRESP_PreCondition_DontCheck(t *testing.T) {
 	var precond int32
 	s := newServerWithPreConditionFunc(t, func(conn redcon.Conn, cmd redcon.Command) bool {
@@ -86,9 +90,14 @@ func TestHandler_ServeRESP_PreCondition_DontCheck(t *testing.T) {
 	_, err := rand.Read(data)
 	require.NoError(t, err)
 
-	// The node is bootstrapped by UpdateRoutingCmd. Don't check any preconditions to run that command.
 	s.ServeMux().HandleFunc(protocol.Internal.UpdateRouting, func(conn redcon.Conn, cmd redcon.Command) {
 		conn.WriteBulk(data)
+	})
+	s.ServeMux().HandleFunc(protocol.Internal.LengthOfPart, func(conn redcon.Conn, cmd redcon.Command) {
+		conn.WriteInt(7)
+	})
+	s.ServeMux().HandleFunc(protocol.PubSub.PublishInternal, func(conn redcon.Conn, cmd redcon.Command) {
+		conn.WriteInt(1)
 	})
 
 	<-s.StartedCtx.Done()
@@ -99,12 +108,22 @@ func TestHandler_ServeRESP_PreCondition_DontCheck(t *testing.T) {
 
 	ctx := context.Background()
 	cmd := protocol.NewUpdateRouting([]byte("dummy-data"), 1).Command(ctx)
-	err = rdb.Process(ctx, cmd)
-	require.NoError(t, err)
-
+	require.NoError(t, rdb.Process(ctx, cmd))
 	result, err := cmd.Bytes()
 	require.NoError(t, err)
 	require.Equal(t, data, result)
+
+	lengthOfPart := protocol.NewLengthOfPart(1).Command(ctx)
+	require.NoError(t, rdb.Process(ctx, lengthOfPart))
+	count, err := lengthOfPart.Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(7), count)
+
+	publish := protocol.NewPublishInternal("my-channel", "hello").Command(ctx)
+	require.NoError(t, rdb.Process(ctx, publish))
+	receivers, err := publish.Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), receivers)
 
 	require.Equal(t, int32(0), atomic.LoadInt32(&precond))
 }

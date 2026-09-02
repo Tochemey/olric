@@ -152,6 +152,12 @@ are not specific to the changes described here.
   between events of the same `source`. A completion published from the epoch start, when every ack had already
   arrived, can no longer carry an earlier timestamp than its own start event, and it is published only after the
   start has been, so subscribers never see a completion before its start.
+* **Local subscribers are served first.** The cluster-wide fan-out delivered to local subscribers only when its member
+  loop reached the local member and stopped at the first remote failure, so a member that was still starting, which
+  rejects or holds requests until it is operable, could delay or lose an event for every subscriber. Local subscribers
+  are now served before any remote member, every remote member is attempted, and the first failure is reported after
+  the last attempt. The internal publish and the key count probe are served regardless of the node's operability
+  precondition, as the routing table push already was: neither touches user data.
 * **In-process cluster event publishing.** Cluster events (`node-join-event`, `node-left-event`, rebalance and fragment
   events) were published by each service dialing its own RESP server with a `PUBLISH` command. That cost a loopback TCP
   round trip per event and hard-wired a hidden dependency: the routing table and dmap services assumed the pubsub
