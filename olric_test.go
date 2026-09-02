@@ -346,3 +346,67 @@ func TestOlric_ClusterEvents_NodeJoinDelivery(t *testing.T) {
 		}
 	}
 }
+
+// TestOlric_PeriodicPush_UnchangedTableStartsNoEpoch guards the end-to-end
+// contract behind https://github.com/Tochemey/olric/issues/40. The routing
+// table signature is the rebalance epoch id and must be a pure function of the
+// table content, so periodic pushes (RoutingTablePushInterval) of an unchanged
+// table must leave the signature untouched and start no rebalance epoch: a
+// stable cluster publishes no rebalance-start-event on cluster.events. Before
+// the fix msgpack encoded the table in Go's randomized map order, the
+// signature changed on almost every push, and each push superseded the epoch
+// that a node join or leave had started.
+func TestOlric_PeriodicPush_UnchangedTableStartsNoEpoch(t *testing.T) {
+	const pushInterval = 200 * time.Millisecond
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.WriteQuorum = 1
+		c.ReadQuorum = 1
+		c.EnableClusterEventsChannel = true
+		c.RoutingTablePushInterval = pushInterval
+		c.TriggerBalancerInterval = 100 * time.Millisecond
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+
+	// Cluster events are published on the coordinator's Pub/Sub. db1 is the
+	// oldest member, so it stays coordinator for the whole test.
+	ctx := context.Background()
+	ps, err := db1.NewEmbeddedClient().NewPubSub(ToAddress(db1.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	defer func() {
+		require.NoError(t, rp.Close())
+	}()
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	var starts atomic.Int64
+	ch := rp.Channel()
+	go func() {
+		for msg := range ch {
+			if strings.Contains(msg.Payload, events.KindRebalanceStartEvent) {
+				starts.Add(1)
+			}
+		}
+	}()
+
+	// Let the join epochs settle. Membership is final and the cluster holds
+	// no data, so the table converges on the first push after the last join.
+	time.Sleep(5 * pushInterval)
+	signature := db1.rt.Signature()
+	require.NotZero(t, signature)
+	starts.Store(0)
+
+	// Many periodic pushes of the unchanged table: the signature must not
+	// move and no rebalance epoch may start.
+	time.Sleep(10 * pushInterval)
+	require.Equal(t, signature, db1.rt.Signature())
+	require.Zero(t, starts.Load(), "periodic pushes of an unchanged routing table started rebalance epochs")
+}

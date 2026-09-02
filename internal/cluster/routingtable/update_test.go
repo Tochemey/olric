@@ -189,3 +189,37 @@ func TestUpdateRoutingTableOnCluster_Canceled(t *testing.T) {
 	_, err = rt.updateRoutingTableOnCluster(data)
 	require.Error(t, err)
 }
+
+func TestBuildRoutingTablePayload_Deterministic(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	require.True(t, rt.IsBootstrapped())
+
+	// buildRoutingTablePayload runs under the routing table lock in
+	// production: the table must not be replaced while it is encoded.
+	rt.Lock()
+	defer rt.Unlock()
+
+	first, signature, err := rt.buildRoutingTablePayload()
+	require.NoError(t, err)
+	require.NotZero(t, signature)
+
+	// The signature is the rebalance epoch id, so it must be a pure function
+	// of the table content: encoding an unchanged table again has to yield
+	// the same bytes and the same signature.
+	for i := 0; i < 50; i++ {
+		data, sign, err := rt.buildRoutingTablePayload()
+		require.NoError(t, err)
+		require.Equal(t, first, data)
+		require.Equal(t, signature, sign)
+	}
+
+	// The canonical payload still decodes through the path members use in
+	// applyRoutingTablePayload, so mixed-version clusters keep working.
+	table := make(map[uint64]*route)
+	require.NoError(t, msgpack.Unmarshal(first, &table))
+	require.Equal(t, rt.table, table)
+}

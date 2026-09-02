@@ -366,3 +366,35 @@ func TestSendRebalanceAck_ProcessError(t *testing.T) {
 	require.NoError(t, srv.Shutdown(context.Background()))
 	require.Error(t, rt.SendRebalanceAck(42))
 }
+
+func TestUpdateRouting_UnchangedTableKeepsEpoch(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	rt, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+
+	// The bootstrap epoch is still in flight: nothing has acked it yet.
+	epoch, _, _, completed := rt.getRebalanceState()
+	require.NotZero(t, epoch)
+	require.Equal(t, rt.Signature(), epoch)
+	require.False(t, completed)
+
+	// Periodic pushes of an unchanged table must not supersede the active
+	// epoch: a node-left or node-join epoch that is still waiting for acks
+	// would otherwise be dropped before it completes.
+	for i := 0; i < 10; i++ {
+		rt.updateRoutingWithReason(rebalanceReasonPeriodic, "")
+
+		current, _, _, completed := rt.getRebalanceState()
+		require.Equal(t, epoch, current)
+		require.Equal(t, epoch, rt.Signature())
+		require.False(t, completed)
+	}
+
+	// The original epoch is still the one that completes.
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(epoch, rt.this.ID))
+	current, _, _, completed := rt.getRebalanceState()
+	require.Equal(t, epoch, current)
+	require.True(t, completed)
+}

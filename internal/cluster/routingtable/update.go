@@ -18,7 +18,9 @@
 package routingtable
 
 import (
+	"bytes"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/cespare/xxhash/v2"
@@ -35,11 +37,40 @@ type leftOverDataReport struct {
 	Backups    []uint64
 }
 
+// buildRoutingTablePayload encodes the routing table as a msgpack map whose
+// entries are written in ascending partition id order, and returns the payload
+// together with its signature.
+//
+// The signature is the xxhash of the payload and doubles as the rebalance
+// epoch id, so it must be a pure function of the table content. Members derive
+// their signature from the received bytes (see applyRoutingTablePayload) and
+// the balancer acks that value, so the payload itself has to be canonical:
+// msgpack.Marshal follows Go's randomized map iteration order and yields a
+// different signature for the same table on almost every push, which
+// supersedes in-flight epochs on a stable cluster. The wire format is still a
+// plain msgpack map, so members running an older version keep decoding it.
 func (r *RoutingTable) buildRoutingTablePayload() ([]byte, uint64, error) {
-	data, err := msgpack.Marshal(r.table)
-	if err != nil {
+	partIDs := make([]uint64, 0, len(r.table))
+	for partID := range r.table {
+		partIDs = append(partIDs, partID)
+	}
+	slices.Sort(partIDs)
+
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	if err := enc.EncodeMapLen(len(partIDs)); err != nil {
 		return nil, 0, err
 	}
+	
+	for _, partID := range partIDs {
+		if err := enc.EncodeUint64(partID); err != nil {
+			return nil, 0, err
+		}
+		if err := enc.Encode(r.table[partID]); err != nil {
+			return nil, 0, err
+		}
+	}
+	data := buf.Bytes()
 	return data, xxhash.Sum64(data), nil
 }
 

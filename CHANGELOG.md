@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Routing table pushes no longer start a new rebalance epoch when the table is unchanged. The routing table signature, which doubles as the rebalance epoch id, was the xxhash of `msgpack.Marshal(map[uint64]*route)`, and msgpack writes map entries in Go's randomized iteration order, so an unchanged table produced a different signature on almost every encoding. Because `updateRoutingWithReason` starts a new epoch whenever the signature differs from the previous one, nearly every periodic push (`RoutingTablePushInterval`) replaced the active epoch on a stable cluster: an epoch started for a node join or a node leave that was still waiting for acks was silently dropped and never completed, members that acked it afterwards were told the ack was stale, and `cluster.events` subscribers saw a `rebalance-start-event` with reason `periodic` followed by its `rebalance-complete-event` on every push. Consumers that gate on a specific epoch, such as GoAkt's `NodeJoined` and `NodeLeft` events, only fired through their fallback timeout whenever a member could not ack within one push interval. The payload is now encoded in ascending partition id order, so identical tables yield identical bytes and the same signature on the coordinator and on every member. The wire format is still a plain msgpack map, so members running an older version keep decoding it during a rolling upgrade. Pushing an unchanged table now starts no epoch and publishes no rebalance events, and an epoch started for a membership change stays active until every live member acks it or a genuine table change supersedes it. Fixes [#40](https://github.com/Tochemey/olric/issues/40).
+
 ## v0.3.18 - 2026-07-24
 
 ### Fixed
