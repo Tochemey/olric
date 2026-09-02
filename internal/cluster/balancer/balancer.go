@@ -48,8 +48,13 @@ type Balancer struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	lastAckedSignature         uint64
-	lastProactiveSyncSignature uint64
+	// lastAckedGeneration and lastProactiveSyncGeneration record the routing
+	// table generation (see RoutingTable.Version) this member last acked and
+	// last ran the proactive primary-to-backup push for. Generations, unlike
+	// signatures, never repeat, so a table that returns to an earlier state
+	// is treated as the new install it is.
+	lastAckedGeneration         uint64
+	lastProactiveSyncGeneration uint64
 }
 
 // SyncState is the minimal interface for sync completion tracking.
@@ -365,7 +370,7 @@ func (b *Balancer) runBalance(proactiveSync bool) {
 // acked a stale epoch and the routing table has changed since the cycle
 // started, i.e. the caller should re-run against the fresh table.
 func (b *Balancer) balanceOnce(proactiveSync bool) bool {
-	sign := b.rt.Signature()
+	sign, generation := b.rt.Version()
 	moved, aborted := b.promoteBackupCopies(sign)
 	if aborted {
 		return false
@@ -378,16 +383,16 @@ func (b *Balancer) balanceOnce(proactiveSync bool) bool {
 	}
 
 	if b.config.ReplicaCount > config.MinimumReplicaCount {
-		if proactiveSync && sign != b.lastProactiveSyncSignature {
+		if proactiveSync && generation != b.lastProactiveSyncGeneration {
 			primaryPushed, aborted := b.pushPrimaryToBackups(sign)
 			moved = moved || primaryPushed
 			if aborted {
 				return false
 			}
-			// One push per epoch is sufficient. MoveWithTargetKind for BACKUP
-			// intentionally keeps data on the primary, so repeated calls would
-			// flood backup nodes with duplicate data.
-			b.lastProactiveSyncSignature = sign
+			// One push per installed table is sufficient. MoveWithTargetKind
+			// for BACKUP intentionally keeps data on the primary, so repeated
+			// calls would flood backup nodes with duplicate data.
+			b.lastProactiveSyncGeneration = generation
 		}
 
 		backupMoved, aborted := b.backupCopies(sign)
@@ -398,15 +403,24 @@ func (b *Balancer) balanceOnce(proactiveSync bool) bool {
 	}
 
 	if !moved {
-		return b.tryAckRebalance(sign) && b.rt.Signature() != sign
+		return b.tryAckRebalance(sign, generation) && b.rt.Signature() != sign
 	}
 	return false
 }
 
-// tryAckRebalance sends the rebalance ack for sign. It returns true when the
-// coordinator reported the ack as stale, meaning the epoch was superseded.
-func (b *Balancer) tryAckRebalance(sign uint64) bool {
-	if sign == 0 || sign == b.lastAckedSignature {
+// tryAckRebalance sends the rebalance ack for sign, the signature of the
+// routing table installed as generation; both come from one Version snapshot.
+// It returns true when the coordinator reported the ack as stale, meaning the
+// epoch was superseded.
+//
+// The ack is sent once per installed generation rather than once per
+// signature value: signatures derive from the table content and repeat when
+// the table returns to an earlier state (a member that joined and left before
+// any data moved), and the coordinator then runs a new epoch under the same
+// id. Keying on the signature alone would skip that ack and leave the epoch
+// open until the next table change.
+func (b *Balancer) tryAckRebalance(sign, generation uint64) bool {
+	if sign == 0 || generation == b.lastAckedGeneration {
 		return false
 	}
 	if b.syncState != nil && !b.syncState.PendingEmpty() {
@@ -441,18 +455,18 @@ func (b *Balancer) tryAckRebalance(sign uint64) bool {
 		b.log.V(3).Printf("[WARN] Failed to send rebalance ack for signature %d: %v", sign, err)
 		return false
 	}
-	b.lastAckedSignature = sign
+	b.lastAckedGeneration = generation
 	return false
 }
 
-// BalanceEagerly is the callback registered for node-join events. It runs the
-// full balance cycle AND the proactive primary-to-backup push for new nodes,
-// all under a single lock so tryAckRebalance fires only after the push.
-//
-// It must NOT be called on node-leave events: the write-lock held during the
-// network transfer in pushPrimaryToBackups would block concurrent reads for
-// the entire push duration, causing read timeouts. The routing table ensures
-// this by only triggering runCallbacks on rebalanceReasonNodeJoin.
+// BalanceEagerly runs the full balance cycle AND the proactive primary-to-backup
+// push, all under a single lock so tryAckRebalance fires only after the push.
+// It is registered as the routing table callback when EnableProactiveSyncOnJoin
+// is set, and then runs on every member after each installed routing table
+// and, on the coordinator, after a node-join push. The push itself runs once
+// per installed table, see lastProactiveSyncGeneration, and holds the fragment
+// write-lock for the duration of the network transfer, which blocks concurrent
+// reads of that fragment; that cost is why the flag is opt-in.
 func (b *Balancer) BalanceEagerly() {
 	b.runBalance(true)
 }

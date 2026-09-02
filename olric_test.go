@@ -19,6 +19,7 @@ package olric
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -34,6 +35,17 @@ import (
 	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/stats"
+)
+
+const (
+	// repeatedSignatureEscape is the sync escape of the cluster in
+	// TestOlric_NodeLeftEpochCompletes_WhenTableReturnsToEarlierState.
+	repeatedSignatureEscape = 4 * time.Second
+	// emptyPartitionsEscape is the sync escape of the cluster in
+	// TestOlric_NodeLeftEpochCompletes_WithoutWaitingForEmptyPartitions. It is
+	// far above that test's assertion window, so a regression to waiting on
+	// empty partitions fails the test.
+	emptyPartitionsEscape = 20 * time.Second
 )
 
 // newTestOlricWithConfig creates a new Olric instance with the given configuration.
@@ -333,16 +345,281 @@ func TestOlric_ClusterEvents_NodeJoinDelivery(t *testing.T) {
 	ch := rp.Channel()
 	db2 := cluster.addMemberWithConfig(t, newConfig())
 
+	// The coordinator stamps the join with the generation it held before the
+	// table changed, and the epoch it then starts for the join carries a
+	// higher one. Only db1's own events are considered: every member
+	// publishes the join it observes, each with its own generation.
+	var joinGeneration, startGeneration uint64
+	var sawJoin, sawStart bool
 	deadline := time.After(10 * time.Second)
-	for {
+
+	for !sawJoin || !sawStart {
 		select {
 		case msg := <-ch:
-			if strings.Contains(msg.Payload, events.KindNodeJoinEvent) &&
-				strings.Contains(msg.Payload, db2.rt.This().String()) {
-				return
+			switch {
+			case strings.Contains(msg.Payload, events.KindNodeJoinEvent):
+				var ev events.NodeJoinEvent
+				require.NoError(t, json.Unmarshal([]byte(msg.Payload), &ev))
+				if ev.Source == db1.rt.This().String() && ev.NodeJoin == db2.rt.This().String() {
+					joinGeneration, sawJoin = ev.Generation, true
+				}
+			case strings.Contains(msg.Payload, events.KindRebalanceStartEvent):
+				var ev events.RebalanceStartEvent
+				require.NoError(t, json.Unmarshal([]byte(msg.Payload), &ev))
+				if ev.Node == db2.rt.This().String() {
+					startGeneration, sawStart = ev.Generation, true
+				}
 			}
 		case <-deadline:
-			t.Fatal("timed out waiting for NodeJoinEvent on cluster.events")
+			t.Fatal("timed out waiting for the join and its rebalance start on cluster.events")
 		}
 	}
+
+	require.Greater(t, startGeneration, joinGeneration)
+}
+
+// TestOlric_PeriodicPush_UnchangedTableStartsNoEpoch guards the end-to-end
+// contract behind https://github.com/Tochemey/olric/issues/40. The routing
+// table signature is the rebalance epoch id and must be a pure function of the
+// table content, so periodic pushes (RoutingTablePushInterval) of an unchanged
+// table must leave the signature untouched and start no rebalance epoch: a
+// stable cluster publishes no rebalance-start-event on cluster.events. Before
+// the fix msgpack encoded the table in Go's randomized map order, the
+// signature changed on almost every push, and each push superseded the epoch
+// that a node join or leave had started.
+func TestOlric_PeriodicPush_UnchangedTableStartsNoEpoch(t *testing.T) {
+	const pushInterval = 200 * time.Millisecond
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.WriteQuorum = 1
+		c.ReadQuorum = 1
+		c.EnableClusterEventsChannel = true
+		c.RoutingTablePushInterval = pushInterval
+		c.TriggerBalancerInterval = 100 * time.Millisecond
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+	cluster.addMemberWithConfig(t, newConfig())
+
+	// Cluster events are published on the coordinator's Pub/Sub. db1 is the
+	// oldest member, so it stays coordinator for the whole test.
+	ctx := context.Background()
+	ps, err := db1.NewEmbeddedClient().NewPubSub(ToAddress(db1.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	defer func() {
+		require.NoError(t, rp.Close())
+	}()
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	var starts atomic.Int64
+	ch := rp.Channel()
+	go func() {
+		for msg := range ch {
+			if strings.Contains(msg.Payload, events.KindRebalanceStartEvent) {
+				starts.Add(1)
+			}
+		}
+	}()
+
+	// Let the join epochs settle. Membership is final and the cluster holds
+	// no data, so the table converges on the first push after the last join.
+	time.Sleep(5 * pushInterval)
+	signature := db1.rt.Signature()
+	require.NotZero(t, signature)
+	starts.Store(0)
+
+	// Many periodic pushes of the unchanged table: the signature must not
+	// move and no rebalance epoch may start.
+	time.Sleep(10 * pushInterval)
+	require.Equal(t, signature, db1.rt.Signature())
+	require.Zero(t, starts.Load(), "periodic pushes of an unchanged routing table started rebalance epochs")
+}
+
+// waitForSettledEpoch waits until every member has installed the same routing
+// table and completedFor reports that table's rebalance epoch complete, then
+// returns the table's signature. A member's Started callback fires once it
+// installed the pushed table, which can be before the coordinator installed
+// that table itself, so reading the coordinator's signature right after
+// adding members can observe the previous table.
+func waitForSettledEpoch(t *testing.T, timeout time.Duration, completedFor func(uint64) bool, members ...*Olric) uint64 {
+	t.Helper()
+
+	var signature uint64
+	require.Eventually(t, func() bool {
+		signature = members[0].rt.Signature()
+		if signature == 0 || !completedFor(signature) {
+			return false
+		}
+
+		for _, member := range members[1:] {
+			if member.rt.Signature() != signature {
+				return false
+			}
+		}
+
+		return true
+	}, timeout, 100*time.Millisecond, "members must agree on a routing table whose rebalance epoch completed")
+
+	return signature
+}
+
+// completedEpochs subscribes to the cluster events of coordinator and records
+// the epoch of every rebalance-complete event it receives. It returns a
+// predicate reporting whether an epoch completed and a reset that forgets the
+// epochs seen so far. The subscription is closed when the test ends.
+func completedEpochs(t *testing.T, coordinator *Olric) (completedFor func(epoch uint64) bool, reset func()) {
+	t.Helper()
+
+	ctx := context.Background()
+	ps, err := coordinator.NewEmbeddedClient().NewPubSub(ToAddress(coordinator.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	t.Cleanup(func() {
+		require.NoError(t, rp.Close())
+	})
+
+	// The first message confirms the subscription.
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	var mtx sync.Mutex
+	completed := make(map[uint64]struct{})
+	ch := rp.Channel()
+
+	go func() {
+		for msg := range ch {
+			if !strings.Contains(msg.Payload, events.KindRebalanceCompleteEvent) {
+				continue
+			}
+
+			var ev events.RebalanceCompleteEvent
+			if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {
+				continue
+			}
+
+			mtx.Lock()
+			completed[ev.Epoch] = struct{}{}
+			mtx.Unlock()
+		}
+	}()
+
+	completedFor = func(epoch uint64) bool {
+		mtx.Lock()
+		defer mtx.Unlock()
+
+		_, ok := completed[epoch]
+		return ok
+	}
+
+	reset = func() {
+		mtx.Lock()
+		defer mtx.Unlock()
+
+		clear(completed)
+	}
+
+	return completedFor, reset
+}
+
+// TestOlric_NodeLeftEpochCompletes_WhenTableReturnsToEarlierState guards,
+// end to end, the balancer acking once per installed table generation rather
+// than once per signature value. On an empty cluster a member that joins and
+// leaves before any data moves returns the routing table to its previous
+// state, so the node-left epoch runs under the same id as the epoch the
+// survivors acked before the join. Keyed on the signature alone, a survivor
+// whose last ack was that signature would skip the ack and the epoch would
+// never complete. The discriminating checks live in
+// TestTryAckRebalance_AcksOncePerGeneration and
+// TestApplyRoutingTablePayload_Generation; this test asserts the property on
+// a live cluster.
+func TestOlric_NodeLeftEpochCompletes_WhenTableReturnsToEarlierState(t *testing.T) {
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		// Enough partitions that the joiner always takes ownership, so both
+		// the join and the leave change the table.
+		c.PartitionCount = config.DefaultPartitionCount
+		c.ReplicaCount = 2
+		c.WriteQuorum = 1
+		c.ReadQuorum = 1
+		c.EnableClusterEventsChannel = true
+		c.InitialSyncEmptyPartitionTimeout = repeatedSignatureEscape
+		c.TriggerBalancerInterval = 100 * time.Millisecond
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	db2 := cluster.addMemberWithConfig(t, newConfig())
+	db3 := cluster.addMemberWithConfig(t, newConfig())
+
+	// Cluster events are published on the coordinator's Pub/Sub. db1 is the
+	// oldest member, so it stays coordinator for the whole test.
+	completedFor, reset := completedEpochs(t, db1)
+
+	// Let the initial table settle on every member and its epoch complete,
+	// so each survivor now remembers the initial signature as acked.
+	initial := waitForSettledEpoch(t, repeatedSignatureEscape+15*time.Second, completedFor, db1, db2, db3)
+	reset()
+
+	// The joiner takes ownership, then leaves before any data moved.
+	db4 := cluster.addMemberWithConfig(t, newConfig())
+	require.Eventually(t, func() bool {
+		return db1.rt.Signature() != initial
+	}, 5*time.Second, 50*time.Millisecond, "joiner must change the routing table")
+
+	require.NoError(t, db4.Shutdown(context.Background()))
+
+	// Without the joiner the table is back in its initial state and the
+	// node-left epoch runs under the initial signature. It must complete.
+	require.Eventually(t, func() bool {
+		return db1.rt.Signature() == initial && completedFor(initial)
+	}, repeatedSignatureEscape+15*time.Second, 100*time.Millisecond, "node-left epoch must complete although its id matches an epoch acked before the join")
+}
+
+// TestOlric_NodeLeftEpochCompletes_WithoutWaitingForEmptyPartitions guards
+// the source probe end to end. On an empty cluster no owner holds data for
+// any partition, so after a member leaves the survivors must ack the
+// node-left epoch on their next balancer tick instead of holding it for
+// InitialSyncEmptyPartitionTimeout, which emptyPartitionsEscape sets far
+// above the assertion window.
+func TestOlric_NodeLeftEpochCompletes_WithoutWaitingForEmptyPartitions(t *testing.T) {
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.WriteQuorum = 1
+		c.ReadQuorum = 1
+		c.EnableClusterEventsChannel = true
+		c.InitialSyncEmptyPartitionTimeout = emptyPartitionsEscape
+		c.TriggerBalancerInterval = 100 * time.Millisecond
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	db2 := cluster.addMemberWithConfig(t, newConfig())
+	db3 := cluster.addMemberWithConfig(t, newConfig())
+
+	// Cluster events are published on the coordinator's Pub/Sub. db1 is the
+	// oldest member, so it stays coordinator for the whole test.
+	completedFor, _ := completedEpochs(t, db1)
+
+	// The join epochs complete without waiting either: no member holds
+	// data, so nothing is in flight.
+	initial := waitForSettledEpoch(t, 5*time.Second, completedFor, db1, db2, db3)
+
+	require.NoError(t, db3.Shutdown(context.Background()))
+
+	// The departure changes the table and starts the node-left epoch, which
+	// must complete well inside the escape timeout.
+	require.Eventually(t, func() bool {
+		signature := db1.rt.Signature()
+		return signature != initial && completedFor(signature)
+	}, 5*time.Second, 100*time.Millisecond, "node-left epoch must complete without waiting for empty partitions")
 }

@@ -252,9 +252,11 @@ type Config struct {
 	// Default is false.
 	EnableProactiveSyncOnJoin bool
 
-	// InitialSyncEmptyPartitionTimeout is the max time to wait for partitions that
-	// have no data on the source. Such partitions never receive MoveFragment, so
-	// WaitForInitialSync would block forever without this. Default 15s.
+	// InitialSyncEmptyPartitionTimeout is the max time to wait for an owned but
+	// empty partition whose data has not arrived yet. A member first asks the
+	// partition's other owners for their key counts and does not wait at all
+	// when none of them holds data; the timeout covers owners that hold data
+	// but never deliver it and owners that cannot be reached. Default 15s.
 	InitialSyncEmptyPartitionTimeout time.Duration
 
 	// Default value is SyncReplicationMode.

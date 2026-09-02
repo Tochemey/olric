@@ -112,11 +112,12 @@ func (r *RoutingTable) applyRoutingTablePayload(payload []byte, coordinatorID ui
 	r.markBootstrapped()
 
 	// Reconcile sync state for partitions we need to receive data for.
-	// Partitions already pending keep their original escape deadline, so
-	// routing updates arriving faster than the escape delay cannot starve
-	// the rebalance ACK.
+	// Partitions no live owner holds data for are left out: nothing can
+	// arrive for them, so they must not delay the rebalance ACK. Partitions
+	// already pending keep their original escape deadline, so routing
+	// updates arriving faster than the escape delay cannot starve the ACK.
 	if r.syncState != nil {
-		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
+		r.syncState.Reconcile(r.partitionsAwaitingData(), r.config.InitialSyncEmptyPartitionTimeout)
 	}
 
 	// Collect report
@@ -126,16 +127,11 @@ func (r *RoutingTable) applyRoutingTablePayload(payload []byte, coordinatorID ui
 	}
 
 	// Call balancer to distribute load evenly
-	r.wg.Add(1)
-	go r.runCallbacks()
+	r.spawn(r.runCallbacks)
 	return value, nil
 }
 
 func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.Command) {
-	// TODO: temporary diagnostic logging for the routing table push
-	// investigation. Remove once the silent push failure is understood.
-	r.log.V(1).Printf("[DEBUG] Routing table push received from %s", conn.RemoteAddr())
-
 	// The command handlers of the routing table service should wait for the cluster join event.
 	<-r.joined
 

@@ -31,6 +31,7 @@ import (
 
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
 )
@@ -89,6 +90,111 @@ func TestPartitionsPendingReceive_BackupOwner(t *testing.T) {
 
 	pending := rt.partitionsPendingReceive()
 	require.Equal(t, []uint64{2}, pending)
+}
+
+// newLoneNodeWithSyncState starts a single-member routing table that tracks a
+// sync state with the given escape timeout, and waits for its bootstrap.
+func newLoneNodeWithSyncState(t *testing.T, escape time.Duration) *RoutingTable {
+	t.Helper()
+
+	c := testutil.NewConfig()
+	c.InitialSyncEmptyPartitionTimeout = escape
+	port, err := testutil.GetFreePort()
+	require.NoError(t, err)
+	c.MemberlistConfig.BindPort = port
+
+	srv := testutil.NewServer(c)
+	rt := newRoutingTableForTest(c, srv)
+	rt.syncState = syncstate.New()
+	require.NoError(t, rt.Join())
+	require.NoError(t, rt.Start())
+
+	t.Cleanup(func() {
+		require.NoError(t, rt.Shutdown(context.Background()))
+		require.NoError(t, srv.Shutdown(context.Background()))
+	})
+
+	require.True(t, rt.IsBootstrapped())
+	return rt
+}
+
+// TestPartitionsAwaitingData_NoLiveSource guards the source probe on the
+// install path: a lone member owns every partition, holds no data and has no
+// other owner to receive data from, so every partition is pending receive
+// but none is worth waiting on, and the install must not have started the
+// escape clock at all.
+func TestPartitionsAwaitingData_NoLiveSource(t *testing.T) {
+	rt := newLoneNodeWithSyncState(t, time.Minute)
+
+	require.Len(t, rt.partitionsPendingReceive(), int(rt.config.PartitionCount))
+	require.Empty(t, rt.partitionsAwaitingData())
+	require.True(t, rt.syncState.PendingEmpty())
+}
+
+// TestPartitionsAwaitingData_KeepsExpired guards that partitions whose escape
+// deadline elapsed are awaited as they are: the sync state no longer waits on
+// them, so there is nothing to gain from asking their owners.
+func TestPartitionsAwaitingData_KeepsExpired(t *testing.T) {
+	rt := newLoneNodeWithSyncState(t, time.Minute)
+
+	pending := rt.partitionsPendingReceive()
+	rt.syncState.Reconcile(pending, time.Nanosecond)
+	time.Sleep(time.Millisecond)
+
+	require.Equal(t, pending, rt.partitionsAwaitingData())
+	require.True(t, rt.syncState.PendingEmpty())
+}
+
+// TestPartitionsHeldBy guards what counts as a source for an owned-but-empty
+// partition: an owner answering with a non-zero key count, or an owner that
+// cannot be answered for.
+func TestPartitionsHeldBy(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt1, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	rt2, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	err = testutil.TryWithInterval(10, 100*time.Millisecond, func() error {
+		if !rt2.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	})
+
+	require.NoError(t, err)
+
+	// Partitions seen from rt2 whose primary owner is rt1. With seven
+	// partitions and bounded loads each member owns at least two.
+	var byRT1 []uint64
+	for partID := uint64(0); partID < rt2.config.PartitionCount; partID++ {
+		if rt2.primary.PartitionByID(partID).Owner().CompareByID(rt1.This()) {
+			byRT1 = append(byRT1, partID)
+		}
+	}
+
+	require.GreaterOrEqual(t, len(byRT1), 2)
+	withData, empty := byRT1[0], byRT1[1]
+
+	frag := mockfragment.New()
+	frag.Fill()
+	rt1.primary.PartitionByID(withData).Map().Store("dmap.test", frag)
+
+	queries := []countQuery{
+		{partID: withData},
+		{partID: empty},
+		{partID: withData, replica: true},
+	}
+
+	require.Equal(t, []uint64{withData}, rt2.partitionsHeldBy(rt1.This(), queries), "only the primary copy holding data counts")
+
+	// An owner that cannot be reached is assumed to hold data for every
+	// queried partition.
+	dead := discovery.Member{Name: "127.0.0.1:1"}
+	require.Equal(t, []uint64{withData, empty, withData}, rt2.partitionsHeldBy(dead, queries))
 }
 
 func TestPrepareLeftOverDataReport_Backup(t *testing.T) {
@@ -188,4 +294,38 @@ func TestUpdateRoutingTableOnCluster_Canceled(t *testing.T) {
 	rt.cancel()
 	_, err = rt.updateRoutingTableOnCluster(data)
 	require.Error(t, err)
+}
+
+func TestBuildRoutingTablePayload_Deterministic(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	require.True(t, rt.IsBootstrapped())
+
+	// buildRoutingTablePayload runs under the routing table lock in
+	// production: the table must not be replaced while it is encoded.
+	rt.Lock()
+	defer rt.Unlock()
+
+	first, signature, err := rt.buildRoutingTablePayload()
+	require.NoError(t, err)
+	require.NotZero(t, signature)
+
+	// The signature is the rebalance epoch id, so it must be a pure function
+	// of the table content: encoding an unchanged table again has to yield
+	// the same bytes and the same signature.
+	for range 50 {
+		data, sign, err := rt.buildRoutingTablePayload()
+		require.NoError(t, err)
+		require.Equal(t, first, data)
+		require.Equal(t, signature, sign)
+	}
+
+	// The canonical payload still decodes through the path members use in
+	// applyRoutingTablePayload, so mixed-version clusters keep working.
+	table := make(map[uint64]*route)
+	require.NoError(t, msgpack.Unmarshal(first, &table))
+	require.Equal(t, rt.table, table)
 }

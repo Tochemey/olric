@@ -98,6 +98,47 @@ func TestRoutingTable_updateRoutingCommandHandler_Errors(t *testing.T) {
 	require.Error(t, rc.Process(ctx, cmd))
 }
 
+// TestApplyRoutingTablePayload_Generation guards the install generation: it
+// advances on every signature change, including a change back to an earlier
+// signature, and stays put when an unchanged table is installed again. The
+// balancer relies on it to ack once per installed table.
+func TestApplyRoutingTablePayload_Generation(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	require.True(t, rt.IsBootstrapped())
+
+	initial, ok := rt.committedPayload.Load().([]byte)
+	require.True(t, ok)
+	initialSignature := rt.Signature()
+	generation := rt.Generation()
+	require.NotZero(t, generation)
+
+	// Installing the unchanged table again: same signature, same generation.
+	_, err = rt.applyRoutingTablePayload(initial, rt.This().ID, false)
+	require.NoError(t, err)
+	require.Equal(t, generation, rt.Generation())
+
+	// A table with different content advances the generation.
+	rt.Lock()
+	rt.table[0].Backups = append(rt.table[0].Backups[:0], rt.This())
+	changed, _, err := rt.buildRoutingTablePayload()
+	rt.Unlock()
+	require.NoError(t, err)
+	_, err = rt.applyRoutingTablePayload(changed, rt.This().ID, false)
+	require.NoError(t, err)
+	require.Equal(t, generation+1, rt.Generation())
+
+	// Returning to the initial table repeats its signature but is a new
+	// install: the generation advances again.
+	_, err = rt.applyRoutingTablePayload(initial, rt.This().ID, false)
+	require.NoError(t, err)
+	require.Equal(t, generation+2, rt.Generation())
+	require.Equal(t, initialSignature, rt.Signature())
+}
+
 func TestRoutingTable_verifyRoutingTable(t *testing.T) {
 	cluster := newTestCluster()
 	defer cluster.shutdown()

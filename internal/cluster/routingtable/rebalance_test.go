@@ -64,7 +64,8 @@ func TestRoutingTable_rebalanceCompleteEventOnAck(t *testing.T) {
 		return nil
 	})
 
-	rt.startRebalanceEpoch(42, rebalanceReasonNodeLeft, peer.String(), []uint64{rt.this.ID, peer.ID})
+	members := rt.memberNames()
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeLeft, peer.String(), []uint64{rt.this.ID, peer.ID}, members)
 	rt.handleRebalanceAck(42, rt.this.ID)
 
 	select {
@@ -82,6 +83,9 @@ func TestRoutingTable_rebalanceCompleteEventOnAck(t *testing.T) {
 		require.Equal(t, events.KindRebalanceCompleteEvent, ev.Kind)
 		require.Equal(t, rt.this.String(), ev.Source)
 		require.Equal(t, uint64(42), ev.Epoch)
+		require.Equal(t, rt.Generation(), ev.Generation, "the completion carries the generation of the pushed table")
+		require.Equal(t, members, ev.Members, "the completion lists the members the table was computed for")
+		require.Contains(t, ev.Members, peer.String())
 	case <-ctx.Done():
 		t.Fatalf("timed out waiting for rebalance completion event")
 	}
@@ -142,13 +146,13 @@ func TestStartRebalanceEpoch_EarlyReturns(t *testing.T) {
 	rt := newRoutingTableForTest(c, testutil.NewServer(c))
 
 	// A zero epoch is ignored.
-	rt.startRebalanceEpoch(0, rebalanceReasonManual, "", []uint64{1})
+	rt.startRebalanceEpoch(0, rebalanceReasonManual, "", []uint64{1}, nil)
 	epoch, pending, _, _ := rt.getRebalanceState()
 	require.Zero(t, epoch)
 	require.Zero(t, pending)
 
 	// Without any members that confirmed the table push there is nothing to track.
-	rt.startRebalanceEpoch(42, rebalanceReasonManual, "", nil)
+	rt.startRebalanceEpoch(42, rebalanceReasonManual, "", nil, nil)
 	epoch, pending, _, _ = rt.getRebalanceState()
 	require.Zero(t, epoch)
 	require.Zero(t, pending)
@@ -214,7 +218,7 @@ func TestHandleRebalanceAck_EarlyAckIsBufferedAndHarvested(t *testing.T) {
 	require.Equal(t, ackStale, rt.handleRebalanceAck(41, peer.ID))
 
 	// The epoch starts: the buffered ack is harvested.
-	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID, other.ID})
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID, other.ID}, nil)
 	epoch, pending, acked, completed := rt.getRebalanceState()
 	require.Equal(t, uint64(42), epoch)
 	require.Equal(t, 2, pending)
@@ -247,7 +251,7 @@ func TestStartRebalanceEpoch_UnpushedMemberDoesNotBlockCompletion(t *testing.T) 
 	rt.Members().Unlock()
 
 	rt.setSignature(42)
-	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID})
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID}, nil)
 
 	// The epoch completes with the pushed member's ack alone.
 	require.Equal(t, ackAccepted, rt.handleRebalanceAck(42, peer.ID))
@@ -255,8 +259,14 @@ func TestStartRebalanceEpoch_UnpushedMemberDoesNotBlockCompletion(t *testing.T) 
 	require.True(t, completed)
 }
 
+// TestStartRebalanceEpoch_CompletesImmediatelyWhenAllAckedEarly guards the
+// early-ack path: an epoch whose every ack arrived before it started completes
+// from inside the start, and the completion published from there must not
+// carry an earlier timestamp than its own start. Both events carry the
+// generation of the pushed table.
 func TestStartRebalanceEpoch_CompletesImmediatelyWhenAllAckedEarly(t *testing.T) {
 	c := testutil.NewConfig()
+	c.EnableClusterEventsChannel = true
 	rt := newRoutingTableForTest(c, testutil.NewServer(c))
 
 	peerCfg := testutil.NewConfig()
@@ -267,12 +277,48 @@ func TestStartRebalanceEpoch_CompletesImmediatelyWhenAllAckedEarly(t *testing.T)
 	rt.Members().Add(peer)
 	rt.Members().Unlock()
 
+	type stamped struct {
+		Kind       string `json:"kind"`
+		Generation uint64 `json:"generation"`
+		Timestamp  int64  `json:"timestamp"`
+	}
+
+	published := make(chan stamped, 2)
+	rt.SetClusterEventPublisher(func(_ context.Context, _ string, message string) error {
+		var ev stamped
+		require.NoError(t, json.Unmarshal([]byte(message), &ev))
+		published <- ev
+		return nil
+	})
+
 	rt.setSignature(42)
 	require.Equal(t, ackEarly, rt.handleRebalanceAck(42, peer.ID))
 
-	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID})
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID}, nil)
 	_, _, _, completed := rt.getRebalanceState()
 	require.True(t, completed)
+
+	// The completion publisher waits for the start publisher, so the start
+	// is delivered first even though the completion was published from
+	// inside the epoch start.
+	var start, complete stamped
+	select {
+	case start = <-published:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the rebalance start event")
+	}
+
+	select {
+	case complete = <-published:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the rebalance completion event")
+	}
+
+	require.Equal(t, events.KindRebalanceStartEvent, start.Kind)
+	require.Equal(t, events.KindRebalanceCompleteEvent, complete.Kind)
+	require.LessOrEqual(t, start.Timestamp, complete.Timestamp, "the completion must not predate its start")
+	require.Equal(t, rt.Generation(), start.Generation)
+	require.Equal(t, start.Generation, complete.Generation)
 }
 
 func TestSendRebalanceAck_StaleEpoch(t *testing.T) {
@@ -365,4 +411,36 @@ func TestSendRebalanceAck_ProcessError(t *testing.T) {
 	// Stop the TCP server: the ack cannot be delivered to the coordinator.
 	require.NoError(t, srv.Shutdown(context.Background()))
 	require.Error(t, rt.SendRebalanceAck(42))
+}
+
+func TestUpdateRouting_UnchangedTableKeepsEpoch(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	rt, err := cluster.addNode(testutil.NewConfig())
+	require.NoError(t, err)
+
+	// The bootstrap epoch is still in flight: nothing has acked it yet.
+	epoch, _, _, completed := rt.getRebalanceState()
+	require.NotZero(t, epoch)
+	require.Equal(t, rt.Signature(), epoch)
+	require.False(t, completed)
+
+	// Periodic pushes of an unchanged table must not supersede the active
+	// epoch: a node-left or node-join epoch that is still waiting for acks
+	// would otherwise be dropped before it completes.
+	for range 10 {
+		rt.updateRoutingWithReason(rebalanceReasonPeriodic, "")
+
+		current, _, _, completed := rt.getRebalanceState()
+		require.Equal(t, epoch, current)
+		require.Equal(t, epoch, rt.Signature())
+		require.False(t, completed)
+	}
+
+	// The original epoch is still the one that completes.
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(epoch, rt.this.ID))
+	current, _, _, completed := rt.getRebalanceState()
+	require.Equal(t, epoch, current)
+	require.True(t, completed)
 }

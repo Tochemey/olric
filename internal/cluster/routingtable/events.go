@@ -55,15 +55,16 @@ func (r *RoutingTable) PublishClusterEvent(ctx context.Context, channel, message
 	return publish(ctx, channel, message)
 }
 
-func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member) {
-	defer r.wg.Done()
-
+// publishNodeJoinEvent announces the join of m, stamped with generation, the
+// install generation this member held when it observed the join.
+func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member, generation uint64) {
 	message := events.NodeJoinEvent{
-		Kind:      events.KindNodeJoinEvent,
-		Source:    r.this.String(),
-		NodeJoin:  m.String(),
-		NodeMeta:  m.Meta,
-		Timestamp: time.Now().UnixNano(),
+		Kind:       events.KindNodeJoinEvent,
+		Source:     r.this.String(),
+		NodeJoin:   m.String(),
+		NodeMeta:   m.Meta,
+		Generation: generation,
+		Timestamp:  time.Now().UnixNano(),
 	}
 	data, err := message.Encode()
 	if err != nil {
@@ -76,15 +77,16 @@ func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member) {
 	}
 }
 
-func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member) {
-	defer r.wg.Done()
-
+// publishNodeLeftEvent announces the departure of m, stamped with generation,
+// the install generation this member held when it observed the departure.
+func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member, generation uint64) {
 	message := events.NodeLeftEvent{
-		Kind:      events.KindNodeLeftEvent,
-		Source:    r.this.String(),
-		NodeLeft:  m.String(),
-		NodeMeta:  m.Meta,
-		Timestamp: time.Now().UnixNano(),
+		Kind:       events.KindNodeLeftEvent,
+		Source:     r.this.String(),
+		NodeLeft:   m.String(),
+		NodeMeta:   m.Meta,
+		Generation: generation,
+		Timestamp:  time.Now().UnixNano(),
 	}
 	data, err := message.Encode()
 	if err != nil {
@@ -97,16 +99,19 @@ func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member) {
 	}
 }
 
-func (r *RoutingTable) publishRebalanceStartEvent(epoch uint64, reason, node string) {
-	defer r.wg.Done()
-
+// publishRebalanceStartEvent announces the epoch started for the table pushed
+// as generation. startedAt is the epoch's start time in nanoseconds: it is
+// taken before the epoch could complete, so a completion published right
+// away never carries an earlier timestamp than its start.
+func (r *RoutingTable) publishRebalanceStartEvent(epoch, generation uint64, reason, node string, startedAt int64) {
 	message := events.RebalanceStartEvent{
-		Kind:      events.KindRebalanceStartEvent,
-		Source:    r.this.String(),
-		Epoch:     epoch,
-		Reason:    reason,
-		Node:      node,
-		Timestamp: time.Now().UnixNano(),
+		Kind:       events.KindRebalanceStartEvent,
+		Source:     r.this.String(),
+		Epoch:      epoch,
+		Generation: generation,
+		Reason:     reason,
+		Node:       node,
+		Timestamp:  startedAt,
 	}
 	data, err := message.Encode()
 	if err != nil {
@@ -119,9 +124,9 @@ func (r *RoutingTable) publishRebalanceStartEvent(epoch uint64, reason, node str
 	}
 }
 
-func (r *RoutingTable) publishRebalanceCompleteEvent(epoch uint64) {
-	defer r.wg.Done()
-
+// publishRebalanceCompleteEvent announces the completion of the epoch whose
+// table was pushed as generation and computed for members.
+func (r *RoutingTable) publishRebalanceCompleteEvent(epoch, generation uint64, members []string) {
 	// Check if context is already canceled (node is shutting down)
 	select {
 	case <-r.ctx.Done():
@@ -131,10 +136,12 @@ func (r *RoutingTable) publishRebalanceCompleteEvent(epoch uint64) {
 	}
 
 	message := events.RebalanceCompleteEvent{
-		Kind:      events.KindRebalanceCompleteEvent,
-		Source:    r.this.String(),
-		Epoch:     epoch,
-		Timestamp: time.Now().UnixNano(),
+		Kind:       events.KindRebalanceCompleteEvent,
+		Source:     r.this.String(),
+		Epoch:      epoch,
+		Generation: generation,
+		Members:    members,
+		Timestamp:  time.Now().UnixNano(),
 	}
 	data, err := message.Encode()
 	if err != nil {

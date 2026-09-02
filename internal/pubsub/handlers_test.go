@@ -549,15 +549,32 @@ func TestPubSub_Handler_Publish_FanOutError(t *testing.T) {
 }
 
 // A member whose RESP server is dead (but whose memberlist is still alive)
-// must surface a fan-out error to the publisher.
+// must surface a fan-out error to the publisher, while local subscribers
+// still receive the message: local delivery never waits on a remote member.
 func TestPubSub_publishToCluster_UnreachableMember(t *testing.T) {
 	cluster := testcluster.New(NewService)
 	s1 := cluster.AddMember(nil).(*Service)
 	s2 := cluster.AddMember(nil).(*Service)
 	defer cluster.Shutdown()
 
+	rc := s1.client.Get(s1.rt.This().String())
+	ctx := context.Background()
+	ps := rc.Subscribe(ctx, "my-channel")
+	defer func() {
+		require.NoError(t, ps.Close())
+	}()
+
+	// Wait for confirmation that the subscription is created.
+	_, err := ps.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
 	require.NoError(t, s2.server.Shutdown(context.Background()))
 
-	_, err := s1.publishToCluster(context.Background(), "my-channel", "hello, world!")
+	count, err := s1.publishToCluster(ctx, "my-channel", "hello, world!")
 	require.Error(t, err)
+	require.Equal(t, int64(1), count, "the local subscriber is served although the remote fan-out failed")
+
+	msg, err := ps.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "hello, world!", msg.(*redis.Message).Payload)
 }

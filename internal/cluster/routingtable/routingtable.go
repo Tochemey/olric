@@ -34,14 +34,29 @@ import (
 	"github.com/tochemey/olric/internal/protocol"
 	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/service"
+	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/pkg/flog"
 
 	"github.com/tochemey/olric/internal/cluster/partitions"
-	"github.com/tochemey/olric/internal/syncstate"
 )
 
 // ErrClusterQuorum means that the cluster could not reach a healthy numbers of members to operate.
 var ErrClusterQuorum = errors.New("cannot be reached cluster quorum to operate")
+
+// tableVersion identifies the routing table installed on a member. It is
+// published as an immutable snapshot so that signature and generation are
+// always read together.
+type tableVersion struct {
+	// signature is the xxhash of the installed payload. It doubles as the
+	// rebalance epoch id and is a pure function of the table content, so it
+	// repeats when the table returns to an earlier state.
+	signature uint64
+	// generation counts the installs whose signature differed from the
+	// previously installed one. Unlike the signature it never repeats: a
+	// change back to an earlier signature advances it, an unchanged table
+	// pushed again does not.
+	generation uint64
+}
 
 type route struct {
 	Owners  []discovery.Member
@@ -54,7 +69,9 @@ type RoutingTable struct {
 	// Currently owned partition count. Approximate LRU implementation
 	// uses that.
 	ownedPartitionCount uint64
-	signature           uint64
+	// version is the installed routing table's signature and generation,
+	// see tableVersion and Version.
+	version atomic.Pointer[tableVersion]
 	// numMembers is used to check cluster quorum.
 	numMembers int32
 
@@ -94,6 +111,11 @@ type RoutingTable struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	// shutdownMtx guards closed against the wg.Add/wg.Wait race: Shutdown sets
+	// closed under it before waiting on wg, and spawn checks it under the same
+	// lock before adding to wg.
+	shutdownMtx sync.Mutex
+	closed      bool
 
 	rebalanceMtx   sync.Mutex
 	rebalanceState rebalanceState
@@ -201,12 +223,49 @@ func (r *RoutingTable) Members() *Members {
 	return r.members
 }
 
+// setSignature records the installation of a routing table with the given
+// signature and advances the generation when the signature changed. Installs
+// are serialized by updateRoutingMtx.
 func (r *RoutingTable) setSignature(s uint64) {
-	atomic.StoreUint64(&r.signature, s)
+	var generation uint64
+	changed := true
+	if current := r.version.Load(); current != nil {
+		generation = current.generation
+		changed = current.signature != s
+	}
+	if changed {
+		generation++
+	}
+	r.version.Store(&tableVersion{signature: s, generation: generation})
 }
 
+// Signature returns the signature of the installed routing table, zero before
+// the first install.
 func (r *RoutingTable) Signature() uint64 {
-	return atomic.LoadUint64(&r.signature)
+	signature, _ := r.Version()
+	return signature
+}
+
+// Generation returns the generation of the installed routing table, zero
+// before the first install. See tableVersion for how it relates to the
+// signature.
+func (r *RoutingTable) Generation() uint64 {
+	_, generation := r.Version()
+	return generation
+}
+
+// Version returns the signature and generation of the installed routing table
+// as one consistent snapshot. Consumers that key work on the generation but
+// report the signature, such as the balancer's rebalance ack, must read both
+// here rather than through Signature and Generation separately, otherwise an
+// install landing between the two reads pairs a stale signature with a fresh
+// generation.
+func (r *RoutingTable) Version() (signature, generation uint64) {
+	current := r.version.Load()
+	if current == nil {
+		return 0, 0
+	}
+	return current.signature, current.generation
 }
 
 func (r *RoutingTable) setOwnedPartitionCount() {
@@ -304,6 +363,11 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 		return
 	}
 
+	// Snapshot the membership before computing the table, so that the list
+	// reported with the epoch's completion names the members the table was
+	// computed for: a member that joins while the table is being computed
+	// is only reported by the next epoch, which surely reflects it.
+	members := r.memberNames()
 	r.fillRoutingTable()
 	if r.syncState != nil {
 		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
@@ -328,14 +392,13 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 		for member := range reports {
 			updated = append(updated, member.ID)
 		}
-		r.startRebalanceEpoch(signature, reason, node, updated)
+		r.startRebalanceEpoch(signature, reason, node, updated, members)
 		// Proactive sync pushes primary data to newly joined backup owners.
 		// It must NOT run on node-leave events: when nodes die the fragment
 		// write-lock held during the network transfer would block concurrent
 		// reads for the entire push duration, causing read timeouts.
 		if r.config.EnableProactiveSyncOnJoin && reason == rebalanceReasonNodeJoin {
-			r.wg.Add(1)
-			go r.runCallbacks()
+			r.spawn(r.runCallbacks)
 		}
 	}
 }
@@ -360,8 +423,11 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) (notif
 		notify = func() { r.notifyNodeJoinCallbacks(event.NodeName) }
 
 		if r.config.EnableClusterEventsChannel {
-			r.wg.Add(1)
-			go r.publishNodeJoinEvent(&member)
+			// Captured here, not in the goroutine: the table may change
+			// before the publish runs, and the event must carry the
+			// generation held when the join was observed.
+			generation := r.Generation()
+			r.spawn(func() { r.publishNodeJoinEvent(&member, generation) })
 		}
 	case memberlist.NodeLeave:
 		if _, err := r.Members().Get(member.ID); err != nil {
@@ -380,8 +446,9 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) (notif
 		notify = func() { r.notifyNodeLeaveCallbacks(event.NodeName) }
 
 		if r.config.EnableClusterEventsChannel {
-			r.wg.Add(1)
-			go r.publishNodeLeftEvent(&member)
+			// Captured here for the same reason as on join.
+			generation := r.Generation()
+			r.spawn(func() { r.publishNodeLeftEvent(&member, generation) })
 		}
 	case memberlist.NodeUpdate:
 		// Node's birthdate may be changed. Close the pool and re-add to the hash ring.
@@ -596,6 +663,13 @@ func (r *RoutingTable) Shutdown(ctx context.Context) error {
 	}
 
 	r.cancel()
+
+	// Flip closed under shutdownMtx before waiting, so no spawn can add to wg
+	// once Wait has started.
+	r.shutdownMtx.Lock()
+	r.closed = true
+	r.shutdownMtx.Unlock()
+
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
@@ -610,6 +684,23 @@ func (r *RoutingTable) Shutdown(ctx context.Context) error {
 	case <-done:
 	}
 	return nil
+}
+
+// spawn runs fn on its own goroutine accounted in wg, unless the routing table
+// is shutting down. closed is checked under shutdownMtx, the lock Shutdown sets
+// it under before waiting on wg, so wg.Add never races wg.Wait. It reports
+// whether fn was started; false means the work was dropped, which is safe
+// because the node is leaving.
+func (x *RoutingTable) spawn(fn func()) bool {
+	x.shutdownMtx.Lock()
+	defer x.shutdownMtx.Unlock()
+
+	if x.closed {
+		return false
+	}
+
+	x.wg.Go(fn)
+	return true
 }
 
 var _ service.Service = (*RoutingTable)(nil)

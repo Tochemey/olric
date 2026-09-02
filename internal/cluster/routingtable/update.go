@@ -18,10 +18,13 @@
 package routingtable
 
 import (
+	"bytes"
 	"runtime"
+	"slices"
 	"sync"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -35,11 +38,47 @@ type leftOverDataReport struct {
 	Backups    []uint64
 }
 
+// countQuery asks an owner for its key count in a partition, in its backup
+// copy when replica is set.
+type countQuery struct {
+	partID  uint64
+	replica bool
+}
+
+// buildRoutingTablePayload encodes the routing table as a msgpack map whose
+// entries are written in ascending partition id order, and returns the payload
+// together with its signature.
+//
+// The signature is the xxhash of the payload and doubles as the rebalance
+// epoch id, so it must be a pure function of the table content. Members derive
+// their signature from the received bytes (see applyRoutingTablePayload) and
+// the balancer acks that value, so the payload itself has to be canonical:
+// msgpack.Marshal follows Go's randomized map iteration order and yields a
+// different signature for the same table on almost every push, which
+// supersedes in-flight epochs on a stable cluster. The wire format is still a
+// plain msgpack map, so members running an older version keep decoding it.
 func (r *RoutingTable) buildRoutingTablePayload() ([]byte, uint64, error) {
-	data, err := msgpack.Marshal(r.table)
-	if err != nil {
+	partIDs := make([]uint64, 0, len(r.table))
+	for partID := range r.table {
+		partIDs = append(partIDs, partID)
+	}
+	slices.Sort(partIDs)
+
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	if err := enc.EncodeMapLen(len(partIDs)); err != nil {
 		return nil, 0, err
 	}
+
+	for _, partID := range partIDs {
+		if err := enc.EncodeUint64(partID); err != nil {
+			return nil, 0, err
+		}
+		if err := enc.Encode(r.table[partID]); err != nil {
+			return nil, 0, err
+		}
+	}
+	data := buf.Bytes()
 	return data, xxhash.Sum64(data), nil
 }
 
@@ -85,6 +124,116 @@ func (r *RoutingTable) partitionsPendingReceive() []uint64 {
 		}
 	}
 	return out
+}
+
+// partitionsAwaitingData returns the partitions this member has to wait on
+// before acking a rebalance: the owned-but-empty partitions reported by
+// partitionsPendingReceive, minus those no live owner holds data for. A
+// partition nobody holds data for never receives a fragment, so waiting on it
+// only delays the ack by InitialSyncEmptyPartitionTimeout. Partitions whose
+// escape deadline has already elapsed are kept as they are: the sync state no
+// longer waits on them, so asking their owners would buy nothing. Every other
+// owner is asked over the network, once, in a single pipelined round trip.
+func (x *RoutingTable) partitionsAwaitingData() []uint64 {
+	pending := x.partitionsPendingReceive()
+	if len(pending) == 0 || x.syncState == nil {
+		return pending
+	}
+
+	awaiting := make(map[uint64]struct{}, len(pending))
+	queries := make(map[discovery.Member][]countQuery)
+
+	for _, partID := range pending {
+		if x.syncState.Expired(partID) {
+			awaiting[partID] = struct{}{}
+			continue
+		}
+
+		for _, owner := range x.primary.PartitionByID(partID).Owners() {
+			if !owner.CompareByID(x.this) {
+				queries[owner] = append(queries[owner], countQuery{partID: partID})
+			}
+		}
+
+		for _, owner := range x.backup.PartitionByID(partID).Owners() {
+			if !owner.CompareByID(x.this) {
+				queries[owner] = append(queries[owner], countQuery{partID: partID, replica: true})
+			}
+		}
+	}
+
+	var mtx sync.Mutex
+	var g errgroup.Group
+	g.SetLimit(runtime.NumCPU())
+
+	for owner, ownerQueries := range queries {
+		g.Go(func() error {
+			held := x.partitionsHeldBy(owner, ownerQueries)
+
+			mtx.Lock()
+			defer mtx.Unlock()
+
+			for _, partID := range held {
+				awaiting[partID] = struct{}{}
+			}
+
+			return nil
+		})
+	}
+
+	// The probes report through awaiting; the group only bounds concurrency.
+	_ = g.Wait()
+
+	out := make([]uint64, 0, len(awaiting))
+	for _, partID := range pending {
+		if _, ok := awaiting[partID]; ok {
+			out = append(out, partID)
+		}
+	}
+
+	if skipped := len(pending) - len(out); skipped > 0 {
+		x.log.V(6).Printf("[DEBUG] %d of %d empty partitions have no live source and are not awaited", skipped, len(pending))
+	}
+
+	return out
+}
+
+// partitionsHeldBy asks owner, in one pipelined round trip, for its key counts
+// in the queried partitions and returns the ids of those it holds data for. A
+// query that is not answered counts as held: memberlist removes a dead owner,
+// and until then its data may still arrive, so the escape deadline keeps
+// covering the partition.
+func (x *RoutingTable) partitionsHeldBy(owner discovery.Member, queries []countQuery) []uint64 {
+	rc := x.client.Get(owner.String())
+	pipe := rc.Pipeline()
+	cmds := make([]*redis.IntCmd, len(queries))
+
+	for i, query := range queries {
+		lengthOfPart := protocol.NewLengthOfPart(query.partID)
+		if query.replica {
+			lengthOfPart.SetReplica()
+		}
+
+		cmds[i] = lengthOfPart.Command(x.ctx)
+		_ = pipe.Process(x.ctx, cmds[i])
+	}
+
+	if _, err := pipe.Exec(x.ctx); err != nil {
+		x.log.V(6).Printf("[DEBUG] Failed to check key counts on %s: %v", owner, err)
+	}
+
+	// Left nil on purpose: on an empty cluster nothing is held, so nothing
+	// needs to be allocated.
+	var held []uint64
+
+	for i, query := range queries {
+		count, err := cmds[i].Result()
+		if err != nil || count != 0 {
+			held = append(held, query.partID)
+		}
+	}
+
+	return held
 }
 
 func (r *RoutingTable) updateRoutingTableOnMember(data []byte, member discovery.Member) (*leftOverDataReport, error) {
@@ -155,13 +304,6 @@ func (r *RoutingTable) updateRoutingTableOnCluster(data []byte) (map[discovery.M
 			defer sem.Release(1)
 
 			report, err := r.updateRoutingTableOnMember(data, member)
-			// TODO: temporary diagnostic logging for the routing table push
-			// investigation. Remove once the silent push failure is understood.
-			if err != nil {
-				r.log.V(1).Printf("[WARN] Failed to push routing table to %s: %v", member, err)
-			} else {
-				r.log.V(1).Printf("[DEBUG] Routing table pushed to %s", member)
-			}
 			if err != nil {
 				// The coordinator must apply its own table, otherwise the
 				// committed epoch would reference a table this node never

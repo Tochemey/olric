@@ -19,6 +19,8 @@ package routingtable
 
 import (
 	"errors"
+	"slices"
+	"time"
 
 	"github.com/hashicorp/memberlist"
 
@@ -39,10 +41,22 @@ const (
 )
 
 type rebalanceState struct {
-	epoch     uint64
-	pending   map[uint64]struct{}
-	acked     map[uint64]struct{}
-	completed bool
+	epoch uint64
+	// generation is the install generation of the table pushed for this epoch
+	// on the coordinator; unlike epoch it never recurs, see
+	// RoutingTable.Generation.
+	generation uint64
+	// members lists, sorted, the addresses of the members the coordinator knew
+	// when it computed the pushed table.
+	members []string
+	// startPublished is closed once the epoch's start event has been
+	// published, or right away when it is not published. The completion
+	// publisher waits on it, so subscribers never see a completion before
+	// its start.
+	startPublished chan struct{}
+	pending        map[uint64]struct{}
+	acked          map[uint64]struct{}
+	completed      bool
 }
 
 // ackStatus is the coordinator's verdict on a received rebalance ack.
@@ -79,8 +93,9 @@ func rebalanceReasonFromEvent(event *discovery.ClusterEvent) (rebalanceReason, s
 // members that confirmed receipt of the routing table push for this epoch: a
 // member that never received the table cannot balance against it, so it must
 // not gate the epoch (an unbootstrapped joiner would otherwise block every
-// epoch forever).
-func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason, node string, memberIDs []uint64) {
+// epoch forever). members lists the addresses of the members the pushed table
+// was computed for; it is reported with the completion of the epoch.
+func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason, node string, memberIDs []uint64, members []string) {
 	if epoch == 0 {
 		return
 	}
@@ -94,11 +109,19 @@ func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason,
 		return
 	}
 
+	// The coordinator installed its own push before starting the epoch, so
+	// its generation is the one of the pushed table.
+	generation := r.Generation()
+
 	r.rebalanceMtx.Lock()
+	startPublished := make(chan struct{})
 	r.rebalanceState = rebalanceState{
-		epoch:   epoch,
-		pending: pending,
-		acked:   make(map[uint64]struct{}),
+		epoch:          epoch,
+		generation:     generation,
+		members:        members,
+		startPublished: startPublished,
+		pending:        pending,
+		acked:          make(map[uint64]struct{}),
 	}
 	// Harvest acks that raced the epoch start: members that processed the
 	// pushed table acked while the coordinator was still fanning it out.
@@ -108,13 +131,40 @@ func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason,
 		}
 	}
 	r.earlyAcks = make(map[uint64]map[uint64]struct{})
+
+	// The start is stamped, and its publish started, before the completion
+	// check: when every ack was harvested early the completion is published
+	// from inside that check, and it must neither carry an earlier timestamp
+	// than its start nor reach subscribers before it.
+	startedAt := time.Now().UnixNano()
+	published := r.config.EnableClusterEventsChannel && r.spawn(func() {
+		defer close(startPublished)
+
+		r.publishRebalanceStartEvent(epoch, generation, string(reason), node, startedAt)
+	})
+	if !published {
+		close(startPublished)
+	}
+
 	r.checkRebalanceCompletionLocked()
 	r.rebalanceMtx.Unlock()
+}
 
-	if r.config.EnableClusterEventsChannel {
-		r.wg.Add(1)
-		go r.publishRebalanceStartEvent(epoch, string(reason), node)
-	}
+// memberNames returns the addresses of the current members in sorted order.
+// Taken before a routing table is computed, it names the members that table
+// was computed for.
+func (x *RoutingTable) memberNames() []string {
+	x.Members().RLock()
+	defer x.Members().RUnlock()
+
+	names := make([]string, 0, x.Members().Length())
+	x.Members().Range(func(_ uint64, member discovery.Member) bool {
+		names = append(names, member.String())
+		return true
+	})
+
+	slices.Sort(names)
+	return names
 }
 
 func (r *RoutingTable) handleRebalanceAck(epoch, memberID uint64) ackStatus {
@@ -188,14 +238,23 @@ func (r *RoutingTable) checkRebalanceCompletionLocked() {
 	if livePendingCount > 0 && liveAckedCount == livePendingCount {
 		r.rebalanceState.completed = true
 		completedEpoch := r.rebalanceState.epoch
+		generation := r.rebalanceState.generation
+		members := r.rebalanceState.members
+		startPublished := r.rebalanceState.startPublished
 		// Only publish event if context is still alive (node not shutting down)
 		if r.config.EnableClusterEventsChannel {
 			select {
 			case <-r.ctx.Done():
 				// Node is shutting down, don't publish event
 			default:
-				r.wg.Add(1)
-				go r.publishRebalanceCompleteEvent(completedEpoch)
+				r.spawn(func() {
+					// Nil only for states built without startRebalanceEpoch.
+					if startPublished != nil {
+						<-startPublished
+					}
+
+					r.publishRebalanceCompleteEvent(completedEpoch, generation, members)
+				})
 			}
 		}
 	}

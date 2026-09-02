@@ -50,12 +50,12 @@ func TestRoutingTable_publishNodeJoinEvent(t *testing.T) {
 		require.Equal(t, events.KindNodeJoinEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, rt.this.String(), v.NodeJoin)
+		require.Equal(t, uint64(7), v.Generation)
 		return nil
 	})
 
 	m := discovery.NewMember(c)
-	rt.wg.Add(1)
-	go rt.publishNodeJoinEvent(&m)
+	go rt.publishNodeJoinEvent(&m, 7)
 	<-ctx.Done()
 	require.ErrorIs(t, context.Canceled, ctx.Err())
 }
@@ -79,12 +79,12 @@ func TestRoutingTable_publishNodeLeftEvent(t *testing.T) {
 		require.Equal(t, events.KindNodeLeftEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, rt.this.String(), v.NodeLeft)
+		require.Equal(t, uint64(7), v.Generation)
 		return nil
 	})
 
 	m := discovery.NewMember(c)
-	rt.wg.Add(1)
-	go rt.publishNodeLeftEvent(&m)
+	go rt.publishNodeLeftEvent(&m, 7)
 	<-ctx.Done()
 	require.ErrorIs(t, context.Canceled, ctx.Err())
 }
@@ -97,6 +97,7 @@ func TestRoutingTable_publishRebalanceStartEvent(t *testing.T) {
 	rt, err := cluster.addNode(c)
 	require.NoError(t, err)
 
+	startedAt := time.Now().UnixNano()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	rt.SetClusterEventPublisher(func(_ context.Context, channel, message string) error {
 		defer cancel()
@@ -108,13 +109,14 @@ func TestRoutingTable_publishRebalanceStartEvent(t *testing.T) {
 		require.Equal(t, events.KindRebalanceStartEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, uint64(42), v.Epoch)
+		require.Equal(t, uint64(7), v.Generation)
 		require.Equal(t, "node-left", v.Reason)
 		require.Equal(t, "127.0.0.1:9999", v.Node)
+		require.Equal(t, startedAt, v.Timestamp, "the start carries the timestamp taken at the epoch start")
 		return nil
 	})
 
-	rt.wg.Add(1)
-	go rt.publishRebalanceStartEvent(42, "node-left", "127.0.0.1:9999")
+	go rt.publishRebalanceStartEvent(42, 7, "node-left", "127.0.0.1:9999", startedAt)
 	<-ctx.Done()
 	require.ErrorIs(t, context.Canceled, ctx.Err())
 }
@@ -138,11 +140,12 @@ func TestRoutingTable_publishRebalanceCompleteEvent(t *testing.T) {
 		require.Equal(t, events.KindRebalanceCompleteEvent, v.Kind)
 		require.Equal(t, rt.this.String(), v.Source)
 		require.Equal(t, uint64(42), v.Epoch)
+		require.Equal(t, uint64(7), v.Generation)
+		require.Equal(t, []string{"127.0.0.1:1", "127.0.0.1:2"}, v.Members)
 		return nil
 	})
 
-	rt.wg.Add(1)
-	go rt.publishRebalanceCompleteEvent(42)
+	go rt.publishRebalanceCompleteEvent(42, 7, []string{"127.0.0.1:1", "127.0.0.1:2"})
 	<-ctx.Done()
 	require.ErrorIs(t, context.Canceled, ctx.Err())
 }
@@ -158,8 +161,7 @@ func TestRoutingTable_publishRebalanceCompleteEvent_Canceled(t *testing.T) {
 
 	// The node is shutting down: nothing must be published.
 	rt.cancel()
-	rt.wg.Add(1)
-	rt.publishRebalanceCompleteEvent(42)
+	rt.publishRebalanceCompleteEvent(42, 7, nil)
 }
 
 func TestRoutingTable_publishRebalanceCompleteEvent_CanceledDuringPublish(t *testing.T) {
@@ -177,6 +179,5 @@ func TestRoutingTable_publishRebalanceCompleteEvent_CanceledDuringPublish(t *tes
 		return errors.New("publish failed")
 	})
 
-	rt.wg.Add(1)
-	rt.publishRebalanceCompleteEvent(42)
+	rt.publishRebalanceCompleteEvent(42, 7, nil)
 }

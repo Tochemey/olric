@@ -50,29 +50,45 @@ func (s *Service) publishToCluster(ctx context.Context, channel, message string)
 		return 0, err
 	}
 
-	var total int64
-	members := s.rt.Discovery().GetMembers()
-	for _, member := range members {
+	// Local subscribers are served first and never wait on a remote member: a
+	// member that is still starting can hold or reject the internal publish,
+	// and that must neither delay nor lose the event locally. Every remote
+	// member is then attempted, and the first failure is reported only after
+	// the last attempt, so one unreachable member does not cost the others
+	// their copy.
+	total := int64(s.pubsub.Publish(channel, message))
+	PublishedTotal.Increase(total)
+
+	var firstErr error
+	for _, member := range s.rt.Discovery().GetMembers() {
 		if member.CompareByID(s.rt.This()) {
-			count := s.pubsub.Publish(channel, message)
-			total += int64(count)
-			PublishedTotal.Increase(int64(count))
 			continue
 		}
 
 		pi := protocol.NewPublishInternal(channel, message).Command(ctx)
 		rc := s.client.Get(member.String())
 		if err := rc.Process(ctx, pi); err != nil {
-			return total, err
+			if firstErr == nil {
+				firstErr = err
+			}
+
+			continue
 		}
+
 		pcount, err := pi.Result()
 		if err != nil {
-			return total, err
+			if firstErr == nil {
+				firstErr = err
+			}
+
+			continue
 		}
+
 		total += pcount
 		PublishedTotal.Increase(pcount)
 	}
-	return total, nil
+
+	return total, firstErr
 }
 
 func (s *Service) publishCommandHandler(conn redcon.Conn, cmd redcon.Command) {
