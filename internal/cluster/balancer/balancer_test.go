@@ -24,6 +24,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 	"github.com/tochemey/olric/internal/syncstate"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/internal/testutil/mockfragment"
+	"github.com/tochemey/olric/pkg/storage"
 
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/cluster/routingtable"
@@ -368,6 +370,9 @@ type mockCluster struct {
 	errGr     errgroup.Group
 	ctx       context.Context
 	cancel    context.CancelFunc
+	// noLoop keeps the balancer's periodic loop from starting, so a test
+	// drives every cycle itself.
+	noLoop bool
 }
 
 func newMockCluster(t *testing.T) *mockCluster {
@@ -403,9 +408,8 @@ func (mc *mockCluster) addNode(e *environment.Environment) *Balancer {
 	e.Set("server", srv)
 	b := newBalancerForTest(e)
 
-	err = b.Start()
-	if err != nil {
-		require.NoError(mc.t, err)
+	if !mc.noLoop {
+		require.NoError(mc.t, b.Start())
 	}
 
 	err = b.rt.Join()
@@ -517,7 +521,7 @@ func TestTryAckRebalance_Guards(t *testing.T) {
 
 	// When syncState reports pending data, ack is skipped.
 	pending := syncstate.New()
-	pending.Reconcile([]uint64{1}, time.Minute)
+	pending.Reconcile([]uint64{1}, time.Minute, time.Now())
 	b.syncState = pending
 	require.False(t, b.syncState.PendingEmpty())
 	b.tryAckRebalance(1234, 1)
@@ -565,6 +569,7 @@ func TestBalanceEagerly(t *testing.T) {
 
 	c1 := testutil.NewConfig()
 	c1.ReplicaCount = 2
+	c1.EnableProactiveSyncOnJoin = true
 	e1 := newTestEnvironment(c1)
 	b1 := cluster.addNode(e1)
 
@@ -579,6 +584,7 @@ func TestBalanceEagerly(t *testing.T) {
 
 	c2 := testutil.NewConfig()
 	c2.ReplicaCount = 2
+	c2.EnableProactiveSyncOnJoin = true
 	e2 := newTestEnvironment(c2)
 	b2 := cluster.addNode(e2)
 
@@ -612,6 +618,7 @@ func TestPromoteBackupCopies(t *testing.T) {
 
 	c1 := testutil.NewConfig()
 	c1.ReplicaCount = 2
+	c1.EnableProactiveSyncOnJoin = true
 	e1 := newTestEnvironment(c1)
 	b1 := cluster.addNode(e1)
 
@@ -669,11 +676,13 @@ func TestPromoteBackupCopies_NotPrimaryOwner(t *testing.T) {
 
 	c1 := testutil.NewConfig()
 	c1.ReplicaCount = 2
+	c1.EnableProactiveSyncOnJoin = true
 	e1 := newTestEnvironment(c1)
 	b1 := cluster.addNode(e1)
 
 	c2 := testutil.NewConfig()
 	c2.ReplicaCount = 2
+	c2.EnableProactiveSyncOnJoin = true
 	e2 := newTestEnvironment(c2)
 	b2 := cluster.addNode(e2)
 
@@ -728,7 +737,7 @@ func TestPromoteBackupCopies_SingleReplica(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	moved, aborted := b.promoteBackupCopies(b.rt.Signature())
+	moved, _, aborted := b.promoteBackupCopies(b.rt.Signature())
 	require.False(t, moved)
 	require.False(t, aborted)
 }
@@ -755,7 +764,787 @@ func TestBalanceEagerly_SingleReplica(t *testing.T) {
 	})
 
 	// pushPrimaryToBackups returns immediately when replicas are at minimum.
-	moved, aborted := b.pushPrimaryToBackups(b.rt.Signature())
+	sign, _ := b.rt.Version()
+	moved, _, aborted := b.pushPrimaryToBackups(sign)
 	require.False(t, moved)
 	require.False(t, aborted)
+}
+
+// failingFragment is a Fragment whose moves fail the first failures attempts
+// and succeed afterwards, counting every attempt. Like the real fragment it
+// keeps its data on a push to a backup and drops it on any other move.
+type failingFragment struct {
+	mu       sync.Mutex
+	failures int
+	calls    int
+	// replications counts the Replicate calls among calls, so a test can tell
+	// a restore from a move or a promotion.
+	replications int
+	length       int
+}
+
+func newFailingFragment(failures int) *failingFragment {
+	return &failingFragment{failures: failures, length: 1}
+}
+
+func (f *failingFragment) Name() string { return "failing" }
+
+func (f *failingFragment) Stats() storage.Stats {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return storage.Stats{Length: f.length}
+}
+
+func (f *failingFragment) Move(part *partitions.Partition, name string, owners []discovery.Member) error {
+	return f.MoveWithTargetKind(part, name, owners, part.Kind())
+}
+
+func (f *failingFragment) MoveWithTargetKind(_ *partitions.Partition, _ string, _ []discovery.Member, targetKind partitions.Kind) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls++
+	if f.calls <= f.failures {
+		return errors.New("move failed")
+	}
+
+	// A successful move drops the local table whatever the target kind, as
+	// the real fragment does; only Replicate keeps it.
+	f.length = 0
+
+	return nil
+}
+
+func (f *failingFragment) Compaction() (bool, error) { return false, nil }
+
+func (f *failingFragment) Destroy() error { return nil }
+
+func (f *failingFragment) Close() error { return nil }
+
+// attempts returns how many moves were attempted on the fragment.
+func (f *failingFragment) attempts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.calls
+}
+
+// replicated returns how many of the attempts were Replicate calls.
+func (f *failingFragment) replicated() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.replications
+}
+
+// partitionsOwnedBy returns the ids of the partitions whose primary owner, in
+// primary's view, is member.
+func partitionsOwnedBy(c *config.Config, primary *partitions.Partitions, member discovery.Member) []uint64 {
+	var out []uint64
+	for partID := range c.PartitionCount {
+		part := primary.PartitionByID(partID)
+		if part.OwnerCount() > 0 && part.Owner().CompareByName(member) {
+			out = append(out, partID)
+		}
+	}
+
+	return out
+}
+
+// TestRunBalance_AcksAfterMovingWithoutWaitingForTick guards that one balancer
+// invocation acks as soon as it has nothing left to move: the cycle that
+// hands the joiner its partitions is followed by another one right away, so
+// the ack does not wait for the next TriggerBalancerInterval tick.
+func TestRunBalance_AcksAfterMovingWithoutWaitingForTick(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	e1 := newTestEnvironment(nil)
+	b1 := cluster.addNode(e1)
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get("primary").(*partitions.Partitions)
+	for partID := range c.PartitionCount {
+		frag := mockfragment.New()
+		frag.Fill()
+		primary.PartitionByID(partID).Map().Store("dmap.test-data", frag)
+	}
+
+	b2 := cluster.addNode(newTestEnvironment(nil))
+	require.NoError(t, testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	}))
+
+	// The cycle needs something to move: wait until the table hands at least
+	// one partition to the joiner.
+	require.Eventually(t, func() bool {
+		return len(partitionsOwnedBy(c, primary, b2.rt.This())) > 0
+	}, 10*time.Second, 50*time.Millisecond)
+
+	_, generation := b1.rt.Version()
+	require.Zero(t, b1.lastAckedGeneration)
+
+	b1.triggerBalancer()
+
+	require.Equal(t, generation, b1.lastAckedGeneration, "the ack must follow the moves in the same invocation")
+	for _, partID := range partitionsOwnedBy(c, primary, b2.rt.This()) {
+		require.Zero(t, primary.PartitionByID(partID).Length(), "the joiner's partitions must have been moved")
+	}
+}
+
+// TestRunBalance_FailedMovesDoNotSpinOrAck guards the other half of the
+// re-run rule: a cycle whose moves only failed neither acks nor re-runs, so
+// each failing fragment is attempted once per invocation and the next tick
+// retries it.
+func TestRunBalance_FailedMovesDoNotSpinOrAck(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	e1 := newTestEnvironment(nil)
+	b1 := cluster.addNode(e1)
+	b2 := cluster.addNode(newTestEnvironment(nil))
+	require.NoError(t, testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	}))
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get("primary").(*partitions.Partitions)
+	var owned []uint64
+	require.Eventually(t, func() bool {
+		owned = partitionsOwnedBy(c, primary, b2.rt.This())
+		return len(owned) > 0
+	}, 10*time.Second, 50*time.Millisecond)
+
+	frags := make(map[uint64]*failingFragment, len(owned))
+	for _, partID := range owned {
+		frag := newFailingFragment(1000)
+		primary.PartitionByID(partID).Map().Store("dmap.test-data", frag)
+		frags[partID] = frag
+	}
+
+	b1.triggerBalancer()
+
+	require.Zero(t, b1.lastAckedGeneration, "failed moves must hold the ack")
+	for partID, frag := range frags {
+		require.Equal(t, 1, frag.attempts(), "partition %d must be attempted once per invocation", partID)
+	}
+}
+
+// TestBalanceEagerly_RetriesFailedProactivePush guards that a proactive
+// primary-to-backup push that failed is not recorded as done for the installed
+// table: the next invocation pushes again, and only a successful push ends the
+// retries for that table.
+func TestBalanceEagerly_RetriesFailedProactivePush(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	c1 := testutil.NewConfig()
+	c1.ReplicaCount = 2
+	c1.EnableProactiveSyncOnJoin = true
+	e1 := newTestEnvironment(c1)
+	b1 := cluster.addNode(e1)
+
+	c2 := testutil.NewConfig()
+	c2.ReplicaCount = 2
+	c2.EnableProactiveSyncOnJoin = true
+	b2 := cluster.addNode(newTestEnvironment(c2))
+	require.NoError(t, testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	}))
+
+	// Partitions this member owns and the joiner replicates: the proactive
+	// push targets exactly these.
+	primary := e1.Get("primary").(*partitions.Partitions)
+	backup := e1.Get("backup").(*partitions.Partitions)
+	var replicated []uint64
+	require.Eventually(t, func() bool {
+		replicated = replicated[:0]
+		for _, partID := range partitionsOwnedBy(c1, primary, b1.rt.This()) {
+			for _, owner := range backup.PartitionByID(partID).Owners() {
+				if owner.CompareByName(b2.rt.This()) {
+					replicated = append(replicated, partID)
+					break
+				}
+			}
+		}
+
+		return len(replicated) > 0
+	}, 10*time.Second, 50*time.Millisecond)
+
+	frags := make(map[uint64]*failingFragment, len(replicated))
+	for _, partID := range replicated {
+		frag := newFailingFragment(1)
+		primary.PartitionByID(partID).Map().Store("dmap.test-data", frag)
+		frags[partID] = frag
+	}
+
+	b1.BalanceEagerly()
+	for partID := range frags {
+		require.Zero(t, b1.pushedSignature[partID], "a failed push must not be recorded as done")
+	}
+	for partID, frag := range frags {
+		require.Equal(t, 1, frag.attempts(), "partition %d", partID)
+	}
+
+	b1.BalanceEagerly()
+	signature, _ := b1.rt.Version()
+	for partID := range frags {
+		require.Equal(t, signature, b1.pushedSignature[partID], "a successful push is recorded for the installed table")
+	}
+	for partID, frag := range frags {
+		require.Equal(t, 2, frag.attempts(), "partition %d", partID)
+	}
+
+	b1.BalanceEagerly()
+	for partID, frag := range frags {
+		require.Equal(t, 2, frag.attempts(), "partition %d must not be pushed again for the same table", partID)
+	}
+}
+
+// Replicate counts an attempt like MoveWithTargetKind and always keeps the
+// data, as a copy does.
+func (f *failingFragment) Replicate(_ *partitions.Partition, _ string, _ []discovery.Member, _ partitions.Kind) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls++
+	f.replications++
+	if f.calls <= f.failures {
+		return errors.New("replicate failed")
+	}
+
+	return nil
+}
+
+// restoreFixture starts two members, the second replicating the first, with
+// re-replication configured by flag and delay, and returns both balancers,
+// the first member's environment and the partitions the second member owns
+// as primary while the first holds their backup copies. Each of those backup
+// copies is a failingFragment so the test can count restore attempts.
+func restoreFixture(t *testing.T, cluster *mockCluster, proactive bool, delay time.Duration) (b1, b2 *Balancer, e1, e2 *environment.Environment, frags map[uint64]*failingFragment) {
+	t.Helper()
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.EnableProactiveSyncOnJoin = proactive
+		c.ReplicaRestoreDelay = delay
+		return c
+	}
+
+	e1 = newTestEnvironment(newConfig())
+	b1 = cluster.addNode(e1)
+	e2 = newTestEnvironment(newConfig())
+	b2 = cluster.addNode(e2)
+	require.NoError(t, testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	}))
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get("primary").(*partitions.Partitions)
+	backup := e1.Get("backup").(*partitions.Partitions)
+
+	var candidates []uint64
+	require.Eventually(t, func() bool {
+		candidates = candidates[:0]
+		for _, partID := range partitionsOwnedBy(c, primary, b2.rt.This()) {
+			if primary.PartitionByID(partID).OwnerCount() != 1 {
+				continue
+			}
+
+			for _, owner := range backup.PartitionByID(partID).Owners() {
+				if owner.CompareByName(b1.rt.This()) {
+					candidates = append(candidates, partID)
+					break
+				}
+			}
+		}
+
+		return len(candidates) > 0
+	}, 10*time.Second, 50*time.Millisecond)
+
+	frags = make(map[uint64]*failingFragment, len(candidates))
+	for _, partID := range candidates {
+		frag := newFailingFragment(0)
+		backup.PartitionByID(partID).Map().Store("dmap.test-data", frag)
+		frags[partID] = frag
+	}
+
+	return b1, b2, e1, e2, frags
+}
+
+// scheduleDeparture makes b see the primary owner of every partition in
+// frags as gone: one cycle records the current owners, the recorded owner is
+// replaced with an ID no member has, and the next cycle schedules the restore
+// of those partitions, due ReplicaRestoreDelay later.
+func scheduleDeparture(b *Balancer, frags map[uint64]*failingFragment) {
+	b.triggerBalancer()
+	for partID := range frags {
+		b.lastOwners[partID] = []uint64{0xDEAD}
+	}
+
+	b.triggerBalancer()
+}
+
+// TestRestorePrimaryCopies_RestoresAfterOwnerDeparture guards the restore
+// itself: once the primary owner of a partition is gone and the delay has
+// passed, the member holding its backup copy copies it to the new owner,
+// keeps its own copy, leaves the schedule and does not copy it again.
+func TestRestorePrimaryCopies_RestoresAfterOwnerDeparture(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, _, _, frags := restoreFixture(t, cluster, true, time.Millisecond)
+	scheduleDeparture(b1, frags)
+	for partID := range frags {
+		require.NotZero(t, b1.restoreDueAt[partID], "partition %d must be scheduled", partID)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Equal(t, 1, frag.replicated(), "partition %d must be restored", partID)
+		require.Equal(t, 1, frag.Stats().Length, "the backup copy must be kept")
+		require.Zero(t, b1.restoreDueAt[partID], "a restored partition leaves the schedule")
+	}
+
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Equal(t, 1, frag.replicated(), "partition %d must not be restored twice", partID)
+	}
+}
+
+// TestRestorePrimaryCopies_WaitsForDelay guards the delay: a scheduled
+// partition is not restored before ReplicaRestoreDelay has passed since its
+// owner departed.
+func TestRestorePrimaryCopies_WaitsForDelay(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, _, _, frags := restoreFixture(t, cluster, true, time.Hour)
+	scheduleDeparture(b1, frags)
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Zero(t, frag.replicated(), "partition %d must not be restored before the delay", partID)
+		require.NotZero(t, b1.restoreDueAt[partID], "the schedule is kept")
+	}
+}
+
+// TestRestorePrimaryCopies_DisabledWithoutProactiveSync guards the opt-in:
+// with EnableProactiveSyncOnJoin off, owners are not tracked, nothing is
+// scheduled and the default lazy repair stays.
+func TestRestorePrimaryCopies_DisabledWithoutProactiveSync(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, _, _, frags := restoreFixture(t, cluster, false, time.Millisecond)
+	scheduleDeparture(b1, frags)
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Zero(t, frag.replicated(), "partition %d must not be restored with the flag off", partID)
+		require.Zero(t, b1.restoreDueAt[partID])
+	}
+}
+
+// TestRestorePrimaryCopies_OwnerChangeBetweenLiveMembersRestoresNothing
+// guards that a partition whose previous owner drained its copy and is still
+// a member is left to primaryCopies: the restore is scheduled, since the
+// balancer cannot tell a drain from a death when the owner list changes, and
+// dropped when due because the owner is still in the cluster.
+func TestRestorePrimaryCopies_OwnerChangeBetweenLiveMembersRestoresNothing(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, _, _, frags := restoreFixture(t, cluster, true, time.Millisecond)
+	b1.triggerBalancer()
+	for partID := range frags {
+		// As far as the balancer can tell, this live member drained the
+		// partition to the current owner.
+		b1.lastOwners[partID] = []uint64{b1.rt.This().ID}
+	}
+
+	b1.triggerBalancer()
+	for partID := range frags {
+		require.NotZero(t, b1.restoreDueAt[partID], "partition %d is scheduled until the owner's fate is known", partID)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Zero(t, b1.restoreDueAt[partID], "partition %d: its previous owner is alive", partID)
+		require.Zero(t, frag.replicated())
+	}
+}
+
+// TestRestorePrimaryCopies_DepartureReplacesPendingDrain guards that a real
+// departure scheduled while a drain by a live member is still pending is not
+// hidden by it: the pending schedule is replaced and the restore happens.
+func TestRestorePrimaryCopies_DepartureReplacesPendingDrain(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, _, _, frags := restoreFixture(t, cluster, true, time.Hour)
+	b1.triggerBalancer()
+	for partID := range frags {
+		b1.lastOwners[partID] = []uint64{b1.rt.This().ID}
+	}
+
+	b1.triggerBalancer()
+	for partID := range frags {
+		require.Equal(t, b1.rt.This().ID, b1.departedOwner[partID], "partition %d: the drain is pending", partID)
+	}
+
+	// The owner list changes again, this time because the owner died.
+	b1.config.ReplicaRestoreDelay = time.Millisecond
+	for partID := range frags {
+		b1.lastOwners[partID] = []uint64{0xDEAD}
+	}
+
+	b1.triggerBalancer()
+	for partID := range frags {
+		require.Equal(t, uint64(0xDEAD), b1.departedOwner[partID], "partition %d: the departure replaces the drain", partID)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Equal(t, 1, frag.replicated(), "partition %d must be restored", partID)
+		require.Zero(t, b1.restoreDueAt[partID])
+	}
+}
+
+// TestRestorePrimaryCopies_FailedRestoreIsRetried guards that a restore
+// whose copy failed stays scheduled and is attempted again by the next cycle.
+func TestRestorePrimaryCopies_FailedRestoreIsRetried(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, e1, _, frags := restoreFixture(t, cluster, true, time.Millisecond)
+	backup := e1.Get("backup").(*partitions.Partitions)
+	for partID := range frags {
+		frag := newFailingFragment(1)
+		backup.PartitionByID(partID).Map().Store("dmap.test-data", frag)
+		frags[partID] = frag
+	}
+
+	scheduleDeparture(b1, frags)
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Equal(t, 1, frag.replicated(), "partition %d", partID)
+		require.NotZero(t, b1.restoreDueAt[partID], "a failed restore stays scheduled")
+	}
+
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Equal(t, 2, frag.replicated(), "partition %d must be attempted again", partID)
+		require.Zero(t, b1.restoreDueAt[partID])
+	}
+}
+
+// TestRestorePrimaryCopies_SkipsPartitionsOwnedByThisMember checks that a
+// backup copy of a partition this member owns as primary is neither restored
+// anywhere nor relocated: promoteBackupCopies merges it, and until that
+// succeeds the copy stays where it is.
+func TestRestorePrimaryCopies_SkipsPartitionsOwnedByThisMember(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, e1, _, _ := restoreFixture(t, cluster, true, time.Millisecond)
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get("primary").(*partitions.Partitions)
+	backup := e1.Get("backup").(*partitions.Partitions)
+	own := make(map[uint64]*failingFragment)
+	for _, partID := range partitionsOwnedBy(c, primary, b1.rt.This()) {
+		if primary.PartitionByID(partID).OwnerCount() != 1 {
+			continue
+		}
+
+		// The promotion fails in the two cycles scheduleDeparture runs, so
+		// the copy is still in the backup fragment when the rest of each
+		// cycle runs.
+		frag := newFailingFragment(2)
+		backup.PartitionByID(partID).Map().Store("dmap.own-data", frag)
+		own[partID] = frag
+	}
+	require.NotEmpty(t, own)
+
+	scheduleDeparture(b1, own)
+
+	// The failed promotions are the only attempts: backupCopies must not
+	// move the sole copy off this member.
+	for partID, frag := range own {
+		require.Equal(t, 2, frag.attempts(), "partition %d: only the promotion is attempted", partID)
+		require.Equal(t, 1, frag.Stats().Length, "partition %d: the copy stays on this member", partID)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range own {
+		require.Zero(t, frag.replicated(), "partition %d is owned by this member", partID)
+		require.Zero(t, b1.restoreDueAt[partID], "an owned partition leaves the schedule")
+		require.Zero(t, frag.Stats().Length, "the copy is promoted")
+	}
+}
+
+// TestRestorePrimaryCopies_SkipsEmptyFragments checks that an empty fragment
+// in a restored partition does not stop the restore of the fragments after
+// it, and is not copied itself.
+func TestRestorePrimaryCopies_SkipsEmptyFragments(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1, _, e1, _, frags := restoreFixture(t, cluster, true, time.Millisecond)
+
+	backup := e1.Get("backup").(*partitions.Partitions)
+	empties := make(map[uint64]*mockfragment.MockFragment, len(frags))
+	for partID := range frags {
+		empty := mockfragment.New()
+		// Stored under a name that sorts before the filled fragment so the
+		// empty one is met first when the partition map is ranged.
+		backup.PartitionByID(partID).Map().Store("dmap.a-empty", empty)
+		empties[partID] = empty
+	}
+
+	scheduleDeparture(b1, frags)
+	time.Sleep(5 * time.Millisecond)
+	b1.triggerBalancer()
+
+	for partID, frag := range frags {
+		require.Equal(t, 1, frag.replicated(), "partition %d must still be restored", partID)
+		require.Zero(t, b1.restoreDueAt[partID])
+		require.Empty(t, empties[partID].Result(), "an empty fragment is not copied")
+	}
+}
+
+// TestPushPrimaryToBackups_TargetsCurrentReplicaOwnersOnly guards that the
+// proactive push goes to the current replica owners, the tail of the owner
+// list, and not to a previous replica owner that is still draining.
+func TestPushPrimaryToBackups_TargetsCurrentReplicaOwnersOnly(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.EnableProactiveSyncOnJoin = true
+		return c
+	}
+
+	e1 := newTestEnvironment(newConfig())
+	b1 := cluster.addNode(e1)
+	b2 := cluster.addNode(newTestEnvironment(newConfig()))
+	require.NoError(t, testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	}))
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get("primary").(*partitions.Partitions)
+	backup := e1.Get("backup").(*partitions.Partitions)
+	var target uint64
+	require.Eventually(t, func() bool {
+		for _, partID := range partitionsOwnedBy(c, primary, b1.rt.This()) {
+			owners := backup.PartitionByID(partID).Owners()
+			if len(owners) == 1 && owners[0].CompareByName(b2.rt.This()) {
+				target = partID
+				return true
+			}
+		}
+
+		return false
+	}, 10*time.Second, 50*time.Millisecond)
+
+	frag := mockfragment.New()
+	frag.Fill()
+	primary.PartitionByID(target).Map().Store("dmap.test-data", frag)
+
+	staleCfg := testutil.NewConfig()
+	staleCfg.MemberlistConfig.Name = "127.0.0.1:1"
+	stale := discovery.NewMember(staleCfg)
+	backup.PartitionByID(target).SetOwners([]discovery.Member{stale, b2.rt.This()})
+
+	b1.triggerBalancer()
+
+	result := frag.Result()[partitions.BACKUP][target]
+	require.Len(t, result.Owners, 1, "only the current replica owner is a target")
+	require.True(t, result.Owners[0].CompareByName(b2.rt.This()))
+	signature, _ := b1.rt.Version()
+	require.Equal(t, signature, b1.pushedSignature[target])
+}
+
+// TestPushPrimaryToBackups_PushesOncePartitionHoldsData guards that the
+// proactive push is per partition and tick-driven: a partition that holds
+// data is pushed by the first cycle after a table is installed and marked
+// done; one that is still empty then, because its data is being moved in, is
+// left unmarked, so the periodic cycle that finds it filled pushes it, once.
+func TestPushPrimaryToBackups_PushesOncePartitionHoldsData(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		c.EnableProactiveSyncOnJoin = true
+		return c
+	}
+
+	e1 := newTestEnvironment(newConfig())
+	b1 := cluster.addNode(e1)
+	b2 := cluster.addNode(newTestEnvironment(newConfig()))
+	require.NoError(t, testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	}))
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get("primary").(*partitions.Partitions)
+	backup := e1.Get("backup").(*partitions.Partitions)
+	var replicated []uint64
+	require.Eventually(t, func() bool {
+		replicated = replicated[:0]
+		for _, partID := range partitionsOwnedBy(c, primary, b1.rt.This()) {
+			for _, owner := range backup.PartitionByID(partID).Owners() {
+				if owner.CompareByName(b2.rt.This()) {
+					replicated = append(replicated, partID)
+					break
+				}
+			}
+		}
+
+		return len(replicated) >= 2
+	}, 10*time.Second, 50*time.Millisecond)
+
+	filled, late := replicated[0], replicated[1]
+	first := newFailingFragment(0)
+	primary.PartitionByID(filled).Map().Store("dmap.test-data", first)
+	signature, _ := b1.rt.Version()
+
+	// The install-time cycle pushes the partition that holds data and leaves
+	// the empty one unmarked.
+	b1.BalanceEagerly()
+	require.Equal(t, 1, first.attempts())
+	require.Equal(t, signature, b1.pushedSignature[filled])
+	require.Zero(t, b1.pushedSignature[late])
+
+	// Data arrives later; the periodic cycle pushes it, and only it.
+	second := newFailingFragment(0)
+	primary.PartitionByID(late).Map().Store("dmap.test-data", second)
+	b1.triggerBalancer()
+	require.Equal(t, 1, second.attempts())
+	require.Equal(t, signature, b1.pushedSignature[late])
+	require.Equal(t, 1, first.attempts(), "a pushed partition is not pushed again for the same table")
+
+	b1.triggerBalancer()
+	require.Equal(t, 1, first.attempts())
+	require.Equal(t, 1, second.attempts())
+}
+
+// TestRunBalance_SkipsEmptyFragmentsInMove checks that an empty fragment in a
+// partition handed to another member is skipped while the filled fragments
+// of the same partition are moved.
+func TestRunBalance_SkipsEmptyFragmentsInMove(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	e1 := newTestEnvironment(nil)
+	b1 := cluster.addNode(e1)
+
+	c := e1.Get("config").(*config.Config)
+	primary := e1.Get("primary").(*partitions.Partitions)
+	empties := make(map[uint64]*mockfragment.MockFragment, c.PartitionCount)
+	for partID := range c.PartitionCount {
+		frag := mockfragment.New()
+		frag.Fill()
+		primary.PartitionByID(partID).Map().Store("dmap.test-data", frag)
+
+		empty := mockfragment.New()
+		primary.PartitionByID(partID).Map().Store("dmap.a-empty", empty)
+		empties[partID] = empty
+	}
+
+	b2 := cluster.addNode(newTestEnvironment(nil))
+	require.NoError(t, testutil.TryWithInterval(50, 100*time.Millisecond, func() error {
+		if !b2.rt.IsBootstrapped() {
+			return errors.New("the second node cannot be bootstrapped")
+		}
+
+		return nil
+	}))
+
+	require.Eventually(t, func() bool {
+		return len(partitionsOwnedBy(c, primary, b2.rt.This())) > 0
+	}, 10*time.Second, 50*time.Millisecond)
+
+	b1.triggerBalancer()
+
+	for _, partID := range partitionsOwnedBy(c, primary, b2.rt.This()) {
+		require.Zero(t, primary.PartitionByID(partID).Length(), "the filled fragment must have been moved")
+		require.Empty(t, empties[partID].Result(), "an empty fragment is not moved")
+	}
+}
+
+// TestTryAckRebalance_StaleAckReportsSupersededEpoch checks that an ack the
+// coordinator reports as stale makes the cycle re-run against the current
+// table instead of recording the generation as acked.
+func TestTryAckRebalance_StaleAckReportsSupersededEpoch(t *testing.T) {
+	cluster := newMockCluster(t)
+	cluster.noLoop = true
+	defer cluster.shutdown()
+
+	b1 := cluster.addNode(newTestEnvironment(nil))
+	sign, generation := b1.rt.Version()
+	acked := b1.lastAckedGeneration
+
+	require.True(t, b1.tryAckRebalance(sign+1, generation+1), "an epoch the coordinator does not know is stale")
+	require.Equal(t, acked, b1.lastAckedGeneration, "a stale ack records nothing")
 }

@@ -32,31 +32,42 @@ var (
 )
 
 // bootstrapCoordinator prepares the very first routing table and bootstraps the coordinator node.
-func (r *RoutingTable) bootstrapCoordinator() error {
-	r.Lock()
-	defer r.Unlock()
+func (x *RoutingTable) bootstrapCoordinator() error {
+	x.Lock()
+	defer x.Unlock()
 
 	// See updateRoutingWithReason for why the membership is snapshotted
 	// before the table is computed.
-	members := r.memberNames()
-	r.fillRoutingTable()
-	data, signature, err := r.buildRoutingTablePayload()
+	memberIDs, members := x.memberSnapshot()
+	x.fillRoutingTable()
+	data, signature, err := x.buildRoutingTablePayload()
 	if err != nil {
 		return err
 	}
-	reports, err := r.updateRoutingTableOnCluster(data)
+	x.tableSequence++
+	sequence := x.tableSequence
+
+	// Committed before the fan-out, see updateRoutingWithReason.
+	previous, _ := x.committedPayload.Load().([]byte)
+	x.committedPayload.Store(data)
+	_, unreachable, err := x.updateRoutingTableOnCluster(data, sequence)
 	if err != nil {
+		if previous != nil {
+			x.committedPayload.Store(previous)
+		}
+
 		return err
 	}
-	r.committedPayload.Store(data)
-	updated := make([]uint64, 0, len(reports))
-	for member := range reports {
-		updated = append(updated, member.ID)
-	}
-	r.startRebalanceEpoch(signature, rebalanceReasonBootstrap, "", updated, members)
+
+	x.startRebalanceEpoch(signature, rebalanceReasonBootstrap, "", memberIDs, members)
 	// The coordinator bootstraps itself.
-	r.markBootstrapped()
-	r.log.V(2).Printf("[INFO] The cluster coordinator has been bootstrapped")
+	x.markBootstrapped()
+	x.log.V(2).Printf("[INFO] The cluster coordinator has been bootstrapped")
+
+	if len(unreachable) > 0 {
+		x.spawn(func() { x.retryRoutingTablePush(data, sequence, signature, unreachable) })
+	}
+
 	return nil
 }
 

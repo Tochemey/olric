@@ -125,6 +125,12 @@ const (
 	// when a node detects it is in a minority partition.
 	DefaultRejoinInterval = 5 * time.Second
 
+	// DefaultReplicaRestoreDelay is the time the survivors wait after a
+	// departure before they re-create the departed member's primary copies
+	// from their backups, long enough for a rolling restart to bring the
+	// member back first.
+	DefaultReplicaRestoreDelay = time.Minute
+
 	// MinimumMemberCountQuorum denotes minimum required count of members to form
 	// a cluster.
 	MinimumMemberCountQuorum = 1
@@ -259,6 +265,19 @@ type Config struct {
 	// but never deliver it and owners that cannot be reached. Default 15s.
 	InitialSyncEmptyPartitionTimeout time.Duration
 
+	// ReplicaRestoreDelay is how long the survivors wait, after the primary
+	// owner of a partition left the cluster, before they re-create its primary
+	// copy from their backup copies on the new owner. The delay is counted per
+	// partition from the departure, so a table change in the meantime does
+	// not move it. A member that leaves and comes back within the delay, as
+	// in a rolling restart, owns its partitions again by then and receives
+	// them from their previous owner, so nothing is restored for it. The
+	// delay is checked on the balancer tick, so a value of a millisecond
+	// restores on the first tick after the departure. It applies only when
+	// EnableProactiveSyncOnJoin is set and ReplicaCount is greater than 1, and
+	// must not be negative. Default 1m.
+	ReplicaRestoreDelay time.Duration
+
 	// Default value is SyncReplicationMode.
 	ReplicationMode int
 
@@ -380,6 +399,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("cannot specify WriteQuorum greater than ReplicaCount")
 	}
 
+	if c.ReplicaRestoreDelay < 0 {
+		return fmt.Errorf("cannot specify ReplicaRestoreDelay less than zero")
+	}
+
 	if err := c.validateMemberlistConfig(); err != nil {
 		return err
 	}
@@ -480,117 +503,123 @@ func (c *Config) validateEvictionBudgets(policy EvictionPolicy, maxInuse, maxKey
 }
 
 // Sanitize sets default values to empty configuration variables, if it's possible.
-func (c *Config) Sanitize() error {
-	if c.LogOutput == nil {
-		c.LogOutput = os.Stderr
+func (x *Config) Sanitize() error {
+	if x.LogOutput == nil {
+		x.LogOutput = os.Stderr
 	}
 
-	if c.LogLevel == "" {
-		c.LogLevel = DefaultLogLevel
+	if x.LogLevel == "" {
+		x.LogLevel = DefaultLogLevel
 	}
 
-	if c.LogVerbosity <= 0 {
-		c.LogVerbosity = DefaultLogVerbosity
+	if x.LogVerbosity <= 0 {
+		x.LogVerbosity = DefaultLogVerbosity
 	}
 
-	if c.Logger == nil {
-		c.Logger = log.New(c.LogOutput, "", log.LstdFlags)
+	if x.Logger == nil {
+		x.Logger = log.New(x.LogOutput, "", log.LstdFlags)
 	} else {
-		c.Logger.SetOutput(c.LogOutput)
+		x.Logger.SetOutput(x.LogOutput)
 	}
 
-	if c.Hasher == nil {
-		c.Hasher = hasher.NewDefaultHasher()
+	if x.Hasher == nil {
+		x.Hasher = hasher.NewDefaultHasher()
 	}
 
-	if c.BindAddr == "" {
+	if x.BindAddr == "" {
 		name, err := os.Hostname()
 		if err != nil {
 			return fmt.Errorf("failed to read hostname from kernel: %w", err)
 		}
-		c.BindAddr = name
+		x.BindAddr = name
 	}
 	// We currently don't support ephemeral port selection. Because it needs
 	// improved flow control in server initialization stage.
-	if c.BindPort == 0 {
-		c.BindPort = DefaultPort
+	if x.BindPort == 0 {
+		x.BindPort = DefaultPort
 	}
 
-	if c.LoadFactor == 0 {
-		c.LoadFactor = DefaultLoadFactor
+	if x.LoadFactor == 0 {
+		x.LoadFactor = DefaultLoadFactor
 	}
-	if c.PartitionCount == 0 {
-		c.PartitionCount = DefaultPartitionCount
+	if x.PartitionCount == 0 {
+		x.PartitionCount = DefaultPartitionCount
 	}
-	if c.ReplicaCount == 0 {
-		c.ReplicaCount = MinimumReplicaCount
-	}
-
-	if c.ReadQuorum == 0 {
-		c.ReadQuorum = DefaultReadQuorum
-	}
-	if c.WriteQuorum == 0 {
-		c.WriteQuorum = DefaultWriteQuorum
+	if x.ReplicaCount == 0 {
+		x.ReplicaCount = MinimumReplicaCount
 	}
 
-	if c.MemberCountQuorum == 0 {
-		c.MemberCountQuorum = DefaultMemberCountQuorum
+	if x.ReadQuorum == 0 {
+		x.ReadQuorum = DefaultReadQuorum
+	}
+	if x.WriteQuorum == 0 {
+		x.WriteQuorum = DefaultWriteQuorum
 	}
 
-	if c.MemberlistConfig == nil {
+	if x.MemberCountQuorum == 0 {
+		x.MemberCountQuorum = DefaultMemberCountQuorum
+	}
+
+	if x.MemberlistConfig == nil {
 		m := memberlist.DefaultLocalConfig()
 		// hostname is assigned to memberlist.BindAddr
 		// memberlist.Name is assigned by olric.New
 		m.BindPort = DefaultDiscoveryPort
 		m.AdvertisePort = DefaultDiscoveryPort
-		c.MemberlistConfig = m
+		x.MemberlistConfig = m
 	}
 
-	if c.InitialSyncEmptyPartitionTimeout == 0 {
-		c.InitialSyncEmptyPartitionTimeout = 15 * time.Second
+	if x.InitialSyncEmptyPartitionTimeout == 0 {
+		x.InitialSyncEmptyPartitionTimeout = 15 * time.Second
+	}
+	if x.ReplicaRestoreDelay == 0 {
+		x.ReplicaRestoreDelay = DefaultReplicaRestoreDelay
 	}
 
-	if c.BootstrapTimeout == 0 {
-		c.BootstrapTimeout = DefaultBootstrapTimeout
+	if x.BootstrapTimeout == 0 {
+		x.BootstrapTimeout = DefaultBootstrapTimeout
 	}
-	if c.JoinRetryInterval == 0 {
-		c.JoinRetryInterval = DefaultJoinRetryInterval
-	}
-	if c.MaxJoinAttempts == 0 {
-		c.MaxJoinAttempts = DefaultMaxJoinAttempts
-	}
-	if c.RejoinInterval == 0 {
-		c.RejoinInterval = DefaultRejoinInterval
-	}
-	if c.LeaveTimeout == 0 {
-		c.LeaveTimeout = DefaultLeaveTimeout
+	if x.JoinRetryInterval == 0 {
+		x.JoinRetryInterval = DefaultJoinRetryInterval
 	}
 
-	if c.RoutingTablePushInterval == 0 {
-		c.RoutingTablePushInterval = DefaultRoutingTablePushInterval
+	if x.MaxJoinAttempts == 0 {
+		x.MaxJoinAttempts = DefaultMaxJoinAttempts
 	}
 
-	if c.TriggerBalancerInterval == 0 {
-		c.TriggerBalancerInterval = DefaultTriggerBalancerInterval
+	if x.RejoinInterval == 0 {
+		x.RejoinInterval = DefaultRejoinInterval
 	}
 
-	if c.KeepAlivePeriod == 0 {
-		c.KeepAlivePeriod = DefaultKeepAlivePeriod
+	if x.LeaveTimeout == 0 {
+		x.LeaveTimeout = DefaultLeaveTimeout
 	}
 
-	if c.Client == nil {
-		c.Client = NewClient()
+	if x.RoutingTablePushInterval == 0 {
+		x.RoutingTablePushInterval = DefaultRoutingTablePushInterval
 	}
 
-	if c.DMaps == nil {
-		c.DMaps = &DMaps{}
+	if x.TriggerBalancerInterval == 0 {
+		x.TriggerBalancerInterval = DefaultTriggerBalancerInterval
 	}
 
-	if err := c.Client.Sanitize(); err != nil {
+	if x.KeepAlivePeriod == 0 {
+		x.KeepAlivePeriod = DefaultKeepAlivePeriod
+	}
+
+	if x.Client == nil {
+		x.Client = NewClient()
+	}
+
+	if x.DMaps == nil {
+		x.DMaps = &DMaps{}
+	}
+
+	if err := x.Client.Sanitize(); err != nil {
 		return fmt.Errorf("failed to sanitize TCP client configuration: %w", err)
 	}
 
-	if err := c.DMaps.Sanitize(); err != nil {
+	if err := x.DMaps.Sanitize(); err != nil {
 		return fmt.Errorf("failed to sanitize DMap configuration: %w", err)
 	}
 

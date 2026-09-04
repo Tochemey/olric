@@ -21,6 +21,7 @@ import (
 	"net"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/kapetan-io/tackle/autotls"
 	"github.com/stretchr/testify/require"
@@ -115,6 +116,11 @@ func TestConfig_Validate_Errors(t *testing.T) {
 			name:        "read quorum non positive",
 			mutate:      func(c *Config) { c.ReadQuorum = 0 },
 			errContains: "ReadQuorum less than or equal to zero",
+		},
+		{
+			name:        "replica restore delay negative",
+			mutate:      func(c *Config) { c.ReplicaRestoreDelay = -time.Second },
+			errContains: "ReplicaRestoreDelay less than zero",
 		},
 		{
 			name:        "read quorum greater than replica count",

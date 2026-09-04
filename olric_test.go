@@ -21,12 +21,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/hashicorp/memberlist"
 	"github.com/stretchr/testify/require"
@@ -622,4 +629,565 @@ func TestOlric_NodeLeftEpochCompletes_WithoutWaitingForEmptyPartitions(t *testin
 		signature := db1.rt.Signature()
 		return signature != initial && completedFor(signature)
 	}, 5*time.Second, 100*time.Millisecond, "node-left epoch must complete without waiting for empty partitions")
+}
+
+// startMemberAt starts a member of the cluster on the given RESP and
+// memberlist ports, so a member that left can come back under its own name,
+// as a restarted process does. Everything else follows newTestWithConfig.
+func (cl *testCluster) startMemberAt(t *testing.T, c *config.Config, bindAddr string, bindPort, memberlistPort int) *Olric {
+	t.Helper()
+
+	cl.mtx.Lock()
+	defer cl.mtx.Unlock()
+
+	for _, member := range cl.members {
+		if member.rt.Discovery().LocalNode().Address() == net.JoinHostPort(bindAddr, strconv.Itoa(memberlistPort)) {
+			continue
+		}
+
+		c.Peers = append(c.Peers, member.rt.Discovery().LocalNode().Address())
+	}
+
+	c.MemberlistConfig.BindPort = memberlistPort
+	c.BindAddr = bindAddr
+	c.BindPort = bindPort
+	require.NoError(t, c.Sanitize())
+	require.NoError(t, c.Validate())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c.Started = func() {
+		cancel()
+	}
+
+	db, err := New(c)
+	require.NoError(t, err)
+
+	go func() {
+		if err := db.Start(); err != nil {
+			panic(fmt.Sprintf("Failed to run Olric: %v", err))
+		}
+	}()
+
+	select {
+	case <-time.After(30 * time.Second):
+		t.Fatalf("Olric cannot be restarted in thirty seconds")
+	case <-ctx.Done():
+	}
+
+	cl.members[db.rt.This().String()] = db
+	return db
+}
+
+// primaryTransfers subscribes to the cluster events of member and returns a
+// function counting the fragment-migration events received after since that
+// carried a primary copy to another member: a restore or an ownership move,
+// as opposed to a backup push or a local promotion.
+func primaryTransfers(t *testing.T, member *Olric) func(since time.Time) int {
+	t.Helper()
+
+	ctx := context.Background()
+	ps, err := member.NewEmbeddedClient().NewPubSub(ToAddress(member.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	t.Cleanup(func() {
+		require.NoError(t, rp.Close())
+	})
+
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	var mtx sync.Mutex
+	var seen []time.Time
+	var details []string
+	ch := rp.Channel()
+
+	go func() {
+		for msg := range ch {
+			if !strings.Contains(msg.Payload, events.KindFragmentMigrationEvent) {
+				continue
+			}
+
+			var ev events.FragmentMigrationEvent
+			if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {
+				continue
+			}
+
+			if ev.IsBackup || ev.Target == ev.Source {
+				continue
+			}
+
+			mtx.Lock()
+			seen = append(seen, time.Now())
+			details = append(details, fmt.Sprintf("%s -> %s partition %d", ev.Source, ev.Target, ev.PartitionID))
+			mtx.Unlock()
+		}
+	}()
+
+	return func(since time.Time) int {
+		mtx.Lock()
+		defer mtx.Unlock()
+
+		count := 0
+		for i, at := range seen {
+			if at.After(since) {
+				count++
+				t.Logf("primary transfer after %s: %s", since.Format(time.StampMilli), details[i])
+			}
+		}
+
+		return count
+	}
+}
+
+// copiesOf reports how many of members hold data for partition partID in
+// either copy, and whether the partition's primary owner, in view's routing
+// view, holds a primary copy.
+func copiesOf(members []*Olric, view *Olric, partID uint64) (copies int, primaryHeld bool) {
+	owned := view.primary.PartitionByID(partID)
+	for _, member := range members {
+		primary := member.primary.PartitionByID(partID).Length()
+		backup := member.backup.PartitionByID(partID).Length()
+		if primary > 0 || backup > 0 {
+			copies++
+		}
+
+		if owned.OwnerCount() > 0 && owned.Owner().CompareByName(member.rt.This()) && primary > 0 {
+			primaryHeld = true
+		}
+	}
+
+	return copies, primaryHeld
+}
+
+// newDepartureConfig is the configuration of the departure tests: two copies
+// per partition, proactive sync on, events on, a fast balancer and an escape
+// far above the assertion windows, so any ack that waits on it fails the test.
+func newDepartureConfig() *config.Config {
+	c := testutil.NewConfig()
+	c.ReplicaCount = 2
+	c.WriteQuorum = 1
+	c.ReadQuorum = 1
+	c.EnableClusterEventsChannel = true
+	c.EnableProactiveSyncOnJoin = true
+	c.InitialSyncEmptyPartitionTimeout = emptyPartitionsEscape
+	c.TriggerBalancerInterval = 100 * time.Millisecond
+	return c
+}
+
+// TestOlric_NodeLeftEpochCompletes_WithDataInBackups guards that a departure
+// converges without waiting on the escape when the departed member's data is
+// held in the survivors' backup copies: a new primary owner that only has a
+// backup copy elsewhere to receive from is not awaited, because that copy is
+// restored off the convergence path.
+func TestOlric_NodeLeftEpochCompletes_WithDataInBackups(t *testing.T) {
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newDepartureConfig())
+	completedFor, _ := completedEpochs(t, db1)
+	db2 := cluster.addMemberWithConfig(t, newDepartureConfig())
+	db3 := cluster.addMemberWithConfig(t, newDepartureConfig())
+
+	initial := waitForSettledEpoch(t, 5*time.Second, completedFor, db1, db2, db3)
+
+	ctx := context.Background()
+	dm, err := db1.NewEmbeddedClient().NewDMap("mydmap")
+	require.NoError(t, err)
+	for i := range 300 {
+		require.NoError(t, dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i)))
+	}
+
+	require.NoError(t, db3.Shutdown(ctx))
+
+	require.Eventually(t, func() bool {
+		signature := db1.rt.Signature()
+		return signature != initial && completedFor(signature)
+	}, 5*time.Second, 100*time.Millisecond, "the node-left epoch must complete without waiting on the escape")
+
+	for i := range 300 {
+		gr, err := dm.Get(ctx, testutil.ToKey(i))
+		require.NoError(t, err)
+		value, err := gr.Byte()
+		require.NoError(t, err)
+		require.Equal(t, testutil.ToVal(i), value)
+	}
+}
+
+// TestOlric_RestoresPrimaryCopiesAfterDeparture guards the delayed restore end
+// to end: once ReplicaRestoreDelay has passed after a departure, every
+// partition that holds data has a primary copy on its owner and ReplicaCount
+// copies in total, without a write having touched it.
+func TestOlric_RestoresPrimaryCopiesAfterDeparture(t *testing.T) {
+	newConfig := func() *config.Config {
+		c := newDepartureConfig()
+		c.ReplicaRestoreDelay = 500 * time.Millisecond
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	completedFor, _ := completedEpochs(t, db1)
+	db2 := cluster.addMemberWithConfig(t, newConfig())
+	db3 := cluster.addMemberWithConfig(t, newConfig())
+
+	waitForSettledEpoch(t, 5*time.Second, completedFor, db1, db2, db3)
+
+	ctx := context.Background()
+	dm, err := db1.NewEmbeddedClient().NewDMap("mydmap")
+	require.NoError(t, err)
+	for i := range 300 {
+		require.NoError(t, dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i)))
+	}
+
+	require.NoError(t, db3.Shutdown(ctx))
+
+	survivors := []*Olric{db1, db2}
+	require.Eventually(t, func() bool {
+		for partID := range db1.config.PartitionCount {
+			copies, primaryHeld := copiesOf(survivors, db1, partID)
+			if copies == 0 {
+				continue
+			}
+
+			if copies < db1.config.ReplicaCount || !primaryHeld {
+				return false
+			}
+		}
+
+		return true
+	}, 15*time.Second, 100*time.Millisecond, "every partition with data must regain a primary copy and its replica set")
+}
+
+// TestOlric_RollingRestartMovesNoPrimaryCopyWithinRestoreDelay guards the
+// rolling-restart guarantee: a member that leaves and comes back under its
+// own name within ReplicaRestoreDelay causes no restore and no primary copy to
+// move; only the join sync that runs today happens.
+func TestOlric_RollingRestartMovesNoPrimaryCopyWithinRestoreDelay(t *testing.T) {
+	// Every member logs into one buffer: a restore announces itself there.
+	// The logger is rebuilt from LogOutput when the member starts, so the
+	// buffer is set as the output rather than as the logger.
+	logs := &lockedLog{}
+	newConfig := func(index int) *config.Config {
+		c := newDepartureConfig()
+		c.LogOutput = &prefixedWriter{prefix: fmt.Sprintf("[m%d] ", index), w: logs}
+		c.Logger = log.New(c.LogOutput, "", log.LstdFlags)
+		c.LogVerbosity = 6
+		return c
+	}
+
+	t.Cleanup(func() {
+		if t.Failed() {
+			path := filepath.Join(os.TempDir(), "olric-rolling-restart.log")
+			_ = os.WriteFile(path, []byte(logs.String()), 0o644)
+			t.Logf("member logs written to %s", path)
+		}
+	})
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig(1))
+	completedFor, _ := completedEpochs(t, db1)
+	db2 := cluster.addMemberWithConfig(t, newConfig(2))
+	db3 := cluster.addMemberWithConfig(t, newConfig(3))
+
+	initial := waitForSettledEpoch(t, 5*time.Second, completedFor, db1, db2, db3)
+
+	ctx := context.Background()
+	dm, err := db1.NewEmbeddedClient().NewDMap("mydmap")
+	require.NoError(t, err)
+	for i := range 300 {
+		require.NoError(t, dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i)))
+	}
+
+	transfers := primaryTransfers(t, db1)
+	bindAddr, bindPort := db3.config.BindAddr, db3.config.BindPort
+	memberlistPort := int(db3.rt.Discovery().LocalNode().Port)
+	departed := time.Now()
+
+	require.NoError(t, db3.Shutdown(ctx))
+	require.Eventually(t, func() bool {
+		signature := db1.rt.Signature()
+		return signature != initial && completedFor(signature)
+	}, 5*time.Second, 100*time.Millisecond)
+
+	// Several balancer ticks pass with the member gone: nothing may be
+	// restored in that window. Primary transfers are logged for diagnosis
+	// only: memberlist may flap on a departure and move a promoted copy
+	// back, which is not a restore.
+	time.Sleep(time.Second)
+	t.Logf("primary transfers in the departure window: %d", transfers(departed))
+	require.NotContains(t, logs.String(), "Restoring the primary copy", "a member back within the restore delay must not have its share restored")
+
+	db3 = cluster.startMemberAt(t, newConfig(4), bindAddr, bindPort, memberlistPort)
+	waitForSettledEpoch(t, 10*time.Second, completedFor, db1, db2, db3)
+	require.NotContains(t, logs.String(), "Restoring the primary copy")
+
+	for i := range 300 {
+		gr, err := dm.Get(ctx, testutil.ToKey(i))
+		require.NoError(t, err)
+		value, err := gr.Byte()
+		require.NoError(t, err)
+		require.Equal(t, testutil.ToVal(i), value)
+	}
+}
+
+// lockedLog is an io.Writer the members' loggers and the test can share.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.buf.String()
+}
+
+// prefixedWriter tags every line a member logs with a prefix, so the shared
+// log of a multi-member test can be attributed to a member.
+type prefixedWriter struct {
+	prefix string
+	w      io.Writer
+}
+
+func (p *prefixedWriter) Write(b []byte) (int, error) {
+	if _, err := p.w.Write(append([]byte(p.prefix), b...)); err != nil {
+		return 0, err
+	}
+
+	return len(b), nil
+}
+
+// capturedEvents subscribes to the cluster events of member and returns a
+// function listing the decoded events of one kind received so far.
+func capturedEvents(t *testing.T, member *Olric) func(kind string) []map[string]any {
+	t.Helper()
+
+	ctx := context.Background()
+	ps, err := member.NewEmbeddedClient().NewPubSub(ToAddress(member.rt.This().String()))
+	require.NoError(t, err)
+	rp := ps.Subscribe(ctx, events.ClusterEventsChannel)
+	t.Cleanup(func() {
+		require.NoError(t, rp.Close())
+	})
+
+	_, err = rp.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	var mtx sync.Mutex
+	var seen []map[string]any
+	ch := rp.Channel()
+
+	go func() {
+		for msg := range ch {
+			ev := map[string]any{}
+			if err := json.Unmarshal([]byte(msg.Payload), &ev); err != nil {
+				continue
+			}
+
+			mtx.Lock()
+			seen = append(seen, ev)
+			mtx.Unlock()
+		}
+	}()
+
+	return func(kind string) []map[string]any {
+		mtx.Lock()
+		defer mtx.Unlock()
+
+		var out []map[string]any
+		for _, ev := range seen {
+			if ev["kind"] == kind {
+				out = append(out, ev)
+			}
+		}
+
+		return out
+	}
+}
+
+// TestOlric_MembershipChange_AnnouncedOnceByCoordinator guards the membership
+// announcement model end to end: a subscriber on a member that is not the
+// coordinator receives one membership-change-event per departure and per join,
+// from the coordinator, carrying the member set after the change, while the
+// node-left-event copies it receives come from its own member only.
+func TestOlric_MembershipChange_AnnouncedOnceByCoordinator(t *testing.T) {
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newDepartureConfig())
+	db2 := cluster.addMemberWithConfig(t, newDepartureConfig())
+	db3 := cluster.addMemberWithConfig(t, newDepartureConfig())
+
+	waitForClusterSize(t, []*Olric{db1, db2, db3}, 3)
+	captured := capturedEvents(t, db2)
+	departed := db3.rt.This().String()
+
+	require.NoError(t, db3.Shutdown(context.Background()))
+
+	require.Eventually(t, func() bool {
+		return len(captured(events.KindMembershipChangeEvent)) == 1
+	}, 5*time.Second, 50*time.Millisecond, "the departure must be announced exactly once")
+
+	ev := captured(events.KindMembershipChangeEvent)[0]
+	require.Equal(t, events.MembershipChangeLeft, ev["change"])
+	require.Equal(t, departed, ev["node"])
+	require.Equal(t, db1.rt.This().String(), ev["source"], "the coordinator announces")
+	require.ElementsMatch(t, []any{db1.rt.This().String(), db2.rt.This().String()}, ev["members"])
+
+	// The coordinator may announce before this member's own memberlist has
+	// processed the leave, so the local observation can trail the announcement.
+	require.Eventually(t, func() bool {
+		return len(captured(events.KindNodeLeftEvent)) > 0
+	}, 5*time.Second, 50*time.Millisecond, "the local observation is still delivered")
+
+	for _, left := range captured(events.KindNodeLeftEvent) {
+		require.Equal(t, db2.rt.This().String(), left["source"], "observations come from the subscriber's own member only")
+	}
+
+	db4 := cluster.addMemberWithConfig(t, newDepartureConfig())
+	require.Eventually(t, func() bool {
+		return len(captured(events.KindMembershipChangeEvent)) == 2
+	}, 5*time.Second, 50*time.Millisecond, "the join must be announced exactly once")
+
+	joined := captured(events.KindMembershipChangeEvent)[1]
+	require.Equal(t, events.MembershipChangeJoin, joined["change"])
+	require.Equal(t, db4.rt.This().String(), joined["node"])
+	require.ElementsMatch(t, []any{db1.rt.This().String(), db2.rt.This().String(), db4.rt.This().String()}, joined["members"])
+
+	// No second announcement arrives late.
+	time.Sleep(500 * time.Millisecond)
+	require.Len(t, captured(events.KindMembershipChangeEvent), 2)
+}
+
+// crashMember stops member the way a SIGKILL does: its memberlist is shut
+// down without a leave broadcast, its RESP server and balancer are stopped,
+// and it is taken out of the cluster's cleanup, since a member whose
+// memberlist is gone cannot be shut down gracefully afterwards.
+func (cl *testCluster) crashMember(t *testing.T, member *Olric) {
+	t.Helper()
+
+	cl.mtx.Lock()
+	delete(cl.members, member.rt.This().String())
+	cl.mtx.Unlock()
+
+	field := reflect.ValueOf(member.rt.Discovery()).Elem().FieldByName("memberlist")
+	ml := *(**memberlist.Memberlist)(unsafe.Pointer(field.UnsafeAddr()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, member.balancer.Shutdown(ctx))
+	require.NoError(t, ml.Shutdown())
+	require.NoError(t, member.server.Shutdown(ctx))
+}
+
+// TestOlric_CoordinatorCrash_ConvergesWithinDetection guards the reported
+// scenario end to end: the coordinator dies without a leave, with data in the
+// cluster and with the gossip of the member that becomes coordinator slowed,
+// so its first table push races its own dead-node gossip and can be rejected.
+// The survivors must announce the departure once, from the new coordinator,
+// and publish a rebalance-complete-event without the dead member within a few
+// seconds of memberlist confirming the death, not at the next periodic push,
+// and every key must stay readable.
+func TestOlric_CoordinatorCrash_ConvergesWithinDetection(t *testing.T) {
+	logs := &lockedLog{}
+	newConfig := func(index int, slowGossip bool) *config.Config {
+		c := newDepartureConfig()
+		c.LogOutput = &prefixedWriter{prefix: fmt.Sprintf("[m%d] ", index), w: logs}
+		c.Logger = log.New(c.LogOutput, "", log.LstdFlags)
+		c.LogVerbosity = 6
+		if slowGossip {
+			c.MemberlistConfig.GossipInterval = 2 * time.Second
+		}
+
+		return c
+	}
+
+	t.Cleanup(func() {
+		if t.Failed() {
+			path := filepath.Join(os.TempDir(), "olric-coordinator-crash.log")
+			_ = os.WriteFile(path, []byte(logs.String()), 0o644)
+			t.Logf("member logs written to %s", path)
+		}
+	})
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig(1, false))
+	db2 := cluster.addMemberWithConfig(t, newConfig(2, true))
+	db3 := cluster.addMemberWithConfig(t, newConfig(3, false))
+	db4 := cluster.addMemberWithConfig(t, newConfig(4, false))
+	waitForClusterSize(t, []*Olric{db1, db2, db3, db4}, 4)
+
+	ctx := context.Background()
+	dm, err := db1.NewEmbeddedClient().NewDMap("mydmap")
+	require.NoError(t, err)
+	for i := range 300 {
+		require.NoError(t, dm.Put(ctx, testutil.ToKey(i), testutil.ToVal(i)))
+	}
+
+	captured := capturedEvents(t, db4)
+	victim := db1.rt.This().String()
+	survivors := []*Olric{db2, db3, db4}
+
+	crashed := time.Now()
+	cluster.crashMember(t, db1)
+
+	require.Eventually(t, func() bool {
+		for _, survivor := range survivors {
+			if survivor.rt.NumMembers() != 3 {
+				return false
+			}
+		}
+
+		return true
+	}, 30*time.Second, 50*time.Millisecond, "memberlist must confirm the death")
+	detected := time.Now()
+
+	convergedWithout := func() bool {
+		for _, ev := range captured(events.KindRebalanceCompleteEvent) {
+			members, _ := ev["members"].([]any)
+			if len(members) == 0 {
+				continue
+			}
+
+			gone := true
+			for _, member := range members {
+				if member == victim {
+					gone = false
+				}
+			}
+
+			if gone {
+				return true
+			}
+		}
+
+		return false
+	}
+	require.Eventually(t, convergedWithout, 10*time.Second, 50*time.Millisecond, "the survivors must converge without waiting for the periodic push")
+	t.Logf("death confirmed %s after the crash, converged %s after that", detected.Sub(crashed).Round(time.Millisecond), time.Since(detected).Round(time.Millisecond))
+	require.Less(t, time.Since(detected), 5*time.Second)
+
+	announced := false
+	for _, ev := range captured(events.KindMembershipChangeEvent) {
+		if ev["change"] == events.MembershipChangeLeft && ev["node"] == victim {
+			announced = true
+			require.Equal(t, db2.rt.This().String(), ev["source"], "the new coordinator announces the departure")
+		}
+	}
+	require.True(t, announced, "the departure must be announced")
+
+	dm, err = db2.NewEmbeddedClient().NewDMap("mydmap")
+	require.NoError(t, err)
+	for i := range 300 {
+		gr, err := dm.Get(ctx, testutil.ToKey(i))
+		require.NoError(t, err)
+		value, err := gr.Byte()
+		require.NoError(t, err)
+		require.Equal(t, testutil.ToVal(i), value)
+	}
 }

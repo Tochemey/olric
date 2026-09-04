@@ -181,3 +181,70 @@ func TestRoutingTable_publishRebalanceCompleteEvent_CanceledDuringPublish(t *tes
 
 	rt.publishRebalanceCompleteEvent(42, 7, nil)
 }
+
+// TestRoutingTable_publishMembershipChangeEvent guards the wire form of the
+// coordinator's membership announcement: change, node, the member set after
+// the change and the generation held when it was observed.
+func TestRoutingTable_publishMembershipChangeEvent(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	c := testutil.NewConfig()
+	rt, err := cluster.addNode(c)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	rt.SetClusterEventPublisher(func(_ context.Context, channel, message string) error {
+		defer cancel()
+
+		require.Equal(t, events.ClusterEventsChannel, channel)
+
+		v := events.MembershipChangeEvent{}
+		require.NoError(t, json.Unmarshal([]byte(message), &v))
+		require.Equal(t, events.KindMembershipChangeEvent, v.Kind)
+		require.Equal(t, rt.this.String(), v.Source)
+		require.Equal(t, events.MembershipChangeLeft, v.Change)
+		require.Equal(t, "127.0.0.1:9999", v.Node)
+		require.Equal(t, []string{"127.0.0.1:1", "127.0.0.1:2"}, v.Members)
+		require.Equal(t, uint64(7), v.Generation)
+		return nil
+	})
+
+	m := discovery.Member{Name: "127.0.0.1:9999"}
+	go rt.publishMembershipChangeEvent(events.MembershipChangeLeft, &m, []string{"127.0.0.1:1", "127.0.0.1:2"}, 7)
+	<-ctx.Done()
+	require.ErrorIs(t, context.Canceled, ctx.Err())
+}
+
+// TestRoutingTable_localObservationsUseLocalPublisher guards where each kind
+// of event goes: a member's own node-left observation takes the local
+// publisher when one is registered, while the coordinator's membership change
+// takes the cluster-wide one.
+func TestRoutingTable_localObservationsUseLocalPublisher(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.cancel()
+
+	c := testutil.NewConfig()
+	rt, err := cluster.addNode(c)
+	require.NoError(t, err)
+
+	local := make(chan string, 4)
+	wide := make(chan string, 4)
+	rt.SetLocalClusterEventPublisher(func(_ context.Context, _ string, message string) error {
+		local <- message
+		return nil
+	})
+	rt.SetClusterEventPublisher(func(_ context.Context, _ string, message string) error {
+		wide <- message
+		return nil
+	})
+
+	m := discovery.NewMember(c)
+	rt.publishNodeLeftEvent(&m, 1)
+	rt.publishNodeJoinEvent(&m, 1)
+	rt.publishMembershipChangeEvent(events.MembershipChangeJoin, &m, []string{m.String()}, 1)
+
+	require.Len(t, local, 2, "the observations stay local")
+	require.Len(t, wide, 1, "the membership change is announced cluster-wide")
+	require.Contains(t, <-wide, events.KindMembershipChangeEvent)
+}

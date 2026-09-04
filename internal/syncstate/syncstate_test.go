@@ -27,7 +27,7 @@ import (
 
 func TestState_Reconcile_Empty(t *testing.T) {
 	s := New()
-	s.Reconcile(nil, time.Second)
+	s.Reconcile(nil, time.Second, time.Now())
 	require.True(t, s.PendingEmpty())
 	require.True(t, s.IsDone())
 	select {
@@ -39,7 +39,7 @@ func TestState_Reconcile_Empty(t *testing.T) {
 
 func TestState_Reconcile_WithPartitions(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1, 2, 3}, time.Second)
+	s.Reconcile([]uint64{1, 2, 3}, time.Second, time.Now())
 	require.False(t, s.PendingEmpty())
 	require.False(t, s.IsDone())
 }
@@ -51,12 +51,12 @@ func TestState_Expired(t *testing.T) {
 	s := New()
 	require.False(t, s.Expired(1), "an untracked partition is not expired")
 
-	s.Reconcile([]uint64{1}, time.Hour)
+	s.Reconcile([]uint64{1}, time.Hour, time.Now())
 	require.False(t, s.Expired(1), "a tracked partition inside its escape window is not expired")
 
 	// Partition 1 keeps its original deadline clock, partition 2 starts now;
 	// with a one nanosecond escape both outlive it immediately.
-	s.Reconcile([]uint64{1, 2}, time.Nanosecond)
+	s.Reconcile([]uint64{1, 2}, time.Nanosecond, time.Now())
 	time.Sleep(time.Millisecond)
 	require.True(t, s.Expired(1))
 	require.True(t, s.Expired(2))
@@ -65,7 +65,7 @@ func TestState_Expired(t *testing.T) {
 
 func TestState_MarkReceived(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1, 2, 3}, time.Second)
+	s.Reconcile([]uint64{1, 2, 3}, time.Second, time.Now())
 
 	s.MarkReceived(2)
 	require.False(t, s.PendingEmpty())
@@ -78,7 +78,7 @@ func TestState_MarkReceived(t *testing.T) {
 
 func TestState_MarkReceived_UnknownPartition(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1}, time.Second)
+	s.Reconcile([]uint64{1}, time.Second, time.Now())
 	s.MarkReceived(99) // not in pending
 	require.False(t, s.PendingEmpty())
 	s.MarkReceived(1)
@@ -87,11 +87,11 @@ func TestState_MarkReceived_UnknownPartition(t *testing.T) {
 
 func TestState_Reconcile_AfterDone(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1}, time.Second)
+	s.Reconcile([]uint64{1}, time.Second, time.Now())
 	s.MarkReceived(1)
 	require.True(t, s.IsDone())
 
-	s.Reconcile([]uint64{2, 3}, time.Second)
+	s.Reconcile([]uint64{2, 3}, time.Second, time.Now())
 	require.False(t, s.IsDone())
 	require.False(t, s.PendingEmpty())
 }
@@ -102,12 +102,12 @@ func TestState_Reconcile_PreservesDeadlines(t *testing.T) {
 	// must not starve expiry.
 	s := New()
 	escape := 100 * time.Millisecond
-	s.Reconcile([]uint64{1, 2}, escape)
+	s.Reconcile([]uint64{1, 2}, escape, time.Now())
 
 	deadline := time.Now().Add(escape)
 	// Reconcile repeatedly, always faster than the escape delay.
 	for time.Now().Before(deadline.Add(50 * time.Millisecond)) {
-		s.Reconcile([]uint64{1, 2}, escape)
+		s.Reconcile([]uint64{1, 2}, escape, time.Now())
 		if s.PendingEmpty() {
 			break
 		}
@@ -119,7 +119,7 @@ func TestState_Reconcile_PreservesDeadlines(t *testing.T) {
 
 	// An escaped partition must stay escaped: a later Reconcile with the same
 	// IDs must not resurrect it with a fresh clock.
-	s.Reconcile([]uint64{1, 2}, escape)
+	s.Reconcile([]uint64{1, 2}, escape, time.Now())
 	require.True(t, s.PendingEmpty(),
 		"reconcile must not restart the escape clock of an already-escaped partition")
 	require.True(t, s.IsDone())
@@ -127,9 +127,9 @@ func TestState_Reconcile_PreservesDeadlines(t *testing.T) {
 
 func TestState_Reconcile_DropsStaleEntries(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1, 2, 3}, time.Second)
+	s.Reconcile([]uint64{1, 2, 3}, time.Second, time.Now())
 	// Partition 3 is no longer pending receive.
-	s.Reconcile([]uint64{1, 2}, time.Second)
+	s.Reconcile([]uint64{1, 2}, time.Second, time.Now())
 	s.MarkReceived(1)
 	s.MarkReceived(2)
 	require.True(t, s.PendingEmpty())
@@ -138,7 +138,7 @@ func TestState_Reconcile_DropsStaleEntries(t *testing.T) {
 
 func TestState_LazyExpiry_PendingEmpty(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1, 2}, 20*time.Millisecond)
+	s.Reconcile([]uint64{1, 2}, 20*time.Millisecond, time.Now())
 	require.False(t, s.PendingEmpty())
 
 	time.Sleep(40 * time.Millisecond)
@@ -150,7 +150,7 @@ func TestState_Expiry_SignalsDoneWithoutPolling(t *testing.T) {
 	// Done must fire even when nothing polls PendingEmpty: WaitForInitialSync
 	// and the dmap initial-sync publisher only wait on the channel.
 	s := New()
-	s.Reconcile([]uint64{1, 2, 3}, 20*time.Millisecond)
+	s.Reconcile([]uint64{1, 2, 3}, 20*time.Millisecond, time.Now())
 	require.False(t, s.IsDone())
 
 	select {
@@ -165,9 +165,9 @@ func TestState_Expiry_MixedDeadlines(t *testing.T) {
 	// A later Reconcile adds a new partition with a later deadline; the
 	// backstop timer must fire for both, in order.
 	s := New()
-	s.Reconcile([]uint64{1}, 30*time.Millisecond)
+	s.Reconcile([]uint64{1}, 30*time.Millisecond, time.Now())
 	time.Sleep(15 * time.Millisecond)
-	s.Reconcile([]uint64{1, 2}, 30*time.Millisecond)
+	s.Reconcile([]uint64{1, 2}, 30*time.Millisecond, time.Now())
 
 	select {
 	case <-s.Done():
@@ -185,9 +185,9 @@ func TestState_EscapeIsPerPartition_NoPrematureClear(t *testing.T) {
 	// data.
 	s := New()
 	escape := 100 * time.Millisecond
-	s.Reconcile([]uint64{1}, escape)
+	s.Reconcile([]uint64{1}, escape, time.Now())
 	time.Sleep(80 * time.Millisecond)
-	s.Reconcile([]uint64{1, 2}, escape)
+	s.Reconcile([]uint64{1, 2}, escape, time.Now())
 
 	// Partition 1 expires; partition 2 is only ~40ms old and must survive.
 	time.Sleep(40 * time.Millisecond)
@@ -201,7 +201,7 @@ func TestState_EscapeIsPerPartition_NoPrematureClear(t *testing.T) {
 
 func TestState_ZeroEscape_NeverExpires(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1}, 0)
+	s.Reconcile([]uint64{1}, 0, time.Now())
 	time.Sleep(20 * time.Millisecond)
 	require.False(t, s.PendingEmpty())
 	require.False(t, s.IsDone())
@@ -211,7 +211,7 @@ func TestState_ZeroEscape_NeverExpires(t *testing.T) {
 
 func TestState_Done_ConcurrentWithReconcile(t *testing.T) {
 	s := New()
-	s.Reconcile([]uint64{1, 2, 3}, time.Second)
+	s.Reconcile([]uint64{1, 2, 3}, time.Second, time.Now())
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -229,10 +229,38 @@ func TestState_Done_ConcurrentWithReconcile(t *testing.T) {
 	}
 
 	for i := range 1000 {
-		s.Reconcile([]uint64{uint64(i)}, time.Second)
+		s.Reconcile([]uint64{uint64(i)}, time.Second, time.Now())
 		s.MarkReceived(uint64(i))
 	}
 	close(stop)
 	wg.Wait()
 	require.True(t, s.IsDone())
+}
+
+// TestState_Reconcile_SkipsPartitionsReceivedDuringInstall guards the race
+// between a routing table install and the fragments it triggers: a partition
+// that received data after the install scanned it empty is not tracked, one
+// that received data before the scan is, and the marks do not carry over to
+// the next reconcile.
+func TestState_Reconcile_SkipsPartitionsReceivedDuringInstall(t *testing.T) {
+	s := New()
+
+	s.MarkReceived(1)
+	time.Sleep(time.Millisecond)
+	scannedAt := time.Now()
+	time.Sleep(time.Millisecond)
+	s.MarkReceived(2)
+
+	s.Reconcile([]uint64{1, 2, 3}, time.Hour, scannedAt)
+	require.False(t, s.Expired(2))
+	require.False(t, s.PendingEmpty())
+
+	s.MarkReceived(1)
+	require.False(t, s.PendingEmpty(), "partition 3 is still pending")
+	s.MarkReceived(3)
+	require.True(t, s.PendingEmpty(), "partition 2, received during the install, was never tracked")
+
+	// The marks were consumed: a later reconcile tracks partition 2 again.
+	s.Reconcile([]uint64{2}, time.Hour, time.Now())
+	require.False(t, s.PendingEmpty())
 }

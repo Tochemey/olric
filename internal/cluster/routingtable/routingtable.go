@@ -27,6 +27,7 @@ import (
 	"github.com/hashicorp/memberlist"
 
 	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/checkpoint"
 	"github.com/tochemey/olric/internal/consistent"
 	"github.com/tochemey/olric/internal/discovery"
@@ -56,6 +57,14 @@ type tableVersion struct {
 	// change back to an earlier signature advances it, an unchanged table
 	// pushed again does not.
 	generation uint64
+	// coordinator and sequence identify the push the table came from: the
+	// coordinator's member id and its table sequence, see
+	// RoutingTable.tableSequence. A push whose sequence differs advances the
+	// generation even when the signature recurred, since it opens a new
+	// epoch that this member has to ack. Both are zero for a pulled table
+	// and for a push from a coordinator of the previous version.
+	coordinator uint64
+	sequence    uint64
 }
 
 type route struct {
@@ -80,18 +89,23 @@ type RoutingTable struct {
 
 	updateRoutingMtx sync.Mutex
 	table            map[uint64]*route
-	consistent       *consistent.Consistent
-	this             discovery.Member
-	members          *Members
-	config           *config.Config
-	log              *flog.Logger
-	primary          *partitions.Partitions
-	backup           *partitions.Partitions
-	client           *server.Client
-	server           *server.Server
-	discovery        *discovery.Discovery
-	callbacks        []func()
-	callbackMtx      sync.Mutex
+	// tableSequence counts the distinct tables this coordinator computed, and
+	// is sent with every push of the current one, so a member can tell a new
+	// epoch under a recurring signature from a repeated push of the table it
+	// holds. Guarded by the routing mutex.
+	tableSequence uint64
+	consistent    *consistent.Consistent
+	this          discovery.Member
+	members       *Members
+	config        *config.Config
+	log           *flog.Logger
+	primary       *partitions.Partitions
+	backup        *partitions.Partitions
+	client        *server.Client
+	server        *server.Server
+	discovery     *discovery.Discovery
+	callbacks     []func()
+	callbackMtx   sync.Mutex
 	// leaveCallbacks receive the name (host:port) of every member that leaves
 	// the cluster; joinCallbacks receive the name of every member that joins
 	// or is confirmed alive by an update. The member uses these to ban and
@@ -102,10 +116,13 @@ type RoutingTable struct {
 	memberCallbackMtx sync.Mutex
 	// eventPublisher delivers cluster events to subscribers on every member.
 	// It is registered by the pubsub service; the routing table cannot
-	// deliver events on its own.
-	eventPublisher    ClusterEventPublisher
-	eventPublisherMtx sync.RWMutex
-	pushPeriod        time.Duration
+	// deliver events on its own. localEventPublisher delivers the events a
+	// member emits for its own subscribers only, the node-join and node-left
+	// observations; see SetLocalClusterEventPublisher for its fallback.
+	eventPublisher      ClusterEventPublisher
+	localEventPublisher ClusterEventPublisher
+	eventPublisherMtx   sync.RWMutex
+	pushPeriod          time.Duration
 	// The command handlers of the routing table service should wait for the cluster join event.
 	joined chan struct{}
 	ctx    context.Context
@@ -123,11 +140,17 @@ type RoutingTable struct {
 	// active (epoch -> member IDs). Guarded by rebalanceMtx.
 	earlyAcks map[uint64]map[uint64]struct{}
 
-	// committedPayload holds the last routing table payload ([]byte) that was
-	// successfully committed to the cluster. It backs the pull-based bootstrap
-	// path and is deliberately independent of the routing mutex: a stalled
-	// push fan-out must not block table pulls.
+	// committedPayload holds the last routing table payload ([]byte) this
+	// coordinator committed, stored before its fan-out so a pull during the
+	// fan-out never returns an older table than the push delivers. It backs
+	// the pull path and is deliberately independent of the routing mutex: a
+	// stalled push fan-out must not block table pulls.
 	committedPayload atomic.Value
+	// tableCoordinator is the member that pushed, or served the pull of, the
+	// installed routing table. When that member leaves or restarts while this
+	// member is not the coordinator, the table is pulled from the new
+	// coordinator, see tableCoordinatorGone.
+	tableCoordinator atomic.Pointer[discovery.Member]
 
 	syncState  *syncstate.State
 	checkpoint *checkpoint.Checkpoint
@@ -223,20 +246,45 @@ func (r *RoutingTable) Members() *Members {
 	return r.members
 }
 
-// setSignature records the installation of a routing table with the given
-// signature and advances the generation when the signature changed. Installs
-// are serialized by updateRoutingMtx.
-func (r *RoutingTable) setSignature(s uint64) {
+// setVersion records the installation of a routing table with the given
+// signature, pushed by coordinator as its table sequence, and advances the
+// generation when the table changed. The table changed when its signature
+// differs from the installed one, or when a push numbered its sequence
+// differently from the installed push: the coordinator then computed a distinct
+// table in between, which this member never saw, and started an epoch this
+// member has to ack although the content it holds is the same. A sequence of
+// zero, a pulled table or a coordinator of the previous version, decides by
+// signature alone, and a pull that confirms the installed table keeps the
+// sequence of the push that delivered it. Installs are serialized by
+// updateRoutingMtx.
+func (x *RoutingTable) setVersion(s, coordinator, sequence uint64) {
 	var generation uint64
 	changed := true
-	if current := r.version.Load(); current != nil {
+	if current := x.version.Load(); current != nil {
 		generation = current.generation
 		changed = current.signature != s
+		if !changed && sequence != 0 && (current.coordinator != coordinator || current.sequence != sequence) {
+			changed = true
+		}
+
+		if !changed && sequence == 0 {
+			// A pull that confirms the installed table keeps the
+			// identity of the push that delivered it, so the next push
+			// of the same table is recognised as the same one.
+			coordinator, sequence = current.coordinator, current.sequence
+		}
 	}
+
 	if changed {
 		generation++
 	}
-	r.version.Store(&tableVersion{signature: s, generation: generation})
+
+	x.version.Store(&tableVersion{
+		signature:   s,
+		generation:  generation,
+		coordinator: coordinator,
+		sequence:    sequence,
+	})
 }
 
 // Signature returns the signature of the installed routing table, zero before
@@ -322,44 +370,87 @@ func (r *RoutingTable) CheckBootstrap() error {
 	})
 }
 
-func (r *RoutingTable) fillRoutingTable() {
-	if r.config.ReplicaCount > int(r.NumMembers()) {
-		r.log.V(1).Printf("[WARN] Desired replica count is %d and "+
+// fillRoutingTable computes the routing table from the recorded owners, the
+// live membership and the hash ring, in three passes: the recorded owners that
+// are still members are collected for every partition, every such owner is
+// then asked in one pipelined round trip which of its recorded copies still
+// hold data, and the owner lists are finally pruned of empty copies and
+// completed with the owners the ring designates. Membership is read once and
+// each owner is dialed once, so the computation costs one round trip per
+// member rather than one per owner per partition.
+func (x *RoutingTable) fillRoutingTable() {
+	if x.config.ReplicaCount > int(x.NumMembers()) {
+		x.log.V(1).Printf("[WARN] Desired replica count is %d and "+
 			"the cluster has %d members currently",
-			r.config.ReplicaCount, r.NumMembers())
+			x.config.ReplicaCount, x.NumMembers())
 	}
-	table := make(map[uint64]*route)
-	for partID := uint64(0); partID < r.config.PartitionCount; partID++ {
+
+	index := x.snapshotMembers()
+	replicas := x.config.ReplicaCount > config.MinimumReplicaCount
+	primaries := make([][]discovery.Member, x.config.PartitionCount)
+	backups := make([][]discovery.Member, x.config.PartitionCount)
+	queries := make(map[discovery.Member][]countQuery)
+
+	for partID := range x.config.PartitionCount {
+		owners := x.liveOwners(partID, x.primary.PartitionByID(partID).Owners(), index, partitions.PRIMARY)
+		primaries[partID] = owners
+
+		for _, owner := range owners {
+			queries[owner] = append(queries[owner], countQuery{partID: partID})
+		}
+
+		if !replicas {
+			continue
+		}
+
+		replicaOwners := x.liveOwners(partID, x.backup.PartitionByID(partID).Owners(), index, partitions.BACKUP)
+		backups[partID] = replicaOwners
+
+		for _, owner := range replicaOwners {
+			queries[owner] = append(queries[owner], countQuery{partID: partID, replica: true})
+		}
+	}
+
+	counts := x.probeOwners(queries)
+
+	table := make(map[uint64]*route, x.config.PartitionCount)
+	for partID := range x.config.PartitionCount {
 		rt := &route{
-			Owners: r.distributePrimaryCopies(partID),
+			Owners: x.placePrimaryOwner(partID, primaries[partID], counts),
 		}
-		if r.config.ReplicaCount > config.MinimumReplicaCount {
-			rt.Backups = r.distributeBackups(partID)
+
+		if replicas {
+			rt.Backups = x.placeBackupOwners(partID, backups[partID], counts)
 		}
+
 		table[partID] = rt
 	}
-	r.table = table
+
+	x.table = table
 }
 
 func (r *RoutingTable) UpdateEagerly() {
 	r.updateRoutingWithReason(rebalanceReasonManual, "")
 }
 
-func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node string) {
+// updateRoutingWithReason recomputes the routing table on the coordinator,
+// commits it locally, pushes it to every member and starts the rebalance epoch
+// for reason.
+func (x *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node string) {
 	// This function is called by listenMemberlistEvents and updateRoutingPeriodically
 	// So this lock prevents parallel execution.
-	r.Lock()
-	defer r.Unlock()
+	x.Lock()
+	defer x.Unlock()
 
 	// This function is only run by the cluster coordinator.
-	if !r.discovery.IsCoordinator() {
+	if !x.discovery.IsCoordinator() {
 		return
 	}
 
 	// This type of quorum function determines the presence of quorum based on the count of members in the cluster,
 	// as observed by the local member’s cluster membership manager
-	if err := r.CheckMemberCountQuorum(); err != nil {
-		r.log.V(2).Printf("[ERROR] Impossible to calculate and update routing table: %v", err)
+	if err := x.CheckMemberCountQuorum(); err != nil {
+		x.log.V(2).Printf("[ERROR] Impossible to calculate and update routing table: %v", err)
 		return
 	}
 
@@ -367,39 +458,57 @@ func (r *RoutingTable) updateRoutingWithReason(reason rebalanceReason, node stri
 	// reported with the epoch's completion names the members the table was
 	// computed for: a member that joins while the table is being computed
 	// is only reported by the next epoch, which surely reflects it.
-	members := r.memberNames()
-	r.fillRoutingTable()
-	if r.syncState != nil {
-		r.syncState.Reconcile(r.partitionsPendingReceive(), r.config.InitialSyncEmptyPartitionTimeout)
+	memberIDs, members := x.memberSnapshot()
+	x.fillRoutingTable()
+	if x.syncState != nil {
+		scannedAt := time.Now()
+		x.syncState.Reconcile(x.partitionsPendingReceive(), x.config.InitialSyncEmptyPartitionTimeout, scannedAt)
 	}
-	previousSignature := r.Signature()
-	data, signature, err := r.buildRoutingTablePayload()
+	previousSignature := x.Signature()
+	data, signature, err := x.buildRoutingTablePayload()
 	if err != nil {
-		r.log.V(2).Printf("[ERROR] Failed to marshal routing table: %v", err)
+		x.log.V(2).Printf("[ERROR] Failed to marshal routing table: %v", err)
 		return
 	}
 
-	reports, err := r.updateRoutingTableOnCluster(data)
+	if signature != previousSignature {
+		x.tableSequence++
+	}
+
+	sequence := x.tableSequence
+
+	// The payload is committed before the fan-out, so a member that pulls the
+	// table while the fan-out runs never receives an older table than the
+	// push in flight delivers. If the coordinator cannot install its own
+	// copy the previous commit is restored, so that pulls never serve a
+	// table no epoch tracks.
+	previous, _ := x.committedPayload.Load().([]byte)
+	x.committedPayload.Store(data)
+	reports, unreachable, err := x.updateRoutingTableOnCluster(data, sequence)
 	if err != nil {
-		r.log.V(2).Printf("[ERROR] Failed to update routing table on cluster: %v", err)
+		if previous != nil {
+			x.committedPayload.Store(previous)
+		}
+
+		x.log.V(2).Printf("[ERROR] Failed to update routing table on cluster: %v", err)
 		return
 	}
-	r.committedPayload.Store(data)
-	r.processLeftOverDataReports(reports)
+	x.processLeftOverDataReports(reports)
 	if signature != previousSignature {
-		// Only members that confirmed receipt of the table gate the epoch.
-		updated := make([]uint64, 0, len(reports))
-		for member := range reports {
-			updated = append(updated, member.ID)
-		}
-		r.startRebalanceEpoch(signature, reason, node, updated, members)
+		// Every live member the table was computed for gates the epoch; the
+		// ones the fan-out could not reach receive it by retry or pull.
+		x.startRebalanceEpoch(signature, reason, node, memberIDs, members)
 		// Proactive sync pushes primary data to newly joined backup owners.
 		// It must NOT run on node-leave events: when nodes die the fragment
 		// write-lock held during the network transfer would block concurrent
 		// reads for the entire push duration, causing read timeouts.
-		if r.config.EnableProactiveSyncOnJoin && reason == rebalanceReasonNodeJoin {
-			r.spawn(r.runCallbacks)
+		if x.config.EnableProactiveSyncOnJoin && reason == rebalanceReasonNodeJoin {
+			x.spawn(x.runCallbacks)
 		}
+	}
+
+	if len(unreachable) > 0 {
+		x.spawn(func() { x.retryRoutingTablePush(data, sequence, signature, unreachable) })
 	}
 }
 
@@ -481,25 +590,80 @@ func (r *RoutingTable) processClusterEvent(event *discovery.ClusterEvent) (notif
 	return notify
 }
 
-func (r *RoutingTable) listenClusterEvents(eventCh chan *discovery.ClusterEvent) {
-	defer r.wg.Done()
+// listenClusterEvents consumes memberlist join and leave events: it updates the
+// member list and the routing table, announces the change when this member is
+// the coordinator, and pulls the table when the coordinator changed.
+func (x *RoutingTable) listenClusterEvents(eventCh chan *discovery.ClusterEvent) {
+	defer x.wg.Done()
 	for {
 		select {
-		case <-r.ctx.Done():
+		case <-x.ctx.Done():
 			return
 		case e := <-eventCh:
-			notify := r.processClusterEvent(e)
+			notify := x.processClusterEvent(e)
 			if notify != nil {
 				// Fired here rather than inside processClusterEvent so the
 				// callbacks run without the members lock, strictly in event
 				// order: a ban from a NodeLeave can never be applied after
 				// the unban from a following NodeJoin for the same address.
 				notify()
+				x.announceMembershipChange(e)
 			}
 			reason, node := rebalanceReasonFromEvent(e)
-			r.updateRoutingWithReason(reason, node)
+			x.updateRoutingWithReason(reason, node)
+
+			if x.tableCoordinatorGone(e) {
+				x.spawn(x.pullRoutingTableAfterCoordinatorChange)
+			}
 		}
 	}
+}
+
+// announceMembershipChange publishes, when this member is the coordinator and
+// cluster events are enabled, the membership-change-event for event: the
+// authoritative announcement of a join, departure or update, carrying the
+// member set after the change and the generation held when it was observed.
+// It is published before the routing table is recomputed and regardless of
+// whether that recomputation changes the table or passes the member-count
+// quorum, so a subscriber learns of every change from one source, once.
+func (x *RoutingTable) announceMembershipChange(event *discovery.ClusterEvent) {
+	if !x.config.EnableClusterEventsChannel || !x.discovery.IsCoordinator() {
+		return
+	}
+
+	var change string
+	switch event.Event {
+	case memberlist.NodeJoin:
+		change = events.MembershipChangeJoin
+	case memberlist.NodeLeave:
+		change = events.MembershipChangeLeft
+	case memberlist.NodeUpdate:
+		change = events.MembershipChangeUpdate
+	default:
+		return
+	}
+
+	member, _ := discovery.NewMemberFromMetadata(event.NodeMeta)
+	members := x.memberNames()
+	generation := x.Generation()
+	x.spawn(func() { x.publishMembershipChangeEvent(change, &member, members, generation) })
+}
+
+// tableCoordinatorGone reports whether event removed or restarted the member
+// that pushed the installed routing table while this member is not the
+// coordinator itself: the new coordinator's push may be rejected by a member
+// whose membership view lags, so such a member pulls the table on its own.
+func (x *RoutingTable) tableCoordinatorGone(event *discovery.ClusterEvent) bool {
+	if event.Event != memberlist.NodeLeave && event.Event != memberlist.NodeUpdate {
+		return false
+	}
+
+	coordinator := x.tableCoordinator.Load()
+	if coordinator == nil || coordinator.Name != event.NodeName {
+		return false
+	}
+
+	return !x.discovery.IsCoordinator()
 }
 
 // pullRoutingTableUntilBootstrapped keeps requesting the committed routing
@@ -507,25 +671,27 @@ func (r *RoutingTable) listenClusterEvents(eventCh chan *discovery.ClusterEvent)
 // push is the fast path; this pull is the guarantee: a joiner whose push was
 // lost would otherwise never bootstrap, never run its balancer and never ack a
 // rebalance epoch.
-func (r *RoutingTable) pullRoutingTableUntilBootstrapped() {
-	defer r.wg.Done()
+func (x *RoutingTable) pullRoutingTableUntilBootstrapped() {
+	defer x.wg.Done()
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-r.ctx.Done():
+		case <-x.ctx.Done():
 			return
 		case <-ticker.C:
-			if r.IsBootstrapped() {
+			if x.IsBootstrapped() {
 				return
 			}
-			if err := r.fetchRoutingTableFromCoordinator(); err != nil {
-				r.log.V(3).Printf("[WARN] Failed to pull routing table from the coordinator: %v", err)
+
+			if err := x.fetchRoutingTableFromCoordinator(true); err != nil {
+				x.log.V(3).Printf("[WARN] Failed to pull routing table from the coordinator: %v", err)
 				continue
 			}
-			if r.IsBootstrapped() {
-				r.log.V(1).Printf("[INFO] Bootstrapped by pulling the routing table from the coordinator")
+
+			if x.IsBootstrapped() {
+				x.log.V(1).Printf("[INFO] Bootstrapped by pulling the routing table from the coordinator")
 				return
 			}
 		}

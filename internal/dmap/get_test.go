@@ -20,11 +20,13 @@ package dmap
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/cluster/routingtable"
+	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/ptr"
 	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
@@ -256,4 +258,99 @@ func TestDMap_Get_ReadRepair(t *testing.T) {
 		require.Exactly(t, expected, partValue)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
 	}
+}
+
+func BenchmarkDMap_Get_LocalHit(b *testing.B) {
+	cluster, s := newBenchmarkCluster(b, 1, 1)
+	defer cluster.Shutdown()
+
+	dm, err := s.NewDMap("bench")
+	require.NoError(b, err)
+	keys := benchmarkKeys(b, s, "bench", 1024, false)
+	ctx := context.Background()
+	for _, key := range keys {
+		require.NoError(b, dm.Put(ctx, key, []byte("value"), nil))
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := dm.Get(ctx, keys[i%len(keys)]); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkDMap_Get_UnderWriteLoad reads keys of one fragment while another
+// goroutine keeps writing other keys of the same fragment with sync
+// replication, so a read has to get past the fragment lock the writes hold.
+func BenchmarkDMap_Get_UnderWriteLoad(b *testing.B) {
+	cluster, s := newBenchmarkCluster(b, 2, 2)
+	defer cluster.Shutdown()
+
+	dm, err := s.NewDMap("bench")
+	require.NoError(b, err)
+	keys := benchmarkKeys(b, s, "bench", 64, true)
+	ctx := context.Background()
+	for _, key := range keys {
+		require.NoError(b, dm.Put(ctx, key, []byte("value"), nil))
+	}
+
+	readKeys, writeKeys := keys[:32], keys[32:]
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		value := []byte("value")
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+
+			_ = dm.Put(ctx, writeKeys[i%len(writeKeys)], value, nil)
+		}
+	}()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := dm.Get(ctx, readKeys[i%len(readKeys)]); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+
+	close(stop)
+	<-done
+}
+
+// TestDMap_Get_SkipsDepartedReplica guards that a read does not dial a replica
+// owner memberlist has already removed: the owner is skipped and the read is
+// served by the copies that can answer, without waiting on a dead peer.
+func TestDMap_Get_SkipsDepartedReplica(t *testing.T) {
+	c := testutil.NewConfig()
+	c.ReplicaCount = 2
+	c.WriteQuorum = 1
+	c.ReadQuorum = 1
+	cluster := testcluster.New(NewService)
+	defer cluster.Shutdown()
+	s := cluster.AddMember(testcluster.NewEnvironment(c)).(*Service)
+
+	dm, err := s.NewDMap("mydmap")
+	require.NoError(t, err)
+	key := ownedKey(t, s, "mydmap")
+	require.NoError(t, dm.Put(context.Background(), key, []byte("value"), nil))
+
+	// A replica owner that never answers and that memberlist has removed.
+	gone := discovery.Member{Name: silentListener(t), ID: 424242}
+	s.backup.PartitionByHKey(partitions.HKey("mydmap", key)).SetOwners([]discovery.Member{gone})
+
+	started := time.Now()
+	gr, _, err := dm.Get(context.Background(), key)
+	require.NoError(t, err)
+	require.Equal(t, []byte("value"), gr.Value())
+	require.Less(t, time.Since(started), time.Second, "a departed replica must not be dialed")
 }

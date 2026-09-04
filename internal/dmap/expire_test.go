@@ -19,6 +19,7 @@ package dmap
 
 import (
 	"context"
+	"github.com/tochemey/olric/internal/cluster/partitions"
 	"testing"
 	"time"
 
@@ -143,4 +144,37 @@ func TestDMap_pexpireCommandHandler_ErrKeyNotFound(t *testing.T) {
 		err = cmd.Err()
 	}
 	require.Error(t, err)
+}
+
+// TestDMap_Expire_KeepsValueOnReplica guards that an update of the TTL alone
+// reaches the replicas with the current value: the replica stores the entry
+// as pushed, and a TTL update that carried no value left it with an empty
+// one, which a read then served after a tie on the timestamp.
+func TestDMap_Expire_KeepsValueOnReplica(t *testing.T) {
+	cluster, s1, s2, _, _ := newReplicatedPair(t)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s1.NewDMap("mydmap")
+	require.NoError(t, err)
+	key := ownedKey(t, s1, "mydmap")
+	require.NoError(t, dm.Put(ctx, key, []byte("myvalue"), nil))
+	require.NoError(t, dm.Expire(ctx, key, time.Hour))
+
+	hkey := partitions.HKey("mydmap", key)
+	dm2, err := s2.NewDMap("mydmap")
+	require.NoError(t, err)
+	replica, err := dm2.loadFragment(s2.backup.PartitionByHKey(hkey))
+	require.NoError(t, err)
+
+	replica.RLock()
+	entry, err := replica.storage.Get(hkey)
+	replica.RUnlock()
+	require.NoError(t, err)
+	require.Equal(t, []byte("myvalue"), entry.Value(), "the TTL update must carry the value to the replica")
+	require.NotZero(t, entry.TTL(), "the TTL must have reached the replica")
+
+	gr, _, err := dm.Get(ctx, key)
+	require.NoError(t, err)
+	require.Equal(t, []byte("myvalue"), gr.Value())
 }

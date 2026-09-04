@@ -34,6 +34,7 @@ import (
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/kvstore"
 	"github.com/tochemey/olric/internal/protocol"
+	"github.com/tochemey/olric/internal/server"
 	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/pkg/storage"
@@ -204,8 +205,9 @@ func TestDMap_Delete_RemoteOwnerUnreachable(t *testing.T) {
 
 func TestDMap_Delete_PreviousOwnerUnreachable(t *testing.T) {
 	// The local owner branch delegates to deleteKey, which asks every previous
-	// owner to drop the key first. A previous owner that cannot be dialed must
-	// fail the whole delete rather than be skipped.
+	// owner to drop the key first. A live previous owner that cannot be dialed
+	// must fail the whole delete rather than be skipped; only an owner that
+	// memberlist removed is skipped, see TestDMap_Delete_SkipsDepartedOwners.
 	cluster := testcluster.New(NewService)
 	s1 := cluster.AddMember(nil).(*Service)
 	defer cluster.Shutdown()
@@ -218,10 +220,16 @@ func TestDMap_Delete_PreviousOwnerUnreachable(t *testing.T) {
 	require.NoError(t, dm.Put(ctx, key, testutil.ToVal(1), nil))
 
 	// Owner() is the last entry, so this node stays the current owner while the
-	// unreachable member becomes a previous owner.
+	// unreachable member becomes a previous owner. It is a member as far as
+	// the member set knows, so it is dialed.
+	unreachable := newUnreachableMember(t)
+	s1.rt.Members().Lock()
+	s1.rt.Members().Add(unreachable)
+	s1.rt.Members().Unlock()
+
 	hkey := partitions.HKey("mymap", key)
 	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{
-		newUnreachableMember(t),
+		unreachable,
 		s1.rt.This(),
 	})
 
@@ -232,8 +240,9 @@ func TestDMap_Delete_PreviousOwnerUnreachable(t *testing.T) {
 
 func TestDMap_Delete_BackupOwnerUnreachable(t *testing.T) {
 	// ReplicaCount is 1 by default, so deleteOnCluster fans the deletion out to
-	// the backup owners. A backup owner that cannot be dialed must fail the
-	// delete instead of leaving a stale replica behind silently.
+	// the backup owners. A live backup owner that cannot be dialed must fail
+	// the delete instead of leaving a stale replica behind silently; only an
+	// owner that memberlist removed is skipped.
 	cluster := testcluster.New(NewService)
 	s1 := cluster.AddMember(nil).(*Service)
 	defer cluster.Shutdown()
@@ -245,8 +254,13 @@ func TestDMap_Delete_BackupOwnerUnreachable(t *testing.T) {
 	key := testutil.ToKey(1)
 	require.NoError(t, dm.Put(ctx, key, testutil.ToVal(1), nil))
 
+	unreachable := newUnreachableMember(t)
+	s1.rt.Members().Lock()
+	s1.rt.Members().Add(unreachable)
+	s1.rt.Members().Unlock()
+
 	hkey := partitions.HKey("mymap", key)
-	s1.backup.PartitionByHKey(hkey).SetOwners([]discovery.Member{newUnreachableMember(t)})
+	s1.backup.PartitionByHKey(hkey).SetOwners([]discovery.Member{unreachable})
 
 	count, err := dm.Delete(ctx, key)
 	require.Error(t, err)
@@ -273,7 +287,7 @@ func TestDMap_Delete_PanicsWhenPartitionHasNoOwner(t *testing.T) {
 	// Delete cannot be used here: grouping the keys by owner would panic in
 	// Partition.Owner before deleteOnCluster is ever reached.
 	require.Panics(t, func() {
-		_ = dm.deleteKey(key)
+		_ = dm.deleteKey(context.Background(), key)
 	})
 }
 
@@ -457,7 +471,7 @@ func TestDMap_Delete_DeleteKeyValFromPreviousOwners(t *testing.T) {
 	}
 	// this has to be the last one
 	data = append(data, owner)
-	err = dm.deleteFromPreviousOwners("mykey", data)
+	err = dm.deleteFromPreviousOwners(context.Background(), "mykey", data)
 	if err != nil {
 		t.Fatalf("Expected nil. Got: %v", err)
 	}
@@ -591,4 +605,68 @@ func TestDMap_delCommandHandler(t *testing.T) {
 	err = rc.Process(s.ctx, cmd)
 	require.NoError(t, err)
 	require.NoError(t, cmd.Err())
+}
+
+// TestDMap_Delete_FailsFastOnDepartedOwner guards that a delete does not dial
+// a replica owner memberlist has already removed, and does not skip it
+// either: a delete has no tombstone, so it fails at once and succeeds again
+// once the routing table has dropped the member.
+func TestDMap_Delete_FailsFastOnDepartedOwner(t *testing.T) {
+	cluster, s1, s2, _, e2 := newReplicatedPair(t)
+	defer cluster.Shutdown()
+
+	dm, err := s1.NewDMap("mydmap")
+	require.NoError(t, err)
+	key := ownedKey(t, s1, "mydmap")
+	require.NoError(t, dm.Put(context.Background(), key, []byte("value"), nil))
+
+	require.NoError(t, e2.Get("server").(*server.Server).Shutdown(context.Background()))
+	departedMember(s1, s2.rt.This())
+
+	started := time.Now()
+	_, err = dm.Delete(context.Background(), key)
+	require.ErrorIs(t, err, errOwnerDeparted)
+	require.Less(t, time.Since(started), time.Second, "a departed replica must not be dialed")
+
+	// The routing table drops the member: the delete goes through.
+	s1.backup.PartitionByHKey(partitions.HKey("mydmap", key)).SetOwners(nil)
+	count, err := dm.Delete(context.Background(), key)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	_, _, err = dm.Get(context.Background(), key)
+	require.ErrorIs(t, err, ErrKeyNotFound)
+}
+
+// TestDMap_Delete_MissOnPrimaryStillDeletesReplica guards that a delete of a
+// key the primary owner does not hold still reaches the replicas: a primary
+// owner that took a partition over after a departure holds nothing until the
+// backup copy is restored, and a delete that stopped at the local miss would
+// let the restore bring the key back.
+func TestDMap_Delete_MissOnPrimaryStillDeletesReplica(t *testing.T) {
+	cluster, s1, s2, _, _ := newReplicatedPair(t)
+	defer cluster.Shutdown()
+
+	dm, err := s1.NewDMap("mydmap")
+	require.NoError(t, err)
+	key := ownedKey(t, s1, "mydmap")
+	require.NoError(t, dm.Put(context.Background(), key, []byte("value"), nil))
+	hkey := partitions.HKey("mydmap", key)
+
+	dm2, err := s2.NewDMap("mydmap")
+	require.NoError(t, err)
+	replica, err := dm2.loadFragment(s2.backup.PartitionByHKey(hkey))
+	require.NoError(t, err)
+	require.True(t, replica.storage.Check(hkey), "the replica holds the key")
+
+	// The primary owner loses its copy, as a new owner starts without one.
+	f, err := dm.loadFragment(s1.primary.PartitionByHKey(hkey))
+	require.NoError(t, err)
+	f.Lock()
+	require.NoError(t, f.storage.Delete(hkey))
+	f.Unlock()
+
+	_, err = dm.Delete(context.Background(), key)
+	require.NoError(t, err)
+	require.False(t, replica.storage.Check(hkey), "the replica copy must be gone")
 }

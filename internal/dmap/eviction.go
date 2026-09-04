@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -116,45 +117,53 @@ func (s *Service) evictKeys() {
 	})
 }
 
-func (s *Service) scanFragmentForEviction(partID uint64, name string, f *fragment) {
-	/*
-		From Redis Docs:
-			1- Test 20 random keys from the set of keys with an associated expire.
-			2- Delete all the keys found expired.
-			3- If more than 25% of keys were expired, start again from step 1.
-	*/
+// expiredKey is a key the eviction scanner sampled as expired or idle.
+type expiredKey struct {
+	hkey uint64
+	key  string
+}
 
-	// We need limits to prevent CPU starvation. deleteOnCluster does some network operation
-	// to delete keys from the backup nodes and the previous owners.
+// scanFragmentForEviction samples entries of the fragment and deletes the
+// expired and idle ones from the cluster, the way Redis does: test up to
+// twenty random keys, delete the expired ones, and start again while more
+// than a quarter of the sample was expired, within a budget per call. The
+// sample is taken under the fragment lock; each delete then runs under the
+// key's own lock, see deleteExpiredKey, so the fragment is never locked
+// across a network call and no delete slips between the replication and the
+// store of a write in flight.
+func (x *Service) scanFragmentForEviction(partID uint64, name string, f *fragment) {
 	var maxKeyCount = 20
 	var maxTotalCount = 100
 	var totalCount = 0
 
-	dm, err := s.getOrCreateDMap(name)
+	dm, err := x.getOrCreateDMap(strings.TrimPrefix(name, "dmap."))
 	if err != nil {
-		s.log.V(3).Printf("[ERROR] Failed to load DMap: %s: %v", name, err)
+		x.log.V(3).Printf("[ERROR] Failed to load DMap: %s: %v", name, err)
 		return
 	}
 
 	janitor := func() bool {
 		if totalCount > maxTotalCount {
-			// Release the lock. Eviction will be triggered again.
+			// The budget is spent. Eviction will be triggered again.
 			return false
 		}
+
+		candidates := make([]expiredKey, 0, maxKeyCount)
 		f.Lock()
-		defer f.Unlock()
-		count, keyCount := 0, 0
+		keyCount := 0
 		f.storage.RangeHKey(func(hkey uint64) bool {
 			keyCount++
 			if keyCount >= maxKeyCount {
 				// this means 'break'.
 				return false
 			}
+
 			ttl, err := f.storage.GetTTL(hkey)
 			if err != nil {
 				dm.s.log.V(3).Printf("[ERROR] Failed to get TTL for: %d", hkey)
 				return true // continue
 			}
+
 			key, err := f.storage.GetKey(hkey)
 			if err != nil {
 				dm.s.log.V(3).Printf("[ERROR] Failed to get key for: %d", hkey)
@@ -162,19 +171,26 @@ func (s *Service) scanFragmentForEviction(partID uint64, name string, f *fragmen
 			}
 
 			if isKeyExpired(ttl) || dm.isKeyIdleOnFragment(hkey, f) {
-				err = dm.deleteOnCluster(hkey, key, f)
-				if err != nil {
-					// It will be tried again.
-					dm.s.log.V(3).Printf("[ERROR] Failed to delete expired key: %s on DMap: %s: %v",
-						key, dm.name, err)
-					return true
-				}
-
-				// number of valid items removed from cache to free memory for new items.
-				EvictedTotal.Increase(1)
+				candidates = append(candidates, expiredKey{hkey: hkey, key: key})
 			}
+
 			return true
 		})
+		f.Unlock()
+
+		count := 0
+		for _, candidate := range candidates {
+			if err := dm.deleteExpiredKey(f, candidate.hkey, candidate.key); err != nil {
+				// It will be tried again.
+				dm.s.log.V(3).Printf("[ERROR] Failed to delete expired key: %s on DMap: %s: %v",
+					candidate.key, dm.name, err)
+				continue
+			}
+
+			count++
+			// number of valid items removed from cache to free memory for new items.
+			EvictedTotal.Increase(1)
+		}
 
 		totalCount += count
 		return count >= maxKeyCount/4
@@ -182,8 +198,8 @@ func (s *Service) scanFragmentForEviction(partID uint64, name string, f *fragmen
 
 	defer func() {
 		if totalCount > 0 {
-			if s.log.V(6).Ok() {
-				s.log.V(6).Printf("[DEBUG] Evicted key count is %d on PartID: %d", totalCount, partID)
+			if x.log.V(6).Ok() {
+				x.log.V(6).Printf("[DEBUG] Evicted key count is %d on PartID: %d", totalCount, partID)
 			}
 		}
 	}()
@@ -192,7 +208,7 @@ func (s *Service) scanFragmentForEviction(partID uint64, name string, f *fragmen
 		case <-f.ctx.Done():
 			// the fragment is closed.
 			return
-		case <-s.ctx.Done():
+		case <-x.ctx.Done():
 			// The server has gone.
 			return
 		default:
@@ -204,20 +220,64 @@ func (s *Service) scanFragmentForEviction(partID uint64, name string, f *fragmen
 	}
 }
 
+// deleteExpiredKey deletes key, sampled as expired or idle, from the cluster
+// under its key lock. The expiry is checked again under the fragment lock
+// first: a write of the key since the sample makes it live again, and a write
+// in flight holds the key lock, so the delete cannot slip between that
+// write's replication and its store and remove it from the replicas only.
+func (x *DMap) deleteExpiredKey(f *fragment, hkey uint64, key string) error {
+	keyLock := x.s.keyLock(hkey)
+	keyLock.Lock()
+	defer keyLock.Unlock()
+
+	f.Lock()
+	ttl, err := f.storage.GetTTL(hkey)
+	expired := err == nil && (isKeyExpired(ttl) || x.isKeyIdleOnFragment(hkey, f))
+	f.Unlock()
+
+	if errors.Is(err, storage.ErrKeyNotFound) || (err == nil && !expired) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if err := x.deleteRemoteCopies(x.s.ctx, hkey, key); err != nil {
+		return err
+	}
+
+	f.Lock()
+	defer f.Unlock()
+
+	if err := f.storage.Delete(hkey); err != nil {
+		if errors.Is(err, storage.ErrKeyNotFound) {
+			return nil
+		}
+
+		return err
+	}
+
+	// DeleteHits is the number of deletion reqs resulting in an item being removed.
+	DeleteHits.Increase(1)
+	return nil
+}
+
 type lruItem struct {
 	HKey       uint64
 	LastAccess int64
 }
 
-func (dm *DMap) evictKeyWithLRU(e *env) error {
+// lruVictim samples entries of the fragment of e and returns the hashed key
+// and the key of the least recently used one. The caller holds the fragment
+// lock.
+func (x *DMap) lruVictim(e *env) (uint64, string, error) {
 	var idx = 1
 	var items []lruItem
 
-	// Warning: fragment is already locked by DMap.Put. Be sure about that before editing this function.
-
 	// Pick random items from the distributed map and sort them by accessedAt.
 	e.fragment.storage.Range(func(hkey uint64, e storage.Entry) bool {
-		if idx >= dm.config.lruSamples {
+		if idx >= x.config.lruSamples {
 			return false
 		}
 		idx++
@@ -230,7 +290,7 @@ func (dm *DMap) evictKeyWithLRU(e *env) error {
 	})
 
 	if len(items) == 0 {
-		return fmt.Errorf("nothing found to expire with LRU")
+		return 0, "", fmt.Errorf("nothing found to expire with LRU")
 	}
 
 	sort.Slice(items, func(i, j int) bool { return items[i].LastAccess < items[j].LastAccess })
@@ -242,13 +302,28 @@ func (dm *DMap) evictKeyWithLRU(e *env) error {
 			err = ErrKeyNotFound
 			GetMisses.Increase(1)
 		}
+
+		return 0, "", err
+	}
+
+	return item.HKey, key, nil
+}
+
+// evictKeyWithLRU removes the least recently used entry of the fragment of e
+// from the cluster, to make room for a write. The caller holds the fragment
+// lock for the whole write, see setLRUEvictionStats.
+func (x *DMap) evictKeyWithLRU(e *env) error {
+	hkey, key, err := x.lruVictim(e)
+	if err != nil {
 		return err
 	}
+
 	// Here we have a key/value pair to evict for making room for a new pair.
-	if dm.s.log.V(6).Ok() {
-		dm.s.log.V(6).Printf("[DEBUG] Evicted item on DMap: %s, key: %s with LRU", e.dmap, key)
+	if x.s.log.V(6).Ok() {
+		x.s.log.V(6).Printf("[DEBUG] Evicted item on DMap: %s, key: %s with LRU", e.dmap, key)
 	}
-	err = dm.deleteOnCluster(item.HKey, key, e.fragment)
+
+	err = x.deleteOnCluster(e.ctx, hkey, key, e.fragment)
 	if err != nil {
 		return err
 	}

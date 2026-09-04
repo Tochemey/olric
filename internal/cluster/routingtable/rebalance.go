@@ -22,10 +22,19 @@ import (
 	"slices"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/hashicorp/memberlist"
 
+	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/protocol"
+)
+
+const (
+	// overdueEpochIntervals is how many balancer intervals an epoch may stay
+	// open before the members whose ack it waits for are logged, once per
+	// further interval, so a stuck convergence names its cause.
+	overdueEpochIntervals = 3
 )
 
 type rebalanceReason string
@@ -90,12 +99,15 @@ func rebalanceReasonFromEvent(event *discovery.ClusterEvent) (rebalanceReason, s
 }
 
 // startRebalanceEpoch activates a new rebalance epoch. memberIDs is the set of
-// members that confirmed receipt of the routing table push for this epoch: a
-// member that never received the table cannot balance against it, so it must
-// not gate the epoch (an unbootstrapped joiner would otherwise block every
-// epoch forever). members lists the addresses of the members the pushed table
-// was computed for; it is reported with the completion of the epoch.
-func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason, node string, memberIDs []uint64, members []string) {
+// live members the pushed table was computed for, every one of them: a member
+// the fan-out could not reach installs the table through the retried push or
+// its own pull and acks then, and one that leaves meanwhile stops gating the
+// epoch, see checkRebalanceCompletionLocked. Gating on the members the first
+// push reached instead let the completion be announced while a member whose
+// push was still being retried routed requests on the old table, to a member
+// that had died. members lists the addresses of the same members; it is
+// reported with the completion of the epoch.
+func (x *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason, node string, memberIDs []uint64, members []string) {
 	if epoch == 0 {
 		return
 	}
@@ -111,11 +123,11 @@ func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason,
 
 	// The coordinator installed its own push before starting the epoch, so
 	// its generation is the one of the pushed table.
-	generation := r.Generation()
+	generation := x.Generation()
 
-	r.rebalanceMtx.Lock()
+	x.rebalanceMtx.Lock()
 	startPublished := make(chan struct{})
-	r.rebalanceState = rebalanceState{
+	x.rebalanceState = rebalanceState{
 		epoch:          epoch,
 		generation:     generation,
 		members:        members,
@@ -125,82 +137,184 @@ func (r *RoutingTable) startRebalanceEpoch(epoch uint64, reason rebalanceReason,
 	}
 	// Harvest acks that raced the epoch start: members that processed the
 	// pushed table acked while the coordinator was still fanning it out.
-	for id := range r.earlyAcks[epoch] {
-		if _, ok := pending[id]; ok {
-			r.rebalanceState.acked[id] = struct{}{}
-		}
+	// Members outside the pending set are recorded too, as handleRebalanceAck
+	// does: one that pulled the table during the fan-out joins the pending
+	// set when the retried push lands, and its ack must count then.
+	for id := range x.earlyAcks[epoch] {
+		x.rebalanceState.acked[id] = struct{}{}
 	}
-	r.earlyAcks = make(map[uint64]map[uint64]struct{})
+	x.earlyAcks = make(map[uint64]map[uint64]struct{})
 
 	// The start is stamped, and its publish started, before the completion
 	// check: when every ack was harvested early the completion is published
 	// from inside that check, and it must neither carry an earlier timestamp
 	// than its start nor reach subscribers before it.
 	startedAt := time.Now().UnixNano()
-	published := r.config.EnableClusterEventsChannel && r.spawn(func() {
+	published := x.config.EnableClusterEventsChannel && x.spawn(func() {
 		defer close(startPublished)
 
-		r.publishRebalanceStartEvent(epoch, generation, string(reason), node, startedAt)
+		x.publishRebalanceStartEvent(epoch, generation, string(reason), node, startedAt)
 	})
 	if !published {
 		close(startPublished)
 	}
 
-	r.checkRebalanceCompletionLocked()
-	r.rebalanceMtx.Unlock()
+	x.checkRebalanceCompletionLocked()
+	completed := x.rebalanceState.completed
+	x.rebalanceMtx.Unlock()
+
+	if !completed {
+		x.spawn(func() { x.watchOverdueEpoch(epoch, generation) })
+	}
+}
+
+// watchOverdueEpoch logs, once per balancer interval after overdueEpochIntervals
+// of them, the members whose ack the epoch started for generation is still
+// waiting on. It ends as soon as that epoch completes or is superseded, so no
+// goroutine outlives an open epoch and a quiescent cluster runs none.
+func (x *RoutingTable) watchOverdueEpoch(epoch, generation uint64) {
+	interval := x.config.TriggerBalancerInterval
+	if interval <= 0 {
+		interval = config.DefaultTriggerBalancerInterval
+	}
+
+	started := time.Now()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for tick := 1; ; tick++ {
+		select {
+		case <-x.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		missing, open := x.overdueMembers(epoch, generation)
+		if !open {
+			return
+		}
+
+		if tick >= overdueEpochIntervals {
+			x.log.V(2).Printf("[WARN] Rebalance epoch %d (generation %d) is still open after %s, waiting for the ack of %v",
+				epoch, generation, time.Since(started).Round(time.Millisecond), missing)
+		}
+	}
+}
+
+// overdueMembers returns, sorted, the names of the live members in the pending
+// set of the epoch started for generation that have not acked it, and whether
+// that epoch is still the active, uncompleted one.
+func (x *RoutingTable) overdueMembers(epoch, generation uint64) ([]string, bool) {
+	x.rebalanceMtx.Lock()
+	defer x.rebalanceMtx.Unlock()
+
+	state := x.rebalanceState
+	if state.epoch != epoch || state.generation != generation || state.completed {
+		return nil, false
+	}
+
+	var missing []string
+
+	x.Members().RLock()
+	x.Members().Range(func(id uint64, member discovery.Member) bool {
+		if _, pending := state.pending[id]; !pending {
+			return true
+		}
+
+		if _, acked := state.acked[id]; acked {
+			return true
+		}
+
+		missing = append(missing, member.String())
+		return true
+	})
+	x.Members().RUnlock()
+
+	slices.Sort(missing)
+	return missing, true
 }
 
 // memberNames returns the addresses of the current members in sorted order.
 // Taken before a routing table is computed, it names the members that table
 // was computed for.
 func (x *RoutingTable) memberNames() []string {
+	_, names := x.memberSnapshot()
+	return names
+}
+
+// memberSnapshot returns the IDs and the sorted addresses of the current
+// members, taken under one read lock so both describe the same membership.
+func (x *RoutingTable) memberSnapshot() ([]uint64, []string) {
 	x.Members().RLock()
 	defer x.Members().RUnlock()
 
+	ids := make([]uint64, 0, x.Members().Length())
 	names := make([]string, 0, x.Members().Length())
-	x.Members().Range(func(_ uint64, member discovery.Member) bool {
+	x.Members().Range(func(id uint64, member discovery.Member) bool {
+		ids = append(ids, id)
 		names = append(names, member.String())
 		return true
 	})
 
 	slices.Sort(names)
-	return names
+	return ids, names
 }
 
-func (r *RoutingTable) handleRebalanceAck(epoch, memberID uint64) ackStatus {
-	r.rebalanceMtx.Lock()
-	defer r.rebalanceMtx.Unlock()
+// committedSignature returns the signature of the payload this coordinator
+// committed last, zero when it committed none. It can run ahead of the
+// installed signature while the coordinator's own push is in flight.
+func (x *RoutingTable) committedSignature() uint64 {
+	payload, ok := x.committedPayload.Load().([]byte)
+	if !ok || len(payload) == 0 {
+		return 0
+	}
 
-	if r.rebalanceState.epoch == 0 || r.rebalanceState.epoch != epoch {
+	return xxhash.Sum64(payload)
+}
+
+// handleRebalanceAck records the ack of memberID for epoch and reports whether
+// it was accepted, buffered as early, or stale.
+func (x *RoutingTable) handleRebalanceAck(epoch, memberID uint64) ackStatus {
+	x.rebalanceMtx.Lock()
+	defer x.rebalanceMtx.Unlock()
+
+	if x.rebalanceState.epoch == 0 || x.rebalanceState.epoch != epoch {
 		// The push fan-out and startRebalanceEpoch are not atomic: a member
-		// that applies the pushed table quickly acks before the epoch becomes
-		// active. Buffer acks matching the committed table signature; they are
-		// harvested when the epoch starts.
-		if epoch == r.Signature() {
-			if r.earlyAcks[epoch] == nil {
-				r.earlyAcks[epoch] = make(map[uint64]struct{})
+		// that applies the pushed table quickly, or pulls the committed one,
+		// acks before the epoch becomes active. Buffer acks matching the
+		// installed or the committed table signature; they are harvested
+		// when the epoch starts.
+		if epoch == x.Signature() || epoch == x.committedSignature() {
+			if x.earlyAcks[epoch] == nil {
+				x.earlyAcks[epoch] = make(map[uint64]struct{})
 			}
-			r.earlyAcks[epoch][memberID] = struct{}{}
+			x.earlyAcks[epoch][memberID] = struct{}{}
 			return ackEarly
 		}
 		return ackStale
 	}
-	if r.rebalanceState.completed {
-		return ackAccepted
-	}
-	if _, ok := r.rebalanceState.pending[memberID]; !ok {
-		return ackAccepted
-	}
-	if _, ok := r.rebalanceState.acked[memberID]; ok {
+
+	if x.rebalanceState.completed {
 		return ackAccepted
 	}
 
-	r.rebalanceState.acked[memberID] = struct{}{}
+	if _, ok := x.rebalanceState.acked[memberID]; ok {
+		return ackAccepted
+	}
+
+	// Recorded whether or not the member is in the pending set: a member that
+	// receives the table on a push retry joins the set afterwards, see
+	// admitLatePush, and its ack must count then.
+	x.rebalanceState.acked[memberID] = struct{}{}
+
+	if _, ok := x.rebalanceState.pending[memberID]; !ok {
+		return ackAccepted
+	}
 
 	// Check completion based on live members only (not departed ones)
 	// This implements: "completes only after all live members report"
 	// and "node-left-event remains a membership signal, not a rebalance barrier"
-	r.checkRebalanceCompletionLocked()
+	x.checkRebalanceCompletionLocked()
 
 	return ackAccepted
 }

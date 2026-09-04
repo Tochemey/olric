@@ -59,9 +59,12 @@ type Service struct {
 	dmaps     map[string]*DMap
 	storage   *storageMap
 	syncState *syncstate.State
-	wg        sync.WaitGroup
-	ctx       context.Context
-	cancel    context.CancelFunc
+	// keys serializes the operations on one key across replication, see
+	// keyLocks.
+	keys   keyLocks
+	wg     sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// shutdownMtx guards closed against the wg.Add/wg.Wait race. Shutdown sets
 	// closed under this lock before calling wg.Wait, and spawn takes the same
