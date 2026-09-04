@@ -7,12 +7,7 @@ Tracks the olric side of [GoAkt issue #1340](https://github.com/Tochemey/goakt/i
 `SIGKILL`, GoAkt's `NodeLeft` event is held until its 30-second fallback because the olric routing
 table does not converge on the departure in time.
 
-Investigated on this fork (`v0.3.19`, current `main`) against GoAkt `v4.5.3+6` (`8809865138e6`). This
-fork branched from upstream `olric-data/olric` at its `v0.5.7` and numbers its own releases
-independently, so the fork's `v0.3.19` and upstream's versions are separate lines, not the same one.
-The [root-cause table](#root-causes-and-provenance) checks each cause in that base (`v0.5.7`) and in
-upstream's latest (`v0.7.4`) to show whether the bug was inherited from upstream and whether upstream
-has since fixed it.
+Investigated on this fork at `v0.3.19` against GoAkt `v4.5.3+6` (`8809865138e6`). The fork branched from upstream `olric-data/olric` at upstream's `v0.5.7` and has versioned its releases independently since, so `v0.3.19` is the fork's own number and does not correspond to any upstream release. The [root-cause table](#root-causes-and-provenance) checks each cause in that base (`v0.5.7`) and in upstream's latest (`v0.7.4`) to show whether the bug was inherited from upstream and whether upstream has since fixed it.
 
 ## Table of Contents
 
@@ -23,6 +18,7 @@ has since fixed it.
 * [Industry practice](#industry-practice)
 * [Design rules for the fix](#design-rules-for-the-fix)
 * [Principles and performance check](#principles-and-performance-check)
+* [Convergence flow after a departure](#convergence-flow-after-a-departure)
 * [Fixes](#fixes)
 * [Implementation notes](#implementation-notes)
 * [Validation plan](#validation-plan)
@@ -62,12 +58,12 @@ Times are relative to the crash and measured on a surviving member's `cluster.ev
 Larger sizes were not measured; the [scale table](#expected-nodeleft-latency-by-cluster-size) below
 derives them from memberlist's formulas and flags them as projections.
 
-| Scenario | memberlist drops the node | first `rebalance-complete` without it |
-|---|---|---|
-| coordinator crash, normal gossip (3 runs) | 5.5–6.5s | 11.7–12.5s |
-| non-coordinator crash | 5.4s | 11.5s |
-| coordinator crash, escape lowered to 1s | 8.4s | 10.5s |
-| coordinator crash, push rejected (2 of 4 runs with slowed gossip on the new coordinator) | 5.3–6.3s | **56.6s** |
+| Scenario                                                                                 | memberlist drops the node | first `rebalance-complete` without it |
+|------------------------------------------------------------------------------------------|---------------------------|---------------------------------------|
+| coordinator crash, normal gossip (3 runs)                                                | 5.5–6.5s                  | 11.7–12.5s                            |
+| non-coordinator crash                                                                    | 5.4s                      | 11.5s                                 |
+| coordinator crash, escape lowered to 1s                                                  | 8.4s                      | 10.5s                                 |
+| coordinator crash, push rejected (2 of 4 runs with slowed gossip on the new coordinator) | 5.3–6.3s                  | **56.6s**                             |
 
 Log lines from the rejected-push runs, as the reporter would see them at GoAkt's INFO level:
 
@@ -82,11 +78,11 @@ installed the table on the stale member and the epoch completed at +56.6s.
 
 ## Root causes and provenance
 
-| Root cause | Upstream v0.5.7 (fork base) | Upstream v0.7.4 (latest) | This fork |
-|---|---|---|---|
-| 1. Rejected or lost push not retried until the periodic push | Present; whole update fails on one rejection | Present, unchanged | Present; commits to reachable members only |
-| 2. Node-left waits for the empty-partition escape | Absent, no sync state exists | Absent | Present |
-| 3. Write holds the fragment lock across replication, no deadline | Present | Present, unchanged | Present, untouched |
+| Root cause                                                       | Upstream v0.5.7 (fork base)                  | Upstream v0.7.4 (latest) | This fork                                  |
+|------------------------------------------------------------------|----------------------------------------------|--------------------------|--------------------------------------------|
+| 1. Rejected or lost push not retried until the periodic push     | Present; whole update fails on one rejection | Present, unchanged       | Present; commits to reachable members only |
+| 2. Node-left waits for the empty-partition escape                | Absent, no sync state exists                 | Absent                   | Present                                    |
+| 3. Write holds the fragment lock across replication, no deadline | Present                                      | Present, unchanged       | Present, untouched                         |
 
 ### 1. A rejected or lost table push is not retried until the next periodic push
 
@@ -154,27 +150,27 @@ slower than the measurements above. Inherited from upstream unchanged, still pre
 Everything found during the investigation, with the fix that closes it. Nothing in this table is left
 open by the plan.
 
-| # | Gap | Found in | Closed by |
-|---|---|---|---|
-| G1 | A rejected or lost table push is not retried before the periodic push | root cause 1 | Fix 1 |
-| G2 | A pull during a fan-out can return the previous table; no anti-entropy pull on coordinator change | Fix 1 analysis | Fix 1 |
-| G3 | No visibility of an epoch that is overdue, nor of which members have not acked | scale review | Fix 1 |
-| G4 | The primary copy of a partition is not re-established after its primary owner dies; replication factor stays reduced until a write | root cause 2 | Fix 2 |
-| G5 | Node-left convergence waits the full escape for data that nothing delivers | root cause 2 | Fix 2 |
-| G6 | A failed proactive primary-to-backup push is never retried for that table | code review | Fix 2 |
-| G7 | Writes and deletes hold the fragment lock across replication with no deadline | root cause 3 | Fix 3, Fix 4 |
-| G8 | Replication, lookups and fragment moves dial members memberlist has already removed | root cause 3 | Fix 3 |
-| G9 | The balancer parks for a tick after a cycle that moved data before it acks | code review | Fix 5 |
-| G10 | A membership change that leaves the table unchanged emits no authoritative event | announcement model | Fix 6 |
-| G11 | Every member's local observation is relayed to every member: `members²` deliveries per change | announcement model | Fix 6 |
-| G12 | Table computation issues one key-count round trip per owner per partition, sequentially, under the routing lock | scale review | Fix 7 |
-| G13 | Membership is re-read from memberlist once per owner per partition during computation | scale review | Fix 7 |
-| G14 | Push fan-out concurrency equals the coordinator's `NumCPU` | scale review | Fix 7 |
-| G15 | Expected latencies, their formulas and tuning are undocumented | issue | Fix 8 |
-| G16 | Graceful departures and rolling restarts must not pay for crash recovery: no added shutdown latency, no added data movement when the member returns | review | Fix 1, Fix 2, [Graceful shutdown](#graceful-shutdown-and-rolling-restarts) |
-| G17 | A member that missed an intermediate table does not ack an epoch whose table content recurred: it sees no new generation | found by the rolling-restart scenario | Fix 1 (table sequence in the push) |
-| G18 | A fragment delivered while a member installs a table, between its scan of empty partitions and its reconcile, is waited for again until the escape | found by the rolling-restart scenario | Fix 2 (sync state keeps install-time marks) |
-| G19 | The proactive push ran from the install callback only, once per table, and marked the table done before a partition's data had arrived or when a push had failed | found by the coordinator-crash scenario | Fix 2 (per partition, every cycle, retried) |
+| #   | Gap                                                                                                                                                              | Found in                                | Closed by                                                                  |
+|-----|------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------|----------------------------------------------------------------------------|
+| G1  | A rejected or lost table push is not retried before the periodic push                                                                                            | root cause 1                            | Fix 1                                                                      |
+| G2  | A pull during a fan-out can return the previous table; no anti-entropy pull on coordinator change                                                                | Fix 1 analysis                          | Fix 1                                                                      |
+| G3  | No visibility of an epoch that is overdue, nor of which members have not acked                                                                                   | scale review                            | Fix 1                                                                      |
+| G4  | The primary copy of a partition is not re-established after its primary owner dies; replication factor stays reduced until a write                               | root cause 2                            | Fix 2                                                                      |
+| G5  | Node-left convergence waits the full escape for data that nothing delivers                                                                                       | root cause 2                            | Fix 2                                                                      |
+| G6  | A failed proactive primary-to-backup push is never retried for that table                                                                                        | code review                             | Fix 2                                                                      |
+| G7  | Writes and deletes hold the fragment lock across replication with no deadline                                                                                    | root cause 3                            | Fix 3, Fix 4                                                               |
+| G8  | Replication, lookups and fragment moves dial members memberlist has already removed                                                                              | root cause 3                            | Fix 3                                                                      |
+| G9  | The balancer parks for a tick after a cycle that moved data before it acks                                                                                       | code review                             | Fix 5                                                                      |
+| G10 | A membership change that leaves the table unchanged emits no authoritative event                                                                                 | announcement model                      | Fix 6                                                                      |
+| G11 | Every member's local observation is relayed to every member: `members²` deliveries per change                                                                    | announcement model                      | Fix 6                                                                      |
+| G12 | Table computation issues one key-count round trip per owner per partition, sequentially, under the routing lock                                                  | scale review                            | Fix 7                                                                      |
+| G13 | Membership is re-read from memberlist once per owner per partition during computation                                                                            | scale review                            | Fix 7                                                                      |
+| G14 | Push fan-out concurrency equals the coordinator's `NumCPU`                                                                                                       | scale review                            | Fix 7                                                                      |
+| G15 | Expected latencies, their formulas and tuning are undocumented                                                                                                   | issue                                   | Fix 8                                                                      |
+| G16 | Graceful departures and rolling restarts must not pay for crash recovery: no added shutdown latency, no added data movement when the member returns              | review                                  | Fix 1, Fix 2, [Graceful shutdown](#graceful-shutdown-and-rolling-restarts) |
+| G17 | A member that missed an intermediate table does not ack an epoch whose table content recurred: it sees no new generation                                         | found by the rolling-restart scenario   | Fix 1 (table sequence in the push)                                         |
+| G18 | A fragment delivered while a member installs a table, between its scan of empty partitions and its reconcile, is waited for again until the escape               | found by the rolling-restart scenario   | Fix 2 (sync state keeps install-time marks)                                |
+| G19 | The proactive push ran from the install callback only, once per table, and marked the table done before a partition's data had arrived or when a push had failed | found by the coordinator-crash scenario | Fix 2 (per partition, every cycle, retried)                                |
 
 Two items raised along the way are design choices rather than defects and are recorded in
 [Decisions that are not gaps](#decisions-that-are-not-gaps).
@@ -184,15 +180,15 @@ Two items raised along the way are design choices rather than defects and are re
 How comparable systems handle a crashed member, with their shipped defaults. The point is not the
 absolute numbers but the shape every one of them shares.
 
-| System | Failure detection | Default time to confirmed removal | State dissemination after removal |
-|---|---|---|---|
-| Consul / Serf (memberlist) | SWIM probes, suspicion with peer confirmations | ~6s on LAN for small clusters, growing with log10(members) | Gossip with periodic full state sync (push/pull) as anti-entropy |
-| Akka Cluster | Phi accrual heartbeats, 1s interval, 3s acceptable pause | Unreachable in a few seconds; Down only after `stable-after` (20s) via split brain resolver | Gossip, versioned with vector clocks; singleton hand-over only after Down |
-| Cassandra | Phi accrual, gossip every 1s, convict threshold 8 | Seconds | Versioned gossip state, anti-entropy repair; re-replication restores the replication factor |
-| Hazelcast | Heartbeat deadline detector, 5s heartbeats | 60s (`max.no.heartbeat.seconds`), phi accrual optional | Master pushes a versioned partition table; members re-fetch on master change; backups promoted and re-created |
-| Redis Cluster | PFAIL by one node, FAIL by majority | `cluster-node-timeout` 15s, failover shortly after | Epoch-versioned config broadcast; higher epoch always wins; replica promoted, new replicas migrated |
-| etcd / Raft | Leader heartbeats | Election timeout 1s, new leader in 1–2s | Log replication with term fencing |
-| Kubernetes | Kubelet heartbeats | Node NotReady after 40s, pod eviction after 5m | Taint based |
+| System                     | Failure detection                                        | Default time to confirmed removal                                                           | State dissemination after removal                                                                             |
+|----------------------------|----------------------------------------------------------|---------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| Consul / Serf (memberlist) | SWIM probes, suspicion with peer confirmations           | ~6s on LAN for small clusters, growing with log10(members)                                  | Gossip with periodic full state sync (push/pull) as anti-entropy                                              |
+| Akka Cluster               | Phi accrual heartbeats, 1s interval, 3s acceptable pause | Unreachable in a few seconds; Down only after `stable-after` (20s) via split brain resolver | Gossip, versioned with vector clocks; singleton hand-over only after Down                                     |
+| Cassandra                  | Phi accrual, gossip every 1s, convict threshold 8        | Seconds                                                                                     | Versioned gossip state, anti-entropy repair; re-replication restores the replication factor                   |
+| Hazelcast                  | Heartbeat deadline detector, 5s heartbeats               | 60s (`max.no.heartbeat.seconds`), phi accrual optional                                      | Master pushes a versioned partition table; members re-fetch on master change; backups promoted and re-created |
+| Redis Cluster              | PFAIL by one node, FAIL by majority                      | `cluster-node-timeout` 15s, failover shortly after                                          | Epoch-versioned config broadcast; higher epoch always wins; replica promoted, new replicas migrated           |
+| etcd / Raft                | Leader heartbeats                                        | Election timeout 1s, new leader in 1–2s                                                     | Log replication with term fencing                                                                             |
+| Kubernetes                 | Kubelet heartbeats                                       | Node NotReady after 40s, pod eviction after 5m                                              | Taint based                                                                                                   |
 
 Common shape:
 
@@ -254,16 +250,16 @@ recovery.
 * **P7. Redis protocol on the wire, rolling upgrades tolerated.** Members of the previous version keep
   working during an upgrade wherever the change allows it.
 
-| Fix | Industry pattern | Principles touched | How they are respected | Hot path cost | Steady-state cost | Cost during recovery |
-|---|---|---|---|---|---|---|
-| 1 | Push, retry with backoff, anti-entropy | P1, P2, P5 | Same coordinator-push model; the retry is bounded; the pull runs only on a coordinator change | None | None: nothing runs when pushes land | One small RPC per unreachable member per backoff step |
-| 2 | Delayed re-replication restores the replication factor | P2, P3, P6 | Uses the balancer's own move path and LWW merge; runs only behind the opt-in flag, the default stays lazy repair; delayed so a returning member causes no movement | None | None: once per installed table, nothing on an unchanged push | After the restore delay only: one pipelined probe per primary owner, then `1/members` of the dataset transferred once; nothing if the member returned |
-| 3 | Deadlines, fail fast to dead peers | P3, P7 | Quorum outcomes unchanged | One map lookup per target; one timer per call only when the caller set no deadline | None | Writes to a dead replica fail within the client timeouts |
-| 4 | No locks held across network I/O | **P4, bent** | The key lock wraps only writes; the fragment lock still guards storage; LWW unchanged | One striped mutex per write, strictly less contention than today's fragment lock | None | Reads, key counts and moves no longer wait on a stuck replica |
-| 5 | Work until quiescent | P5 | Bounded by the existing attempt cap | None | None | The ack lands one tick earlier |
-| 6 | One authoritative membership event; local observations stay local | P1, P2; **upstream's relay of observations changes** | The coordinator remains the single authority; observations still exist, locally | None | None | One event per change instead of `members²` relayed copies |
-| 7 | Batch and pipeline | P2, P5 | The computed table is identical | None | None | `O(members)` round trips instead of `O(partitions × owners)` |
-| 8 | Published expectations | – | – | – | – | – |
+| Fix | Industry pattern                                                  | Principles touched                                   | How they are respected                                                                                                                                             | Hot path cost                                                                      | Steady-state cost                                            | Cost during recovery                                                                                                                                  |
+|-----|-------------------------------------------------------------------|------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|--------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1   | Push, retry with backoff, anti-entropy                            | P1, P2, P5                                           | Same coordinator-push model; the retry is bounded; the pull runs only on a coordinator change                                                                      | None                                                                               | None: nothing runs when pushes land                          | One small RPC per unreachable member per backoff step                                                                                                 |
+| 2   | Delayed re-replication restores the replication factor            | P2, P3, P6                                           | Uses the balancer's own move path and LWW merge; runs only behind the opt-in flag, the default stays lazy repair; delayed so a returning member causes no movement | None                                                                               | None: once per installed table, nothing on an unchanged push | After the restore delay only: one pipelined probe per primary owner, then `1/members` of the dataset transferred once; nothing if the member returned |
+| 3   | Deadlines, fail fast to dead peers                                | P3, P7                                               | Quorum outcomes unchanged                                                                                                                                          | One map lookup per target; one timer per call only when the caller set no deadline | None                                                         | Writes to a dead replica fail within the client timeouts                                                                                              |
+| 4   | No locks held across network I/O                                  | **P4, bent**                                         | The key lock wraps only writes; the fragment lock still guards storage; LWW unchanged                                                                              | One striped mutex per write, strictly less contention than today's fragment lock   | None                                                         | Reads, key counts and moves no longer wait on a stuck replica                                                                                         |
+| 5   | Work until quiescent                                              | P5                                                   | Bounded by the existing attempt cap                                                                                                                                | None                                                                               | None                                                         | The ack lands one tick earlier                                                                                                                        |
+| 6   | One authoritative membership event; local observations stay local | P1, P2; **upstream's relay of observations changes** | The coordinator remains the single authority; observations still exist, locally                                                                                    | None                                                                               | None                                                         | One event per change instead of `members²` relayed copies                                                                                             |
+| 7   | Batch and pipeline                                                | P2, P5                                               | The computed table is identical                                                                                                                                    | None                                                                               | None                                                         | `O(members)` round trips instead of `O(partitions × owners)`                                                                                          |
+| 8   | Published expectations                                            | –                                                    | –                                                                                                                                                                  | –                                                                                  | –                                                            | –                                                                                                                                                     |
 
 Two fixes bend a principle, and both are taken (see [Decisions taken](#decisions-taken)):
 
@@ -277,6 +273,34 @@ Two fixes bend a principle, and both are taken (see [Decisions taken](#decisions
 Both are applied after the other fixes and are gated on the full CI run and the kill integration
 tests. Per-operation costs and the allocation budget are in
 [Throughput, latency and GC impact](#throughput-latency-and-gc-impact).
+
+## Convergence flow after a departure
+
+The path from an abrupt crash to the `rebalance-complete-event` a consumer waits on, with the fix that owns each step. `node-left-event` stays local as the fast tier a member uses to steer traffic off the dead address, while `membership-change-event` and the rebalance pair are the authoritative tier the coordinator publishes. `T_detect` is memberlist's share and is untouched by this work; everything after it is `T_olric`, which the fixes reduce.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as Departed member
+    participant ML as memberlist
+    participant C as Coordinator (oldest survivor)
+    participant M as Surviving members
+    participant K as Consumer (GoAkt)
+
+    Note over D: crash (SIGKILL, no leave)
+    Note over ML: probe fails, peers confirm death (T_detect)
+    ML->>C: member removed
+    ML-->>M: member removed (gossip can lag)
+    C->>K: membership-change-event, before any table work (Fix 6)
+    C->>C: recompute routing table
+    C->>M: push table + sequence
+    Note over C,M: rejected or lost push retried with backoff,<br/>a member pulls on coordinator change (Fix 1)
+    M->>M: install table, promote backup to primary,<br/>proactive push to replicas
+    M->>M: after ReplicaRestoreDelay, restore departed<br/>member's primary copies (Fix 2)
+    M->>C: ack once quiescent (Fix 5)
+    C->>K: rebalance-complete-event, members exclude departed
+    K->>K: release NodeLeft
+```
 
 ## Fixes
 
@@ -658,32 +682,32 @@ and checks, on every survivor:
 Timing budgets are relative to memberlist detection measured by `rt.NumMembers()` dropping on the
 survivors, so the assertions hold for any memberlist profile.
 
-| # | Scenario | Setup | Expected outcome beyond the invariants | Test |
-|---|---|---|---|---|
-| S1 | Non-coordinator crash, data present | 4 members, `ReplicaCount 2`, flag on, `kill` without leave | Completion within detection + 3s; no ack waited on the escape | `olric_test.go` |
-| S2 | Coordinator crash, data present | Same, victim is the oldest | New coordinator publishes the membership change and the epoch; completion within detection + 3s | `olric_test.go` |
-| S3 | Coordinator crash with the push race provoked | S2 plus `GossipInterval 2s` on the second oldest | At least one member rejects the first push; the retry lands within 2s; completion within detection + 3s | `olric_test.go` |
-| S4 | Crash with re-replication off | S1 with the flag off | Completion within detection + 3s; partitions whose primary died keep one copy on the backup holder; reads still serve every key | `olric_test.go` |
-| S5 | Graceful leave | S1 with `Shutdown` | Same invariants, completion within 3s of the leave | `olric_test.go`, existing tests kept |
-| S6 | Two crashes back to back | 5 members, `ReplicaCount 2`, second crash 1s after the first completion | No key lost; both departures produce one membership change each; completion within detection + 3s of the second | `integration_test.go`, extends the rolling-restart test |
-| S7 | Crash during a join | S1 with a fifth member joining as the victim dies | Joiner bootstraps; membership changes for both events; the completion members are the four survivors | `olric_test.go` |
-| S8 | Departure that leaves the table unchanged | `PartitionCount 7`, 4 members, the member owning nothing leaves | `membership-change-event` published although no epoch starts; no `rebalance-start-event` | `routingtable_test.go` |
-| S9 | Quorum blocks the table update | `MemberCountQuorum` above the survivor count | `membership-change-event` still published; no push; recovery when a member joins and quorum returns | `routingtable_test.go` |
-| S10 | Member unreachable for longer than the push interval | Member's RESP server stopped, `RoutingTablePushInterval 2s` | Retry gives up at the interval; epoch completes without the member; the member installs the table on the next periodic push once its server is back | `update_test.go` |
-| S11 | Coordinator crash while a retry is running | S10's retry in flight, then crash the coordinator | Old retry stops; new coordinator's table lands; completion on the new coordinator | `olric_test.go` |
-| S12 | Packet-drop replica | Backup owner's address replaced by a listener that accepts and never answers | Put returns within the client timeouts; key counts, moves and table computation complete while the write is blocked | `put_test.go`, `update_test.go` |
-| S13 | Concurrent writes to one key with a slow replica | S12 with 100 concurrent puts to one key | Primary and replicas hold the same final value; puts to other keys are not delayed | `put_test.go` |
-| S14 | Write interleaved with a fragment move | Move exported between a write's replication and its local write | No key lost; the late write is moved by the next balancer cycle | `balance_test.go` |
-| S15 | Stable cluster | 4 members idle for three push intervals | Zero retries, pulls, restore probes, proactive pushes and events; signature and generation unchanged | `olric_test.go` |
-| S16 | Large partition count | 3 members, `PartitionCount 4096`, one departure | Table computation issues one pipelined probe per owner; timing logged, not asserted | `distribute_test.go` |
-| S17 | `ReplicaCount 3`, one crash | 5 members, flag on | New primary receives its copy from either backup holder; duplicates merge cleanly; three copies afterwards | `olric_test.go` |
-| S18 | `ReplicaCount 1`, one crash | 4 members | Completion within detection + 3s; keys owned by the victim are gone, as documented | `olric_test.go` |
-| S19 | Consumer gate simulation | S3 plus a subscriber that releases a departure when a `membership-change-event` for it is followed by a completion without it | Release latency below detection + 3s in every run of a 10-run loop | `olric_test.go` |
-| S20 | Rejoin after partition | Existing `RejoinLoop` tests | Unchanged and passing; membership changes published on rejoin | existing |
-| S21 | Graceful leave and rejoin within the restore delay | 4 members, data present, default `ReplicaRestoreDelay`, member leaves and rejoins after 5s | No restore transfer at all: the count of `fragment-migration-event`s equals today's join sync; the rejoined member is primary owner of its partitions again | `olric_test.go` |
-| S22 | Shutdown latency | 4 members, data present, graceful `Shutdown` of a non-coordinator and of the coordinator | Shutdown duration within noise of the baseline recorded on `main`; no goroutine of the plan outlives it | `olric_test.go` |
-| S23 | Rolling restart | 4 members, each restarted in turn with a 5s gap, default delay, flag on | Every key readable throughout; total data moved equals today's; one membership change per leave and per join; no restore transfer | `integration_test.go` |
-| S24 | Crash, member never returns | S1 with `ReplicaRestoreDelay 2s` | Restore begins after the delay and every partition has `ReplicaCount` copies within the delay plus two balancer cycles | `olric_test.go` |
+| #   | Scenario                                             | Setup                                                                                                                         | Expected outcome beyond the invariants                                                                                                                      | Test                                                    |
+|-----|------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------|
+| S1  | Non-coordinator crash, data present                  | 4 members, `ReplicaCount 2`, flag on, `kill` without leave                                                                    | Completion within detection + 3s; no ack waited on the escape                                                                                               | `olric_test.go`                                         |
+| S2  | Coordinator crash, data present                      | Same, victim is the oldest                                                                                                    | New coordinator publishes the membership change and the epoch; completion within detection + 3s                                                             | `olric_test.go`                                         |
+| S3  | Coordinator crash with the push race provoked        | S2 plus `GossipInterval 2s` on the second oldest                                                                              | At least one member rejects the first push; the retry lands within 2s; completion within detection + 3s                                                     | `olric_test.go`                                         |
+| S4  | Crash with re-replication off                        | S1 with the flag off                                                                                                          | Completion within detection + 3s; partitions whose primary died keep one copy on the backup holder; reads still serve every key                             | `olric_test.go`                                         |
+| S5  | Graceful leave                                       | S1 with `Shutdown`                                                                                                            | Same invariants, completion within 3s of the leave                                                                                                          | `olric_test.go`, existing tests kept                    |
+| S6  | Two crashes back to back                             | 5 members, `ReplicaCount 2`, second crash 1s after the first completion                                                       | No key lost; both departures produce one membership change each; completion within detection + 3s of the second                                             | `integration_test.go`, extends the rolling-restart test |
+| S7  | Crash during a join                                  | S1 with a fifth member joining as the victim dies                                                                             | Joiner bootstraps; membership changes for both events; the completion members are the four survivors                                                        | `olric_test.go`                                         |
+| S8  | Departure that leaves the table unchanged            | `PartitionCount 7`, 4 members, the member owning nothing leaves                                                               | `membership-change-event` published although no epoch starts; no `rebalance-start-event`                                                                    | `routingtable_test.go`                                  |
+| S9  | Quorum blocks the table update                       | `MemberCountQuorum` above the survivor count                                                                                  | `membership-change-event` still published; no push; recovery when a member joins and quorum returns                                                         | `routingtable_test.go`                                  |
+| S10 | Member unreachable for longer than the push interval | Member's RESP server stopped, `RoutingTablePushInterval 2s`                                                                   | Retry gives up at the interval; epoch completes without the member; the member installs the table on the next periodic push once its server is back         | `update_test.go`                                        |
+| S11 | Coordinator crash while a retry is running           | S10's retry in flight, then crash the coordinator                                                                             | Old retry stops; new coordinator's table lands; completion on the new coordinator                                                                           | `olric_test.go`                                         |
+| S12 | Packet-drop replica                                  | Backup owner's address replaced by a listener that accepts and never answers                                                  | Put returns within the client timeouts; key counts, moves and table computation complete while the write is blocked                                         | `put_test.go`, `update_test.go`                         |
+| S13 | Concurrent writes to one key with a slow replica     | S12 with 100 concurrent puts to one key                                                                                       | Primary and replicas hold the same final value; puts to other keys are not delayed                                                                          | `put_test.go`                                           |
+| S14 | Write interleaved with a fragment move               | Move exported between a write's replication and its local write                                                               | No key lost; the late write is moved by the next balancer cycle                                                                                             | `balance_test.go`                                       |
+| S15 | Stable cluster                                       | 4 members idle for three push intervals                                                                                       | Zero retries, pulls, restore probes, proactive pushes and events; signature and generation unchanged                                                        | `olric_test.go`                                         |
+| S16 | Large partition count                                | 3 members, `PartitionCount 4096`, one departure                                                                               | Table computation issues one pipelined probe per owner; timing logged, not asserted                                                                         | `distribute_test.go`                                    |
+| S17 | `ReplicaCount 3`, one crash                          | 5 members, flag on                                                                                                            | New primary receives its copy from either backup holder; duplicates merge cleanly; three copies afterwards                                                  | `olric_test.go`                                         |
+| S18 | `ReplicaCount 1`, one crash                          | 4 members                                                                                                                     | Completion within detection + 3s; keys owned by the victim are gone, as documented                                                                          | `olric_test.go`                                         |
+| S19 | Consumer gate simulation                             | S3 plus a subscriber that releases a departure when a `membership-change-event` for it is followed by a completion without it | Release latency below detection + 3s in every run of a 10-run loop                                                                                          | `olric_test.go`                                         |
+| S20 | Rejoin after partition                               | Existing `RejoinLoop` tests                                                                                                   | Unchanged and passing; membership changes published on rejoin                                                                                               | existing                                                |
+| S21 | Graceful leave and rejoin within the restore delay   | 4 members, data present, default `ReplicaRestoreDelay`, member leaves and rejoins after 5s                                    | No restore transfer at all: the count of `fragment-migration-event`s equals today's join sync; the rejoined member is primary owner of its partitions again | `olric_test.go`                                         |
+| S22 | Shutdown latency                                     | 4 members, data present, graceful `Shutdown` of a non-coordinator and of the coordinator                                      | Shutdown duration within noise of the baseline recorded on `main`; no goroutine of the plan outlives it                                                     | `olric_test.go`                                         |
+| S23 | Rolling restart                                      | 4 members, each restarted in turn with a 5s gap, default delay, flag on                                                       | Every key readable throughout; total data moved equals today's; one membership change per leave and per join; no restore transfer                           | `integration_test.go`                                   |
+| S24 | Crash, member never returns                          | S1 with `ReplicaRestoreDelay 2s`                                                                                              | Restore begins after the delay and every partition has `ReplicaCount` copies within the delay plus two balancer cycles                                      | `olric_test.go`                                         |
 
 ### Fault injection, test code only
 
@@ -709,12 +733,12 @@ scale. The cost moves to recovery time, where it is bounded and event-driven.
 
 ### Hot path, per operation
 
-| Path | Today | After the fixes | Added per operation |
-|---|---|---|---|
-| `Get`, local hit | fragment read lock, storage read | unchanged | 0 allocations, 0 ns |
-| `Get` with remote lookups (previous owners, quorum reads, read repair) | one RPC per remote owner | one membership map lookup per remote owner before dialing (Fix 3) | 0 allocations, ~20 ns per owner |
-| `Put` / `Delete`, `ReplicaCount 1` | fragment write lock, storage write | key lock, then fragment write lock (Fix 4) | 0 allocations, 20–40 ns |
-| `Put` / `Delete`, sync replication | fragment write lock held across the replica RPCs | key lock; fragment lock only around storage; the caller's context on the RPC (Fix 3, Fix 4) | 0 allocations when the caller carries a deadline, which GoAkt always does; one timer context otherwise |
+| Path                                                                   | Today                                            | After the fixes                                                                             | Added per operation                                                                                    |
+|------------------------------------------------------------------------|--------------------------------------------------|---------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| `Get`, local hit                                                       | fragment read lock, storage read                 | unchanged                                                                                   | 0 allocations, 0 ns                                                                                    |
+| `Get` with remote lookups (previous owners, quorum reads, read repair) | one RPC per remote owner                         | one membership map lookup per remote owner before dialing (Fix 3)                           | 0 allocations, ~20 ns per owner                                                                        |
+| `Put` / `Delete`, `ReplicaCount 1`                                     | fragment write lock, storage write               | key lock, then fragment write lock (Fix 4)                                                  | 0 allocations, 20–40 ns                                                                                |
+| `Put` / `Delete`, sync replication                                     | fragment write lock held across the replica RPCs | key lock; fragment lock only around storage; the caller's context on the RPC (Fix 3, Fix 4) | 0 allocations when the caller carries a deadline, which GoAkt always does; one timer context otherwise |
 
 `Members().Get` is a map lookup under a read lock and a striped mutex is one uncontended atomic. Both
 sit two to three orders of magnitude below the storage write and four below the network round trip the
@@ -824,14 +848,14 @@ within a balancer cycle. "Rejected" means the coordinator's push was rejected by
 which is the reporter's scenario and becomes the common case as the cluster grows. 4-member rows are
 measured; the rest are projections.
 
-| Members | `T_detect` | Dead-gossip spread | `T_olric` today, normal | `T_olric` today, rejected | `T_olric` after fixes | `T_nodeleft` today | `T_nodeleft` after fixes |
-|---|---|---|---|---|---|---|---|
-| 3–10 | ~6s (measured 5.5–6.5) | 0.2–0.4s | ~6s (measured) | 30s fallback fires | 1–2s, 2–4s if rejected | 12s, or 36s | **7–10s** |
-| 30 | ~8s | ~0.6s | ~6s | 30s fallback fires | 1–2s, 2–4s if rejected | 14s, or 38s | **9–12s** |
-| 60 | ~9s | ~0.8s | ~6–7s | 30s fallback fires | 1–2s, 2–4s if rejected | 15s, or 39s | **10–13s** |
-| 100 | ~10s | ~0.9s | ~6–7s | 30s fallback fires | 1–2s, 2–4s if rejected | 16s, or 40s | **11–14s** |
-| 300 | ~12s | ~1.1s | ~7–8s | 30s fallback fires | 1–3s, 2–5s if rejected | 19s, or 42s | **13–17s** |
-| 1000 | ~14s | ~1.3s | ~7–8s | 30s fallback fires | 1–3s, 2–5s if rejected | 21s, or 44s | **15–19s** |
+| Members | `T_detect`             | Dead-gossip spread | `T_olric` today, normal | `T_olric` today, rejected | `T_olric` after fixes  | `T_nodeleft` today | `T_nodeleft` after fixes |
+|---------|------------------------|--------------------|-------------------------|---------------------------|------------------------|--------------------|--------------------------|
+| 3–10    | ~6s (measured 5.5–6.5) | 0.2–0.4s           | ~6s (measured)          | 30s fallback fires        | 1–2s, 2–4s if rejected | 12s, or 36s        | **7–10s**                |
+| 30      | ~8s                    | ~0.6s              | ~6s                     | 30s fallback fires        | 1–2s, 2–4s if rejected | 14s, or 38s        | **9–12s**                |
+| 60      | ~9s                    | ~0.8s              | ~6–7s                   | 30s fallback fires        | 1–2s, 2–4s if rejected | 15s, or 39s        | **10–13s**               |
+| 100     | ~10s                   | ~0.9s              | ~6–7s                   | 30s fallback fires        | 1–2s, 2–4s if rejected | 16s, or 40s        | **11–14s**               |
+| 300     | ~12s                   | ~1.1s              | ~7–8s                   | 30s fallback fires        | 1–3s, 2–5s if rejected | 19s, or 42s        | **13–17s**               |
+| 1000    | ~14s                   | ~1.3s              | ~7–8s                   | 30s fallback fires        | 1–3s, 2–5s if rejected | 21s, or 44s        | **15–19s**               |
 
 Reading the table: at every size the fixes take olric's share from "6s, or a 30s fallback" to a few
 seconds, and the remainder of the total is memberlist detection. At 60 members and above the rejected
@@ -845,13 +869,13 @@ Memberlist ships exactly three presets, `DefaultLocalConfig`, `DefaultLANConfig`
 row is not a preset: it is the LAN preset with three fields lowered, given to show what faster detection
 costs. `f = max(1, log10(members))`. Examples at 10, 60 and 300 members.
 
-| Configuration | Probe interval / timeout / suspicion mult | `T_detect` formula | 10 | 60 | 300 |
-|---|---|---|---|---|---|
-| LAN preset (GoAkt default) | 1s / 0.5s / 4 | 2s + 4s·f | 6s | 9s | 12s |
-| Local preset (olric tests) | 1s / 0.2s / 3 | 1.5s + 3s·f | 4.5s | 7s | 9s |
-| Tuned example, not a preset: LAN with `ProbeInterval 500ms`, `ProbeTimeout 250ms`, `SuspicionMult 3` | 0.5s / 0.25s / 3 | 1s + 1.5s·f | 2.5s | 3.7s | 4.7s |
-| GoAkt TLS transport (degraded, not an olric default): LAN preset with no TCP fallback | 5s / 2s / 4, no TCP pings | 7s + 20s·f | 27s | 43s | 57s |
-| WAN preset | 5s / 3s / 6 | 8s + 30s·f | 38s | 61s | 82s |
+| Configuration                                                                                        | Probe interval / timeout / suspicion mult | `T_detect` formula | 10   | 60   | 300  |
+|------------------------------------------------------------------------------------------------------|-------------------------------------------|--------------------|------|------|------|
+| LAN preset (GoAkt default)                                                                           | 1s / 0.5s / 4                             | 2s + 4s·f          | 6s   | 9s   | 12s  |
+| Local preset (olric tests)                                                                           | 1s / 0.2s / 3                             | 1.5s + 3s·f        | 4.5s | 7s   | 9s   |
+| Tuned example, not a preset: LAN with `ProbeInterval 500ms`, `ProbeTimeout 250ms`, `SuspicionMult 3` | 0.5s / 0.25s / 3                          | 1s + 1.5s·f        | 2.5s | 3.7s | 4.7s |
+| GoAkt TLS transport (degraded, not an olric default): LAN preset with no TCP fallback                | 5s / 2s / 4, no TCP pings                 | 7s + 20s·f         | 27s  | 43s  | 57s  |
+| WAN preset                                                                                           | 5s / 3s / 6                               | 8s + 30s·f         | 38s  | 61s  | 82s  |
 
 Add `T_olric` from the size table to get the total. The first three rows are the profiles olric ships
 and recommends, and they detect a failure in 6 to 12s by default, in line with Consul, Redis Cluster
@@ -903,15 +927,15 @@ nothing but writes to the same key.
 
 Derived from the code, not measured; a run on a real cluster of the target size would confirm them.
 
-| Behaviour | Today | After the fixes |
-|---|---|---|
-| Table computation per membership event | One round trip per owner per partition, sequential, under the routing lock: seconds at 4096 partitions | One pipelined round trip per member (Fix 7): about 0.1s |
-| Push fan-out at 300 members | 38 rounds on 8 cores | 5 rounds (Fix 7) |
-| Rejected push at 60+ members | Common; 60s recovery | Common; 0.2–2s recovery (Fix 1) |
-| Cluster-events traffic per change | `members²` local-observation deliveries | `members` deliveries of one authoritative event (Fix 6) |
-| Epoch completion | Slowest member's ack, invisible when stuck | Still the slowest member's ack, by design; overdue epochs name the missing members (Fix 1), moves are not parked on a tick (Fix 5), stuck replicas do not block the balancer (Fix 4) |
-| Replication factor after a departure | Reduced until the next write | Restored `ReplicaRestoreDelay` after the departure unless the member returned (Fix 2) |
-| Data moved by a rolling restart | Join sync only | Join sync only, provided each step is shorter than `ReplicaRestoreDelay` (Fix 2) |
+| Behaviour                              | Today                                                                                                  | After the fixes                                                                                                                                                                      |
+|----------------------------------------|--------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Table computation per membership event | One round trip per owner per partition, sequential, under the routing lock: seconds at 4096 partitions | One pipelined round trip per member (Fix 7): about 0.1s                                                                                                                              |
+| Push fan-out at 300 members            | 38 rounds on 8 cores                                                                                   | 5 rounds (Fix 7)                                                                                                                                                                     |
+| Rejected push at 60+ members           | Common; 60s recovery                                                                                   | Common; 0.2–2s recovery (Fix 1)                                                                                                                                                      |
+| Cluster-events traffic per change      | `members²` local-observation deliveries                                                                | `members` deliveries of one authoritative event (Fix 6)                                                                                                                              |
+| Epoch completion                       | Slowest member's ack, invisible when stuck                                                             | Still the slowest member's ack, by design; overdue epochs name the missing members (Fix 1), moves are not parked on a tick (Fix 5), stuck replicas do not block the balancer (Fix 4) |
+| Replication factor after a departure   | Reduced until the next write                                                                           | Restored `ReplicaRestoreDelay` after the departure unless the member returned (Fix 2)                                                                                                |
+| Data moved by a rolling restart        | Join sync only                                                                                         | Join sync only, provided each step is shorter than `ReplicaRestoreDelay` (Fix 2)                                                                                                     |
 
 ## Graceful shutdown and rolling restarts
 
