@@ -276,29 +276,29 @@ tests. Per-operation costs and the allocation budget are in
 
 ## Convergence flow after a departure
 
-The path from an abrupt crash to the `rebalance-complete-event` a consumer waits on, with the fix that owns each step. `node-left-event` stays local as the fast tier a member uses to steer traffic off the dead address, while `membership-change-event` and the rebalance pair are the authoritative tier the coordinator publishes. `T_detect` is memberlist's share and is untouched by this work; everything after it is `T_olric`, which the fixes reduce.
+The path from an abrupt crash to the `rebalance-complete-event` a consumer such as GoAkt waits on, with the fix that owns each step. The coordinator is the oldest survivor. `node-left-event` stays local as the fast tier a member uses to steer traffic off the dead address, while `membership-change-event` and the rebalance pair are the authoritative tier the coordinator publishes. `T_detect` is memberlist's share and is untouched by this work; everything after it is `T_olric`, which the fixes reduce.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant D as Departed member
+    participant D as Departed
     participant ML as memberlist
-    participant C as Coordinator (oldest survivor)
-    participant M as Surviving members
-    participant K as Consumer (GoAkt)
+    participant C as Coordinator
+    participant M as Members
+    participant K as Consumer
 
-    Note over D: crash (SIGKILL, no leave)
-    Note over ML: probe fails, peers confirm death (T_detect)
+    Note over D: crash, no leave
+    Note over ML: death confirmed (T_detect)
     ML->>C: member removed
-    ML-->>M: member removed (gossip can lag)
-    C->>K: membership-change-event, before any table work (Fix 6)
+    ML-->>M: member removed
+    C->>K: membership-change-event (Fix 6)
     C->>C: recompute routing table
     C->>M: push table + sequence
-    Note over C,M: rejected or lost push retried with backoff,<br/>a member pulls on coordinator change (Fix 1)
-    M->>M: install table, promote backup to primary,<br/>proactive push to replicas
-    M->>M: after ReplicaRestoreDelay, restore departed<br/>member's primary copies (Fix 2)
-    M->>C: ack once quiescent (Fix 5)
-    C->>K: rebalance-complete-event, members exclude departed
+    Note over C,M: rejected push retried or pulled (Fix 1)
+    M->>M: install, promote to primary, push replicas
+    M->>M: restore departed copies after delay (Fix 2)
+    M->>C: ack when quiescent (Fix 5)
+    C->>K: rebalance-complete-event
     K->>K: release NodeLeft
 ```
 
