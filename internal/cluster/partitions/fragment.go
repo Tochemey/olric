@@ -29,6 +29,12 @@ type Fragment interface {
 	// MoveWithTargetKind is like Move but uses targetKind in the payload so the
 	// receiver merges into the correct partition (e.g. BACKUP when pushing from primary).
 	MoveWithTargetKind(*Partition, string, []discovery.Member, Kind) error
+	// Replicate copies every live table of the fragment to the owners, to be
+	// merged into the partition of the given kind, and keeps the local copy.
+	// It is the transfer behind pushing a primary copy to its replica owners
+	// and restoring a primary copy from a backup; Move and MoveWithTargetKind
+	// transfer ownership instead and drop what they sent.
+	Replicate(*Partition, string, []discovery.Member, Kind) error
 	Compaction() (bool, error)
 	Destroy() error
 	Close() error

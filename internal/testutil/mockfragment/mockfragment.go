@@ -130,6 +130,24 @@ func (f *MockFragment) MoveWithTargetKind(part *partitions.Partition, name strin
 	return nil
 }
 
+// Replicate records a copy of the fragment to owners as targetKind and keeps
+// the data, as the real fragment does.
+func (x *MockFragment) Replicate(part *partitions.Partition, name string, owners []discovery.Member, targetKind partitions.Kind) error {
+	x.Lock()
+	defer x.Unlock()
+
+	if x.result[targetKind] == nil {
+		x.result[targetKind] = make(map[uint64]Result)
+	}
+
+	x.result[targetKind][part.ID()] = Result{
+		Name:   name,
+		Owners: owners,
+	}
+
+	return nil
+}
+
 func (f *MockFragment) Compaction() (bool, error) {
 	return false, nil
 }

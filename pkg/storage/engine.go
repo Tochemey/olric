@@ -50,6 +50,21 @@ type TransferIterator interface {
 	Drop(int) error
 }
 
+// Replicator is implemented by transfer iterators that can copy the live
+// tables of the engine one at a time without removing any, for transfers that
+// keep the local copy: pushing a primary copy to its replica owners, or
+// restoring a primary copy from a backup after the primary owner died. The
+// caller encodes one table per hold of its lock and sends it with the lock
+// released. An iterator that does not implement it is copied through Export
+// instead, which reaches only the first live table.
+type Replicator interface {
+	// ExportFrom encodes the first live table at or after position index in
+	// the engine's table list and returns it with the position after it,
+	// which the caller passes to the next call. It returns io.EOF when no
+	// live table remains. The tables stay in the engine.
+	ExportFrom(index int) (data []byte, next int, err error)
+}
+
 // Engine defines methods for a storage engine implementation.
 type Engine interface {
 	// SetConfig sets a storage engine configuration. nil can be accepted, but

@@ -124,6 +124,9 @@ Olric can send push cluster events to `cluster.events` channel. Available cluste
 * rebalance-start-event
 * rebalance-complete-event
 * initial-sync-complete-event
+* membership-change-event
+
+Membership is announced at two levels. `membership-change-event` is the coordinator's announcement of every join, departure and update: one event per change, published before the routing table is recomputed for it and whether or not that recomputation changes the table or passes `MemberCountQuorum`, carrying `change` (`join`, `left`, `update`), `node`, the sorted `members` after the change and the coordinator's `generation`. `node-join-event` and `node-left-event` are each member's own observation of a change and reach that member's subscribers only. Gate membership on `membership-change-event`, and relocation or data placement on the rebalance pair below. The `members` list is the authoritative view: when a member and the coordinator die close together, the new coordinator announces the coordinator's departure with a `members` list that already excludes the other member, so reconcile membership on `members` rather than on `change` and `node` alone.
 
 Rebalance lifecycle events track routing table epochs. A rebalance starts when the coordinator publishes a new routing table (for example after a node join/leave), and completes only after all live members report that no further fragment moves are required for that routing table epoch. Use `rebalance-start-event` and `rebalance-complete-event` to track completion; `node-left-event` remains a membership signal, not a rebalance barrier. Pair a start with its completion by `source` and `generation`: `epoch` is the routing table signature, which recurs when the table returns to an earlier state, whereas `generation` never recurs on a given coordinator. The completion's `members` field lists the members the coordinator computed the converged table for, and `node-join-event` and `node-left-event` carry the `generation` the publisher held when it observed the change, so a completion from the same `source` with a higher `generation` reflects that change. Pushing an unchanged routing table starts no epoch and publishes no rebalance events.
 
@@ -151,7 +154,7 @@ When nodes join or leave frequently — rolling restarts, auto-scaling, or any o
 
 **Use case:** Enable proactive sync so existing owners push data to new nodes as soon as they join. This restores replica redundancy without relying on read traffic.
 
-**Configuration:** Set `EnableProactiveSyncOnJoin` to `true`. This flag only controls whether existing primary owners push data to new backup owners on node join — it has no effect when `ReplicaCount` is 1. It does **not** alter memberlist timing. If you also need faster failure detection (e.g. detecting dead nodes in under a second), tune `MemberlistConfig` directly for your network environment:
+**Configuration:** Set `EnableProactiveSyncOnJoin` to `true`. The flag controls the transfers that lock a fragment for the duration of a network copy: existing primary owners push their data to new backup owners as soon as a table is installed, and after a departure the survivors that hold a partition's backup copies re-create its primary copy on the new owner once `ReplicaRestoreDelay` (default one minute) has passed since the departure, counted per partition. The delay keeps a rolling restart from moving data twice: a member that is back within it owns its partitions again and receives them from their previous owner, so nothing is restored for it; a member that stays gone has its partitions back at `ReplicaCount` copies after the delay. Set the delay lower, down to a millisecond, where a departed member is replaced rather than restarted. The flag has no effect when `ReplicaCount` is 1. It does **not** alter memberlist timing. If you also need faster failure detection (e.g. detecting dead nodes in under a second), tune `MemberlistConfig` directly for your network environment:
 
 ```go
 c := config.New(config.MemberlistEnvLAN)
@@ -221,6 +224,33 @@ if err := db.WaitForInitialSync(ctx); err != nil {
 }
 // Now safe to mark node ready
 ```
+
+### Failure Detection and Recovery
+
+What happens between a member crashing and the cluster converging, and how long it takes, is a configured trade-off. The timeline is:
+
+```text
+crash ─► first failed probe ─► suspicion confirmed ─► routing table pushed ─► copies restored, members ack ─► rebalance-complete
+        └──────── T_detect (memberlist) ────────┘   └──────────────────── T_olric (olric) ────────────────────┘
+```
+
+`T_detect` is memberlist's. Some member probes the dead node within a probe interval, the probe times out, and a suspicion timer runs whose minimum is `SuspicionMult × max(1, log10(members)) × ProbeInterval`, reached once `SuspicionMult − 2` other members have confirmed the suspicion. With the LAN preset that is about `2s + 4s × max(1, log10(members))`: about 6s up to ten members, 9s at sixty, 12s at three hundred. Memberlist scales it with the member count on purpose, and no Olric setting shortens it. The Local preset is about a third faster; the WAN preset several times slower.
+
+`T_olric` is what Olric adds after the death is confirmed: the coordinator computes and pushes the table in one pipelined round trip per member, the members promote their backup copies and push their primaries to new replica owners, and each acks when it has nothing left to move. Measured on a four-member cluster with the Local preset, the survivors publish the `rebalance-complete-event` that excludes the dead member within 0.4s of confirming the death, whether or not the dead member was the coordinator and whether or not the new coordinator's first push was rejected by a member whose membership view lagged; such a push is retried with backoff every 0.2s to 2s. Larger clusters add a few hundred milliseconds of gossip spread.
+
+Between the crash and `T_detect`, requests to partitions owned by the dead member fail with connection errors or time out at their own deadline: give every operation a deadline of at most a few seconds and retry on `ErrConnRefused` and deadline errors; the retry lands on the promoted owner once the table has moved. Reads with `ReadRepair` are served from the replicas throughout, and `WriteQuorum` must be satisfiable by the surviving replicas.
+
+Guidance:
+
+* Do not go below a 500ms probe interval or a suspicion multiplier of 3 on shared infrastructure. GC pauses, CPU throttling under container limits and packet loss then look like crashes, and each false positive moves partition data twice. Memberlist's own guidance is a `ProbeTimeout` at the 99th percentile round-trip time.
+* Keep TCP fallback pings enabled; disabling them turns UDP loss into false failure detection.
+* A consumer that waits for convergence should time out at no less than three times the expected `T_detect + T_olric` for its memberlist preset and cluster size.
+* `RoutingTablePushInterval` is anti-entropy, not the delivery mechanism; its one-minute default is fine.
+* `TriggerBalancerInterval` only paces re-checks on a quiescent cluster; a member acks in the invocation that finished its moves.
+* `ReplicaRestoreDelay` trades durability against rolling-restart cost, see [Orchestrated Deployments](#orchestrated-deployments-rolling-restarts-auto-scaling).
+* `PartitionCount` cannot change after the first start; keep several partitions per member.
+
+On Kubernetes and Docker a departed pod's address drops packets instead of refusing connections. Every remote call made for a request therefore runs under the request's deadline, a member memberlist has already removed is never dialed, and a write whose replica does not answer holds up that key alone, not the reads and moves of its partition. Deletes are the exception to skipping: a delete has no tombstone, so a delete whose replica owner memberlist removed fails at once instead of leaving a copy behind, and succeeds once the routing table has dropped the member.
 
 ### Network Configuration
 

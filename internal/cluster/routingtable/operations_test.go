@@ -78,7 +78,7 @@ func TestRoutingTable_updateRoutingCommandHandler_Errors(t *testing.T) {
 	require.Error(t, rc.Do(ctx, protocol.Internal.UpdateRouting).Err())
 
 	// The payload cannot be decoded as a routing table.
-	cmd := protocol.NewUpdateRouting([]byte("junk-payload"), rt.This().ID).Command(ctx)
+	cmd := protocol.NewUpdateRouting([]byte("junk-payload"), rt.This().ID, 0).Command(ctx)
 	require.Error(t, rc.Process(ctx, cmd))
 
 	// The coordinator ID doesn't belong to a known cluster member.
@@ -88,13 +88,13 @@ func TestRoutingTable_updateRoutingCommandHandler_Errors(t *testing.T) {
 	}
 	data, err := msgpack.Marshal(table)
 	require.NoError(t, err)
-	cmd = protocol.NewUpdateRouting(data, 987654321).Command(ctx)
+	cmd = protocol.NewUpdateRouting(data, 987654321, 0).Command(ctx)
 	require.Error(t, rc.Process(ctx, cmd))
 
 	// The pushed table has a bogus partition count.
 	small, err := msgpack.Marshal(map[uint64]*route{0: {}})
 	require.NoError(t, err)
-	cmd = protocol.NewUpdateRouting(small, rt.This().ID).Command(ctx)
+	cmd = protocol.NewUpdateRouting(small, rt.This().ID, 0).Command(ctx)
 	require.Error(t, rc.Process(ctx, cmd))
 }
 
@@ -117,7 +117,7 @@ func TestApplyRoutingTablePayload_Generation(t *testing.T) {
 	require.NotZero(t, generation)
 
 	// Installing the unchanged table again: same signature, same generation.
-	_, err = rt.applyRoutingTablePayload(initial, rt.This().ID, false)
+	_, err = rt.applyRoutingTablePayload(initial, rt.This().ID, 0, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, generation, rt.Generation())
 
@@ -127,13 +127,13 @@ func TestApplyRoutingTablePayload_Generation(t *testing.T) {
 	changed, _, err := rt.buildRoutingTablePayload()
 	rt.Unlock()
 	require.NoError(t, err)
-	_, err = rt.applyRoutingTablePayload(changed, rt.This().ID, false)
+	_, err = rt.applyRoutingTablePayload(changed, rt.This().ID, 0, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, generation+1, rt.Generation())
 
 	// Returning to the initial table repeats its signature but is a new
 	// install: the generation advances again.
-	_, err = rt.applyRoutingTablePayload(initial, rt.This().ID, false)
+	_, err = rt.applyRoutingTablePayload(initial, rt.This().ID, 0, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, generation+2, rt.Generation())
 	require.Equal(t, initialSignature, rt.Signature())
@@ -162,16 +162,20 @@ func TestRoutingTable_verifyRoutingTable(t *testing.T) {
 	}
 
 	// Unknown member ID.
-	require.Error(t, rt1.verifyRoutingTable(987654321, table))
+	_, err = rt1.verifyRoutingTable(987654321, table)
+	require.Error(t, err)
 
 	// rt2 is a known member but not the cluster coordinator.
-	require.Error(t, rt1.verifyRoutingTable(rt2.This().ID, table))
+	_, err = rt1.verifyRoutingTable(rt2.This().ID, table)
+	require.Error(t, err)
 
 	// Partition count mismatch.
-	require.Error(t, rt1.verifyRoutingTable(rt1.This().ID, map[uint64]*route{0: {}}))
+	_, err = rt1.verifyRoutingTable(rt1.This().ID, map[uint64]*route{0: {}})
+	require.Error(t, err)
 
 	// A well-formed routing table pushed by the coordinator.
-	require.NoError(t, rt1.verifyRoutingTable(rt1.This().ID, table))
+	_, err = rt1.verifyRoutingTable(rt1.This().ID, table)
+	require.NoError(t, err)
 }
 
 func TestRoutingTable_rebalanceAckCommandHandler_Errors(t *testing.T) {

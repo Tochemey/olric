@@ -86,7 +86,7 @@ func TestDMap_initialSyncCompletePublisher(t *testing.T) {
 	// environment before the member starts: assigning s.syncState afterwards
 	// races with Service.Start reading the field from its own goroutine.
 	st := syncstate.New()
-	st.Reconcile(nil, time.Minute) // empty pending set signals "done" immediately
+	st.Reconcile(nil, time.Minute, time.Now()) // empty pending set signals "done" immediately
 	require.True(t, st.IsDone())
 
 	e := testcluster.NewEnvironment(nil)
@@ -109,7 +109,7 @@ func TestDMap_initialSyncCompletePublisher_ContextDone(t *testing.T) {
 	// the member starts: assigning s.syncState afterwards races with
 	// Service.Start reading the field from its own goroutine.
 	st := syncstate.New()
-	st.Reconcile([]uint64{1, 2, 3}, time.Minute)
+	st.Reconcile([]uint64{1, 2, 3}, time.Minute, time.Now())
 	require.False(t, st.IsDone())
 
 	e := testcluster.NewEnvironment(nil)

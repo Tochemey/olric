@@ -19,6 +19,8 @@ package protocol
 
 import (
 	"context"
+
+	"github.com/redis/go-redis/v9"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -56,7 +58,7 @@ func TestProtocol_MoveFragment(t *testing.T) {
 }
 
 func TestProtocol_UpdateRoutingTable(t *testing.T) {
-	updateRoutingTableCmd := NewUpdateRouting([]byte("payload"), 123)
+	updateRoutingTableCmd := NewUpdateRouting([]byte("payload"), 123, 9)
 
 	cmd := stringToCommand(updateRoutingTableCmd.Command(context.Background()).String())
 	parsed, err := ParseUpdateRoutingCommand(cmd)
@@ -64,6 +66,21 @@ func TestProtocol_UpdateRoutingTable(t *testing.T) {
 
 	require.Equal(t, []byte("payload"), parsed.Payload)
 	require.Equal(t, uint64(123), parsed.CoordinatorID)
+	require.Equal(t, uint64(9), parsed.Sequence)
+}
+
+// TestProtocol_UpdateRoutingTable_WithoutSequence guards compatibility with a
+// coordinator of the previous version, which sends no sequence: the push
+// parses with a sequence of zero.
+func TestProtocol_UpdateRoutingTable_WithoutSequence(t *testing.T) {
+	legacy := redis.NewStringCmd(context.Background(), Internal.UpdateRouting, []byte("payload"), 123)
+
+	parsed, err := ParseUpdateRoutingCommand(stringToCommand(legacy.String()))
+	require.NoError(t, err)
+
+	require.Equal(t, []byte("payload"), parsed.Payload)
+	require.Equal(t, uint64(123), parsed.CoordinatorID)
+	require.Zero(t, parsed.Sequence)
 }
 
 func TestProtocol_FetchRouting(t *testing.T) {

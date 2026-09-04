@@ -206,27 +206,33 @@ func (c *Client) Sanitize() error {
 // Validate finds errors in the current configuration.
 func (c *Client) Validate() error { return nil }
 
-func (c *Client) RedisOptions() *redis.Options {
+// RedisOptions builds the go-redis client options from the client configuration.
+func (x *Client) RedisOptions() *redis.Options {
 	// Note: IdleCheckFrequency is gone since go-redis no longer checks idle connections.
 	// See https://github.com/redis/go-redis/discussions/2635
 	return &redis.Options{
 		Network:         "tcp",
-		Dialer:          c.Dialer,
-		OnConnect:       c.OnConnect,
-		MaxRetries:      c.MaxRetries,
-		MinRetryBackoff: c.MinRetryBackoff,
-		MaxRetryBackoff: c.MaxRetryBackoff,
-		DialTimeout:     c.DialTimeout,
-		ReadTimeout:     c.ReadTimeout,
-		WriteTimeout:    c.WriteTimeout,
-		PoolFIFO:        c.PoolFIFO,
-		PoolSize:        c.PoolSize,
-		MinIdleConns:    c.MinIdleConns,
-		ConnMaxLifetime: c.MaxConnAge,
-		PoolTimeout:     c.PoolTimeout,
-		ConnMaxIdleTime: c.IdleTimeout,
-		TLSConfig:       c.TLS,
-		Limiter:         c.Limiter,
+		Dialer:          x.Dialer,
+		OnConnect:       x.OnConnect,
+		MaxRetries:      x.MaxRetries,
+		MinRetryBackoff: x.MinRetryBackoff,
+		MaxRetryBackoff: x.MaxRetryBackoff,
+		DialTimeout:     x.DialTimeout,
+		ReadTimeout:     x.ReadTimeout,
+		WriteTimeout:    x.WriteTimeout,
+		// A command's socket deadlines follow the context's deadline when
+		// it is the sooner one. Without this the deadline of a request only
+		// applies between retries, and a peer that accepts a connection but
+		// never answers costs every request the full read timeout.
+		ContextTimeoutEnabled: true,
+		PoolFIFO:              x.PoolFIFO,
+		PoolSize:              x.PoolSize,
+		MinIdleConns:          x.MinIdleConns,
+		ConnMaxLifetime:       x.MaxConnAge,
+		PoolTimeout:           x.PoolTimeout,
+		ConnMaxIdleTime:       x.IdleTimeout,
+		TLSConfig:             x.TLS,
+		Limiter:               x.Limiter,
 		// https://github.com/redis/go-redis/tree/master/maintnotifications
 		MaintNotificationsConfig: &maintnotifications.Config{
 			Mode: maintnotifications.ModeDisabled, // TODO: change this when Cluster clients are supported

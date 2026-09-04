@@ -19,10 +19,12 @@ package routingtable
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,6 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/events"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/server"
@@ -1712,4 +1715,134 @@ func TestRoutingTable_CommitWithUnreachableMember(t *testing.T) {
 		return signature != 0 && rt4.Signature() == signature && epoch == signature
 	}, 15*time.Second, 100*time.Millisecond,
 		"coordinator must commit the routing update and the joiner must install it despite an unreachable member")
+}
+
+// TestPullRoutingTableAfterCoordinatorChange guards the anti-entropy pull: a
+// member whose table came from a coordinator that left detects it, and pulls
+// the new coordinator's committed table when a push has not landed.
+func TestPullRoutingTableAfterCoordinatorChange(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	rt1, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	rt2, err := cluster.addNode(nil)
+	require.NoError(t, err)
+	rt3, err := cluster.addNode(nil)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return rt1.Signature() != 0 && rt1.Signature() == rt2.Signature() && rt1.Signature() == rt3.Signature()
+	}, 10*time.Second, 50*time.Millisecond, "the members must install the same table")
+
+	left := &discovery.ClusterEvent{Event: memberlist.NodeLeave, NodeName: rt1.This().Name}
+	require.True(t, rt3.tableCoordinatorGone(left), "the table came from rt1 and rt3 is not the coordinator")
+	require.False(t, rt3.tableCoordinatorGone(&discovery.ClusterEvent{Event: memberlist.NodeJoin, NodeName: rt1.This().Name}))
+	require.False(t, rt3.tableCoordinatorGone(&discovery.ClusterEvent{Event: memberlist.NodeLeave, NodeName: rt2.This().Name}))
+
+	before := rt1.Signature()
+	require.NoError(t, rt1.Shutdown(context.Background()))
+
+	require.Eventually(t, func() bool {
+		return rt2.Discovery().IsCoordinator() && rt2.Signature() != before && rt3.Signature() == rt2.Signature()
+	}, 15*time.Second, 50*time.Millisecond, "the new coordinator must push its table")
+	require.False(t, rt2.tableCoordinatorGone(left), "the coordinator itself never pulls")
+
+	// The push landed: the installed table came from the new coordinator,
+	// so nothing is pulled and the installed version stays as it is.
+	installed := rt3.version.Load()
+	rt3.pullRoutingTableAfterCoordinatorChange()
+	require.Same(t, installed, rt3.version.Load(), "a table pushed by the current coordinator is not pulled again")
+
+	// Pretend the push never reached rt3: its installed signature goes stale,
+	// and the pull must bring the committed table back.
+	rt3.setVersion(12345, 0, 0)
+	started := time.Now()
+	rt3.pullRoutingTableAfterCoordinatorChange()
+	require.Less(t, time.Since(started), 3*time.Second)
+
+	require.Equal(t, rt2.Signature(), rt3.Signature())
+	require.Equal(t, rt2.This().Name, rt3.tableCoordinator.Load().Name)
+}
+
+// TestAnnounceMembershipChange guards the authoritative membership event: the
+// coordinator publishes one per membership event it processes, with the change
+// kind, the member set after the change and its generation, independently of
+// any routing table work, and a member that is not the coordinator publishes
+// none.
+func TestAnnounceMembershipChange(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	c1 := testutil.NewConfig()
+	c1.EnableClusterEventsChannel = true
+	rt1, err := cluster.addNode(c1)
+	require.NoError(t, err)
+
+	published := make(chan events.MembershipChangeEvent, 8)
+	rt1.SetClusterEventPublisher(func(_ context.Context, _ string, message string) error {
+		if !strings.Contains(message, events.KindMembershipChangeEvent) {
+			return nil
+		}
+
+		var ev events.MembershipChangeEvent
+		require.NoError(t, json.Unmarshal([]byte(message), &ev))
+		published <- ev
+		return nil
+	})
+
+	c2 := testutil.NewConfig()
+	c2.EnableClusterEventsChannel = true
+	rt2, err := cluster.addNode(c2)
+	require.NoError(t, err)
+
+	// The join is announced once, by the coordinator, with both members.
+	select {
+	case ev := <-published:
+		require.Equal(t, events.MembershipChangeJoin, ev.Change)
+		require.Equal(t, rt2.This().String(), ev.Node)
+		require.Equal(t, rt1.This().String(), ev.Source)
+		require.ElementsMatch(t, []string{rt1.This().String(), rt2.This().String()}, ev.Members)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the coordinator must announce the join")
+	}
+
+	// A departure is announced regardless of what the table does afterwards:
+	// the announcement is made before the table is recomputed.
+	departed := discovery.NewMember(testutil.NewConfig())
+	meta, err := departed.Encode()
+	require.NoError(t, err)
+	// The join's own table install may still be in flight on rt1; the
+	// announcement carries the generation installed when it is made.
+	require.Eventually(t, func() bool {
+		return rt2.IsBootstrapped() && rt1.Signature() == rt2.Signature()
+	}, 10*time.Second, 50*time.Millisecond)
+	want := rt1.Generation()
+	rt1.announceMembershipChange(&discovery.ClusterEvent{Event: memberlist.NodeLeave, NodeName: departed.Name, NodeMeta: meta})
+
+	select {
+	case ev := <-published:
+		require.Equal(t, events.MembershipChangeLeft, ev.Change)
+		require.Equal(t, departed.String(), ev.Node)
+		require.Equal(t, want, ev.Generation)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the coordinator must announce the departure")
+	}
+
+	// A member that is not the coordinator announces nothing.
+	silent := make(chan string, 1)
+	rt2.SetClusterEventPublisher(func(_ context.Context, _ string, message string) error {
+		if strings.Contains(message, events.KindMembershipChangeEvent) {
+			silent <- message
+		}
+
+		return nil
+	})
+	rt2.announceMembershipChange(&discovery.ClusterEvent{Event: memberlist.NodeLeave, NodeName: departed.Name, NodeMeta: meta})
+
+	select {
+	case <-silent:
+		t.Fatal("only the coordinator announces membership changes")
+	case <-time.After(300 * time.Millisecond):
+	}
 }

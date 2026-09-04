@@ -20,8 +20,11 @@ package dmap
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -40,6 +43,12 @@ type fragment struct {
 	storage storage.Engine
 	ctx     context.Context
 	cancel  context.CancelFunc
+	// inFlight counts the writes of this fragment that are between their
+	// preparation and their local store, their replication in between,
+	// and hold the fragment lock for neither. The janitor leaves a fragment
+	// alone while it is not zero: wiping an empty fragment then would detach
+	// the store the write is about to land in.
+	inFlight atomic.Int32
 }
 
 func (f *fragment) Stats() storage.Stats {
@@ -77,22 +86,14 @@ func (f *fragment) Name() string {
 	return "DMap"
 }
 
-func (f *fragment) Move(part *partitions.Partition, name string, owners []discovery.Member) error {
-	f.Lock()
-	defer f.Unlock()
-
-	i := f.storage.TransferIterator()
-	if !i.Next() {
-		return nil
-	}
-
-	payload, index, err := i.Export()
-	if err != nil {
-		return err
-	}
+// transfer sends payload, one encoded storage table, to every owner in turn as
+// a fragment pack of kind, publishing a migration event per owner when cluster
+// events are enabled. It stops at the first owner that fails. The caller holds
+// the fragment lock.
+func (x *fragment) transfer(part *partitions.Partition, name string, owners []discovery.Member, kind partitions.Kind, payload []byte) error {
 	fp := &fragmentPack{
 		PartID:  part.ID(),
-		Kind:    part.Kind(),
+		Kind:    kind,
 		Name:    strings.TrimPrefix(name, "dmap."),
 		Payload: payload,
 	}
@@ -101,41 +102,62 @@ func (f *fragment) Move(part *partitions.Partition, name string, owners []discov
 		return err
 	}
 
+	// An owner that left is not dialed, but the owners after it still
+	// receive the table: the transfer then fails as a whole, so the balancer
+	// retries it against the next routing table, and the copies that did
+	// land merge again without harm.
+	var departed error
+
 	for _, owner := range owners {
-		if f.service.config.EnableClusterEventsChannel {
+		if !x.service.isMember(owner) {
+			departed = fmt.Errorf("%w: %s", errOwnerDeparted, owner)
+			continue
+		}
+
+		if x.service.config.EnableClusterEventsChannel {
 			e := &events.FragmentMigrationEvent{
 				Kind:          events.KindFragmentMigrationEvent,
-				Source:        f.service.rt.This().String(),
+				Source:        x.service.rt.This().String(),
 				Target:        owner.String(),
 				DataStructure: "dmap",
 				PartitionID:   part.ID(),
 				Identifier:    fp.Name,
 				Length:        len(value),
-				IsBackup:      part.Kind() == partitions.BACKUP,
+				IsBackup:      kind == partitions.BACKUP,
 				Timestamp:     time.Now().UnixNano(),
 			}
-			f.service.spawn(func() { f.service.publishEvent(e) })
+			x.service.spawn(func() { x.service.publishEvent(e) })
 		}
 
-		cmd := protocol.NewMoveFragment(value).Command(f.service.ctx)
-		rc := f.service.client.Get(owner.String())
-		err = rc.Process(f.service.ctx, cmd)
+		// Bounded like every other remote call: a live owner that stops
+		// answering costs one bounded attempt, not the client's retry chain.
+		ctx, cancel := x.service.remoteCallContext(x.service.ctx)
+		cmd := protocol.NewMoveFragment(value).Command(ctx)
+		rc := x.service.client.Get(owner.String())
+		err := rc.Process(ctx, cmd)
+		cancel()
+
 		if err != nil {
 			return err
 		}
+
 		if err := cmd.Err(); err != nil {
 			return err
 		}
 	}
 
-	return i.Drop(index)
+	return departed
 }
 
-func (f *fragment) MoveWithTargetKind(part *partitions.Partition, name string, owners []discovery.Member, targetKind partitions.Kind) error {
-	f.Lock()
-	defer f.Unlock()
+// moveTable transfers the first live table of the fragment to owners as kind
+// and, when drop is set, removes it from the fragment once every owner has
+// accepted it. Moves run one table per call so a large fragment is relocated
+// in bounded steps; the balancer calls again while the fragment holds data.
+func (x *fragment) moveTable(part *partitions.Partition, name string, owners []discovery.Member, kind partitions.Kind, drop bool) error {
+	x.Lock()
+	defer x.Unlock()
 
-	i := f.storage.TransferIterator()
+	i := x.storage.TransferIterator()
 	if !i.Next() {
 		return nil
 	}
@@ -144,49 +166,84 @@ func (f *fragment) MoveWithTargetKind(part *partitions.Partition, name string, o
 	if err != nil {
 		return err
 	}
-	fp := &fragmentPack{
-		PartID:  part.ID(),
-		Kind:    targetKind,
-		Name:    strings.TrimPrefix(name, "dmap."),
-		Payload: payload,
-	}
-	value, err := msgpack.Marshal(fp)
-	if err != nil {
+
+	if err := x.transfer(part, name, owners, kind, payload); err != nil {
 		return err
 	}
 
-	for _, owner := range owners {
-		if f.service.config.EnableClusterEventsChannel {
-			e := &events.FragmentMigrationEvent{
-				Kind:          events.KindFragmentMigrationEvent,
-				Source:        f.service.rt.This().String(),
-				Target:        owner.String(),
-				DataStructure: "dmap",
-				PartitionID:   part.ID(),
-				Identifier:    fp.Name,
-				Length:        len(value),
-				IsBackup:      targetKind == partitions.BACKUP,
-				Timestamp:     time.Now().UnixNano(),
-			}
-			f.service.spawn(func() { f.service.publishEvent(e) })
+	if drop {
+		return i.Drop(index)
+	}
+
+	return nil
+}
+
+// Move transfers ownership of the fragment's first live table to owners, as
+// the fragment's own kind, and drops it locally.
+func (x *fragment) Move(part *partitions.Partition, name string, owners []discovery.Member) error {
+	return x.moveTable(part, name, owners, part.Kind(), true)
+}
+
+// MoveWithTargetKind is Move with the receiver merging into targetKind. When
+// pushing to backups (replication), keep data on primary. Only drop when
+// moving ownership.
+func (x *fragment) MoveWithTargetKind(part *partitions.Partition, name string, owners []discovery.Member, targetKind partitions.Kind) error {
+	return x.moveTable(part, name, owners, targetKind, targetKind != partitions.BACKUP)
+}
+
+// Replicate copies every live table of the fragment to owners, to be merged
+// into the partition of targetKind, and keeps the local copy. Engines whose
+// transfer iterator implements storage.Replicator are copied one table at a
+// time: each table is encoded under the fragment lock and sent with the lock
+// released, so the reads and writes of the fragment go through between
+// tables and a slow owner never holds the fragment for the whole copy. The
+// receiver's merge is version-aware, so a write that lands in between is not
+// overtaken by the older copy. Any other engine is copied through Export,
+// which reaches only the first live table.
+func (x *fragment) Replicate(part *partitions.Partition, name string, owners []discovery.Member, targetKind partitions.Kind) error {
+	send := func(payload []byte) error {
+		return x.transfer(part, name, owners, targetKind, payload)
+	}
+
+	x.Lock()
+	i := x.storage.TransferIterator()
+	r, ok := i.(storage.Replicator)
+	if !ok {
+		defer x.Unlock()
+
+		if !i.Next() {
+			return nil
 		}
 
-		cmd := protocol.NewMoveFragment(value).Command(f.service.ctx)
-		rc := f.service.client.Get(owner.String())
-		err = rc.Process(f.service.ctx, cmd)
+		payload, _, err := i.Export()
 		if err != nil {
 			return err
 		}
-		if err := cmd.Err(); err != nil {
-			return err
-		}
+
+		return send(payload)
 	}
 
-	// When pushing to backups (replication), keep data on primary. Only drop when moving ownership.
-	if targetKind != partitions.BACKUP {
-		return i.Drop(index)
+	x.Unlock()
+
+	for index := 0; ; {
+		x.Lock()
+		payload, next, err := r.ExportFrom(index)
+		x.Unlock()
+
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if err := send(payload); err != nil {
+			return err
+		}
+
+		index = next
 	}
-	return nil
 }
 
 func (dm *DMap) newFragment() (*fragment, error) {

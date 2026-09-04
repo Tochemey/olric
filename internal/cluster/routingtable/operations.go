@@ -24,6 +24,7 @@ import (
 	"github.com/tidwall/redcon"
 	"github.com/vmihailenco/msgpack/v5"
 
+	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/protocol"
 
 	"github.com/tochemey/olric/internal/cluster/partitions"
@@ -49,36 +50,51 @@ func (r *RoutingTable) lengthOfPartCommandHandler(conn redcon.Conn, cmd redcon.C
 	conn.WriteInt(part.Length())
 }
 
-func (r *RoutingTable) verifyRoutingTable(id uint64, table map[uint64]*route) error {
+// verifyRoutingTable checks that the member id that sent table is the
+// coordinator this member knows and that table has the configured partition
+// count. It returns that member, so the caller can record who the installed
+// table came from.
+func (x *RoutingTable) verifyRoutingTable(id uint64, table map[uint64]*route) (discovery.Member, error) {
 	// Check the coordinator
-	coordinator, err := r.discovery.FindMemberByID(id)
+	coordinator, err := x.discovery.FindMemberByID(id)
 	if err != nil {
-		return err
+		return discovery.Member{}, err
 	}
 
-	myCoordinator := r.discovery.GetCoordinator()
+	myCoordinator := x.discovery.GetCoordinator()
 	if !coordinator.CompareByID(myCoordinator) {
-		return fmt.Errorf("unrecognized cluster coordinator: %s: %s", coordinator, myCoordinator)
+		return discovery.Member{}, fmt.Errorf("unrecognized cluster coordinator: %s: %s", coordinator, myCoordinator)
 	}
 
 	// Compare partition counts to catch a possible inconsistencies in configuration
-	if r.config.PartitionCount != uint64(len(table)) {
-		return fmt.Errorf("invalid partition count: %d", len(table))
+	if x.config.PartitionCount != uint64(len(table)) {
+		return discovery.Member{}, fmt.Errorf("invalid partition count: %d", len(table))
 	}
-	return nil
+	return coordinator, nil
 }
 
 // applyRoutingTablePayload installs a routing table received from the
-// coordinator (either pushed or pulled), marks this node as bootstrapped and
-// triggers the balancer callbacks. It returns the left-over data report.
-// When onlyBootstrap is true the payload is dropped if the node is already
-// bootstrapped: the pull path is a bootstrap guarantee and must never regress
-// a fresher pushed table.
-func (r *RoutingTable) applyRoutingTablePayload(payload []byte, coordinatorID uint64, onlyBootstrap bool) ([]byte, error) {
-	r.updateRoutingMtx.Lock()
-	defer r.updateRoutingMtx.Unlock()
+// coordinator, pushed as sequence or pulled with a sequence of zero, marks this
+// node as bootstrapped and triggers the balancer callbacks. It returns the
+// left-over data report. When onlyBootstrap is true the payload is dropped if
+// the node is already bootstrapped: the pull path is a bootstrap guarantee and
+// must never regress a fresher pushed table.
+//
+// expected, when not nil, is the version installed when a pull was issued: the
+// pulled table is applied only if no push installed another one meanwhile. A
+// push whose sequence is older than the installed one, from the same
+// coordinator, is not installed either; see the body.
+func (x *RoutingTable) applyRoutingTablePayload(payload []byte, coordinatorID, sequence uint64, onlyBootstrap bool, expected *tableVersion) ([]byte, error) {
+	x.updateRoutingMtx.Lock()
+	defer x.updateRoutingMtx.Unlock()
 
-	if onlyBootstrap && r.IsBootstrapped() {
+	if onlyBootstrap && x.IsBootstrapped() {
+		return nil, nil
+	}
+
+	if expected != nil && x.version.Load() != expected {
+		// The pull was answered against a table that a push replaced while
+		// the answer was in flight; the pushed table is the newer one.
 		return nil, nil
 	}
 
@@ -88,63 +104,77 @@ func (r *RoutingTable) applyRoutingTablePayload(payload []byte, coordinatorID ui
 		return nil, err
 	}
 
-	if err = r.verifyRoutingTable(coordinatorID, table); err != nil {
+	coordinator, err := x.verifyRoutingTable(coordinatorID, table)
+	if err != nil {
 		return nil, err
+	}
+
+	if current := x.version.Load(); sequence != 0 && current != nil && current.coordinator == coordinator.ID && sequence < current.sequence {
+		// A retried push of a table older than the installed one, from the
+		// same coordinator: the fan-out of the newer table landed first. The
+		// answer is the current report, so the retry counts it as delivered
+		// and the newer table stays.
+		return x.prepareLeftOverDataReport()
 	}
 
 	// owners(atomic.value) is guarded by routingUpdateMtx against parallel writers.
 	// Calculate routing signature. This is useful to control balancing tasks.
-	r.setSignature(xxhash.Sum64(payload))
+	x.setVersion(xxhash.Sum64(payload), coordinator.ID, sequence)
+	x.tableCoordinator.Store(&coordinator)
 	for partID, data := range table {
 		// Set partition(primary copies) owners
-		part := r.primary.PartitionByID(partID)
+		part := x.primary.PartitionByID(partID)
 		part.SetOwners(data.Owners)
 
 		// Set backup owners
-		bpart := r.backup.PartitionByID(partID)
+		bpart := x.backup.PartitionByID(partID)
 		bpart.SetOwners(data.Backups)
 	}
 
 	// Used by the LRU implementation.
-	r.setOwnedPartitionCount()
+	x.setOwnedPartitionCount()
 
 	// Bootstrapped by the coordinator.
-	r.markBootstrapped()
+	x.markBootstrapped()
 
 	// Reconcile sync state for partitions we need to receive data for.
 	// Partitions no live owner holds data for are left out: nothing can
 	// arrive for them, so they must not delay the rebalance ACK. Partitions
 	// already pending keep their original escape deadline, so routing
 	// updates arriving faster than the escape delay cannot starve the ACK.
-	if r.syncState != nil {
-		r.syncState.Reconcile(r.partitionsAwaitingData(), r.config.InitialSyncEmptyPartitionTimeout)
+	if x.syncState != nil {
+		awaiting, scannedAt := x.partitionsAwaitingDataAt()
+		x.syncState.Reconcile(awaiting, x.config.InitialSyncEmptyPartitionTimeout, scannedAt)
 	}
 
 	// Collect report
-	value, err := r.prepareLeftOverDataReport()
+	value, err := x.prepareLeftOverDataReport()
 	if err != nil {
 		return nil, err
 	}
 
 	// Call balancer to distribute load evenly
-	r.spawn(r.runCallbacks)
+	x.spawn(x.runCallbacks)
 	return value, nil
 }
 
-func (r *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.Command) {
+// updateRoutingCommandHandler serves UPDATEROUTING: it checks that the sender is
+// the coordinator, installs the pushed table and answers with this member's
+// left-over data report.
+func (x *RoutingTable) updateRoutingCommandHandler(conn redcon.Conn, cmd redcon.Command) {
 	// The command handlers of the routing table service should wait for the cluster join event.
-	<-r.joined
+	<-x.joined
 
 	updateRoutingCmd, err := protocol.ParseUpdateRoutingCommand(cmd)
 	if err != nil {
-		r.log.V(1).Printf("[ERROR] Failed to parse routing table push from %s: %v", conn.RemoteAddr(), err)
+		x.log.V(1).Printf("[ERROR] Failed to parse routing table push from %s: %v", conn.RemoteAddr(), err)
 		protocol.WriteError(conn, err)
 		return
 	}
 
-	value, err := r.applyRoutingTablePayload(updateRoutingCmd.Payload, updateRoutingCmd.CoordinatorID, false)
+	value, err := x.applyRoutingTablePayload(updateRoutingCmd.Payload, updateRoutingCmd.CoordinatorID, updateRoutingCmd.Sequence, false, nil)
 	if err != nil {
-		r.log.V(1).Printf("[ERROR] Failed to apply pushed routing table from %s: %v", conn.RemoteAddr(), err)
+		x.log.V(1).Printf("[ERROR] Failed to apply pushed routing table from %s: %v", conn.RemoteAddr(), err)
 		protocol.WriteError(conn, err)
 		return
 	}

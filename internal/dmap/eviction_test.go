@@ -19,6 +19,7 @@ package dmap
 
 import (
 	"context"
+	"github.com/tochemey/olric/internal/cluster/partitions"
 	"testing"
 	"time"
 
@@ -214,4 +215,42 @@ func TestDMap_Eviction_LRU_Config_MaxInuse(t *testing.T) {
 	}
 
 	require.NotEqual(t, 100, length)
+}
+
+// TestDMap_Eviction_ExpiredKeyDeletedOnReplica guards that the expiry scanner
+// deletes the replica copy of an expired key as well: it addresses the DMap
+// by its name, not by the key of the fragment in the partition map, so the
+// replica resolves the same fragment.
+func TestDMap_Eviction_ExpiredKeyDeletedOnReplica(t *testing.T) {
+	cluster, s1, s2, _, _ := newReplicatedPair(t)
+	defer cluster.Shutdown()
+
+	ctx := context.Background()
+	dm, err := s1.NewDMap("mydmap")
+	require.NoError(t, err)
+	key := ownedKey(t, s1, "mydmap")
+	require.NoError(t, dm.Put(ctx, key, []byte("value"), &PutConfig{HasPX: true, PX: time.Millisecond}))
+
+	hkey := partitions.HKey("mydmap", key)
+	dm2, err := s2.NewDMap("mydmap")
+	require.NoError(t, err)
+	replica, err := dm2.loadFragment(s2.backup.PartitionByHKey(hkey))
+	require.NoError(t, err)
+	require.True(t, replica.storage.Check(hkey), "the replica holds the key")
+
+	<-time.After(5 * time.Millisecond)
+	part := s1.primary.PartitionByHKey(hkey)
+	f, err := dm.loadFragment(part)
+	require.NoError(t, err)
+	s1.scanFragmentForEviction(part.ID(), "dmap.mydmap", f)
+
+	f.RLock()
+	primaryHas := f.storage.Check(hkey)
+	f.RUnlock()
+	require.False(t, primaryHas, "the expired key is gone from the primary")
+
+	replica.RLock()
+	replicaHas := replica.storage.Check(hkey)
+	replica.RUnlock()
+	require.False(t, replicaHas, "the expired key is gone from the replica")
 }

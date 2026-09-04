@@ -107,7 +107,7 @@ func TestHandler_ServeRESP_PreCondition_DontCheck(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	cmd := protocol.NewUpdateRouting([]byte("dummy-data"), 1).Command(ctx)
+	cmd := protocol.NewUpdateRouting([]byte("dummy-data"), 1, 0).Command(ctx)
 	require.NoError(t, rdb.Process(ctx, cmd))
 	result, err := cmd.Bytes()
 	require.NoError(t, err)

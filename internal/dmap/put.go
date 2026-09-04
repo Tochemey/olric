@@ -18,6 +18,7 @@
 package dmap
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -134,125 +135,140 @@ func (dm *DMap) putOnReplicaFragment(e *env) error {
 	return nil
 }
 
-func (dm *DMap) asyncPutOnBackup(e *env, data []byte, owner discovery.Member) {
-	rc := dm.s.client.Get(owner.String())
-	cmd := protocol.NewPutEntry(e.dmap, e.key, data).Command(dm.s.ctx)
-	err := rc.Process(dm.s.ctx, cmd)
+// asyncPutOnBackup sends the encoded entry to one backup owner in the
+// background, within a bounded deadline.
+func (x *DMap) asyncPutOnBackup(e *env, data []byte, owner discovery.Member) {
+	ctx, cancel := x.s.remoteCallContext(x.s.ctx)
+	defer cancel()
+
+	rc := x.s.client.Get(owner.String())
+	cmd := protocol.NewPutEntry(e.dmap, e.key, data).Command(ctx)
+	err := rc.Process(ctx, cmd)
 	if err != nil {
-		if dm.s.log.V(3).Ok() {
-			dm.s.log.V(3).Printf("[ERROR] Failed to create replica in async mode: %v", err)
+		if x.s.log.V(3).Ok() {
+			x.s.log.V(3).Printf("[ERROR] Failed to create replica in async mode: %v", err)
 		}
 		return
 	}
 	err = cmd.Err()
 	if err != nil {
-		if dm.s.log.V(3).Ok() {
-			dm.s.log.V(3).Printf("[ERROR] Failed to create replica in async mode: %v", err)
+		if x.s.log.V(3).Ok() {
+			x.s.log.V(3).Printf("[ERROR] Failed to create replica in async mode: %v", err)
 		}
 	}
 }
 
-func (dm *DMap) asyncPutOnCluster(e *env, nt storage.Entry) error {
-	err := dm.putEntryOnFragment(e, nt)
+// asyncPutOnCluster stores the entry locally, then replicates it to the live
+// backup owners in the background.
+func (x *DMap) asyncPutOnCluster(e *env, nt storage.Entry) error {
+	err := x.putOnFragmentLocked(e, nt)
 	if err != nil {
 		return err
 	}
 
 	encodedEntry := nt.Encode()
 	// Fire and forget mode.
-	owners := dm.s.backup.PartitionOwnersByHKey(e.hkey)
+	owners := x.s.backup.PartitionOwnersByHKey(e.hkey)
 	for _, owner := range owners {
-		if !dm.s.isAlive() {
+		if !x.s.isAlive() {
 			return ErrServerGone
 		}
 
-		dm.s.spawn(func() { dm.asyncPutOnBackup(e, encodedEntry, owner) })
+		if !x.s.isMember(owner) {
+			continue
+		}
+
+		x.s.spawn(func() { x.asyncPutOnBackup(e, encodedEntry, owner) })
 	}
 
 	return nil
 }
 
-func (dm *DMap) syncPutOnCluster(e *env, nt storage.Entry) error {
+// syncPutOnCluster replicates the entry to the live backup owners, waits for
+// the write quorum, then stores it locally.
+func (x *DMap) syncPutOnCluster(e *env, nt storage.Entry) error {
 	// Quorum based replication.
 	var successful int
 
 	encodedEntry := nt.Encode()
 
-	owners := dm.s.backup.PartitionOwnersByHKey(e.hkey)
+	owners := x.s.backup.PartitionOwnersByHKey(e.hkey)
+	ctx, cancel := x.s.remoteCallContext(e.ctx)
+	defer cancel()
+
 	for _, owner := range owners {
-		rc := dm.s.client.Get(owner.String())
-		cmd := protocol.NewPutEntry(dm.name, e.key, encodedEntry).Command(dm.s.ctx)
-		err := rc.Process(dm.s.ctx, cmd)
+		if !x.s.isMember(owner) {
+			// The owner died and the routing table has not dropped it yet;
+			// dialing it can only fail. It counts as a replica that did not
+			// answer, and the write quorum decides.
+			x.s.log.V(3).Printf("[WARN] Skipping the replica of %s on %s: no longer a cluster member", e.dmap, owner)
+			continue
+		}
+
+		rc := x.s.client.Get(owner.String())
+		cmd := protocol.NewPutEntry(x.name, e.key, encodedEntry).Command(ctx)
+		err := rc.Process(ctx, cmd)
 		if err != nil {
 			return protocol.ConvertError(err)
 		}
 		err = protocol.ConvertError(cmd.Err())
 		if err != nil {
-			if dm.s.log.V(3).Ok() {
-				dm.s.log.V(3).Printf("[ERROR] Failed to call put command on %s for DMap: %s: %v", owner, e.dmap, err)
+			if x.s.log.V(3).Ok() {
+				x.s.log.V(3).Printf("[ERROR] Failed to call put command on %s for DMap: %s: %v", owner, e.dmap, err)
 			}
 			continue
 		}
 		successful++
 	}
-	err := dm.putEntryOnFragment(e, nt)
+	err := x.putOnFragmentLocked(e, nt)
 	if err != nil {
-		if dm.s.log.V(3).Ok() {
-			dm.s.log.V(3).Printf("[ERROR] Failed to call put command on %s for DMap: %s: %v", dm.s.rt.This(), e.dmap, err)
+		if x.s.log.V(3).Ok() {
+			x.s.log.V(3).Printf("[ERROR] Failed to call put command on %s for DMap: %s: %v", x.s.rt.This(), e.dmap, err)
 		}
 	} else {
 		successful++
 	}
-	if successful >= dm.s.config.WriteQuorum {
+
+	if successful >= x.s.config.WriteQuorum {
 		return nil
 	}
 	return ErrWriteQuorum
 }
 
-func (dm *DMap) setLRUEvictionStats(e *env) error {
-	// Try to make room for the new item, if it's required.
-	// MaxKeys and MaxInuse properties of LRU can be used in the same time.
-	// But I think that it's good to use only one of time in a production system.
-	// Because it should be easy to understand and debug.
+// lruOverLimit reports whether the fragment of e has reached the key count or
+// the memory limit of the LRU policy. MaxKeys and MaxInuse are shared by the
+// partitions this member owns, each partition managing itself: with MaxKeys
+// 70 and seven owned partitions every partition holds ten keys at most. The
+// caller holds the fragment lock.
+func (x *DMap) lruOverLimit(e *env) bool {
 	st := e.fragment.storage.Stats()
 
-	// This works for every request if you enabled LRU.
-	// But loading a number from memory should be very cheap.
-	// ownedPartitionCount changes in the case of node join or leave.
-	ownedPartitionCount := dm.s.rt.OwnedPartitionCount()
+	// ownedPartitionCount changes in the case of node join or leave. The
+	// routing table is an eventually consistent data structure: the count is
+	// checked before doing math, so a stale zero cannot panic in production.
+	ownedPartitionCount := x.s.rt.OwnedPartitionCount()
 	if ownedPartitionCount == 0 {
-		// Routing table is an eventually consistent data structure. In order to prevent a panic in prod,
-		// check the owned partition count before doing math.
+		return false
+	}
+
+	if x.config.maxKeys > 0 && st.Length > 0 && st.Length >= x.config.maxKeys/int(ownedPartitionCount) {
+		return true
+	}
+
+	// WARNING: Actual allocated memory can be different.
+	return x.config.maxInuse > 0 && st.Inuse > 0 && st.Inuse >= x.config.maxInuse/int(ownedPartitionCount)
+}
+
+// setLRUEvictionStats makes room for the write of e under the LRU policy with
+// the fragment lock held: the victim is deleted from the cluster in place. It
+// serves the single-replica write, which holds the fragment lock throughout;
+// the replicated write makes room through evictForWrite instead.
+func (x *DMap) setLRUEvictionStats(e *env) error {
+	if !x.lruOverLimit(e) {
 		return nil
 	}
 
-	if dm.config.maxKeys > 0 {
-		// MaxKeys controls maximum key count owned by this node.
-		// We need ownedPartitionCount property because every partition
-		// manages itself independently. So if you set MaxKeys=70 and
-		// your partition count is 7, every partition 10 keys at maximum.
-		if st.Length > 0 && st.Length >= dm.config.maxKeys/int(ownedPartitionCount) {
-			err := dm.evictKeyWithLRU(e)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	if dm.config.maxInuse > 0 {
-		// MaxInuse controls maximum in-use memory of partitions on this node.
-		// We need ownedPartitionCount property because every partition
-		// manages itself independently. So if you set MaxInuse=70M(in bytes) and
-		// your partition count is 7, every partition consumes 10M in-use space at maximum.
-		// WARNING: Actual allocated memory can be different.
-		if st.Inuse > 0 && st.Inuse >= dm.config.maxInuse/int(ownedPartitionCount) {
-			err := dm.evictKeyWithLRU(e)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return x.evictKeyWithLRU(e)
 }
 
 func (dm *DMap) checkPutConditions(e *env) error {
@@ -290,49 +306,177 @@ func (dm *DMap) checkPutConditions(e *env) error {
 	return nil
 }
 
-func (dm *DMap) putOnCluster(e *env) error {
-	part := dm.getPartitionByHKey(e.hkey, partitions.PRIMARY)
-	f, err := dm.loadOrCreateFragment(part)
+// prepareWrite checks the write's conditions against the fragment, applies
+// the DMap's TTL and builds the entry to store, all under the fragment lock,
+// which it releases before returning, and marks the write as in flight on the
+// fragment, see fragment.inFlight; the caller ends that once the entry is
+// stored or the write failed. The caller holds the key lock, so nothing else
+// can write the key between this check and the store that follows the
+// replication. Room under the LRU policy is made by evictForWrite before.
+func (x *DMap) prepareWrite(e *env) (storage.Entry, error) {
+	f := e.fragment
+	f.Lock()
+	defer f.Unlock()
+
+	nt, err := x.prepareWriteLocked(e, false)
+	if err != nil {
+		return nil, err
+	}
+
+	f.inFlight.Add(1)
+	return nt, nil
+}
+
+// prepareWriteLocked is prepareWrite for a caller that holds the fragment
+// lock. With evict set it also makes room under the LRU policy in place,
+// which only a caller that holds the fragment lock for the whole write may
+// ask for.
+func (x *DMap) prepareWriteLocked(e *env, evict bool) (storage.Entry, error) {
+	if err := x.checkPutConditions(e); err != nil {
+		return nil, err
+	}
+
+	if x.config != nil {
+		if x.config.ttlDuration.Seconds() != 0 && e.timeout.Seconds() == 0 {
+			e.timeout = x.config.ttlDuration
+		}
+
+		if evict && x.config.evictionPolicy == config.LRUEviction {
+			if err := x.setLRUEvictionStats(e); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if e.putConfig.OnlyUpdateTTL {
+		// The replicas store the entry as pushed, so an update of the TTL
+		// alone must carry the current value or the replicas end up with an
+		// empty one. The value is copied: the entry may point into a table
+		// that compaction rewrites once the lock is released.
+		current, err := e.fragment.storage.Get(e.hkey)
+		if err != nil {
+			if errors.Is(err, storage.ErrKeyNotFound) {
+				err = ErrKeyNotFound
+			}
+
+			return nil, err
+		}
+
+		e.value = bytes.Clone(current.Value())
+	}
+
+	return x.prepareEntry(e), nil
+}
+
+// evictForWrite makes room for the replicated write of e under the LRU
+// policy before the write takes its locks: the victim is chosen under the
+// fragment lock and deleted through deleteKey, under the victim's own key
+// lock, so the delete cannot slip between the replication and the store of a
+// write of the victim that is in flight, and no network call runs under the
+// fragment lock. The room is made outside the write's own locks, so writes
+// that run at the same time can exceed the limit by their number; the limit
+// is a target, as the sampling behind it already made it.
+func (x *DMap) evictForWrite(e *env) error {
+	if x.config == nil || x.config.evictionPolicy != config.LRUEviction {
+		return nil
+	}
+
+	f := e.fragment
+	f.Lock()
+	over := x.lruOverLimit(e)
+	var key string
+	var err error
+
+	if over {
+		_, key, err = x.lruVictim(e)
+	}
+
+	f.Unlock()
+
+	if err != nil || !over {
+		return err
+	}
+
+	if x.s.log.V(6).Ok() {
+		x.s.log.V(6).Printf("[DEBUG] Evicted item on DMap: %s, key: %s with LRU", e.dmap, key)
+	}
+
+	if err := x.deleteKey(e.ctx, key); err != nil {
+		return err
+	}
+
+	// number of valid items removed from cache to free memory for new items.
+	EvictedTotal.Increase(1)
+	return nil
+}
+
+// putOnFragmentLocked stores nt in the fragment of e under the fragment lock.
+func (x *DMap) putOnFragmentLocked(e *env, nt storage.Entry) error {
+	e.fragment.Lock()
+	defer e.fragment.Unlock()
+
+	return x.putEntryOnFragment(e, nt)
+}
+
+// putOnCluster writes the entry of e as the primary owner of its partition.
+// The key lock is held for the whole write, replication included, so the
+// writes of one key reach its replicas in the order they are applied here;
+// the fragment lock is taken only around the storage accesses, so a replica
+// that does not answer holds up the writes of this key and nothing else in
+// the fragment. The lock order is key lock first, fragment lock second.
+func (x *DMap) putOnCluster(e *env) error {
+	part := x.getPartitionByHKey(e.hkey, partitions.PRIMARY)
+	f, err := x.loadOrCreateFragment(part)
 	if err != nil {
 		return err
 	}
 
 	e.fragment = f
-	f.Lock()
-	defer f.Unlock()
 
-	if err = dm.checkPutConditions(e); err != nil {
+	if x.s.config.ReplicaCount <= config.MinimumReplicaCount {
+		// Single replica: no network call, so one fragment lock around the
+		// whole write is the cheapest correct choice.
+		f.Lock()
+		defer f.Unlock()
+
+		e.timestamp = time.Now().UnixNano()
+		nt, err := x.prepareWriteLocked(e, true)
+		if err != nil {
+			return err
+		}
+
+		return x.putEntryOnFragment(e, nt)
+	}
+
+	if err := x.evictForWrite(e); err != nil {
 		return err
 	}
 
-	if dm.config != nil {
-		if dm.config.ttlDuration.Seconds() != 0 && e.timeout.Seconds() == 0 {
-			e.timeout = dm.config.ttlDuration
-		}
-		if dm.config.evictionPolicy == config.LRUEviction {
-			if err = dm.setLRUEvictionStats(e); err != nil {
-				return err
-			}
-		}
+	keyLock := x.s.keyLock(e.hkey)
+	keyLock.Lock()
+	defer keyLock.Unlock()
+
+	// Stamped under the key lock, so the timestamps of one key follow the
+	// order its writes are applied in: merges and read repair order by them.
+	e.timestamp = time.Now().UnixNano()
+	nt, err := x.prepareWrite(e)
+	if err != nil {
+		return err
 	}
 
-	nt := dm.prepareEntry(e)
-	if dm.s.config.ReplicaCount > config.MinimumReplicaCount {
-		switch dm.s.config.ReplicationMode {
-		case config.AsyncReplicationMode:
-			// Fire and forget mode. Calls PutBackup command in different goroutines
-			// and stores the key/value pair on local storage instance.
-			return dm.asyncPutOnCluster(e, nt)
-		case config.SyncReplicationMode:
-			// Quorum based replication.
-			return dm.syncPutOnCluster(e, nt)
-		default:
-			return fmt.Errorf("invalid replication mode: %v", dm.s.config.ReplicationMode)
-		}
-	}
+	defer f.inFlight.Add(-1)
 
-	// single replica
-	return dm.putEntryOnFragment(e, nt)
+	switch x.s.config.ReplicationMode {
+	case config.AsyncReplicationMode:
+		// Fire and forget mode. Calls PutBackup command in different goroutines
+		// and stores the key/value pair on local storage instance.
+		return x.asyncPutOnCluster(e, nt)
+	case config.SyncReplicationMode:
+		// Quorum based replication.
+		return x.syncPutOnCluster(e, nt)
+	default:
+		return fmt.Errorf("invalid replication mode: %v", x.s.config.ReplicationMode)
+	}
 }
 
 func (dm *DMap) writePutCommand(e *env) (*redis.StatusCmd, error) {

@@ -20,6 +20,9 @@ package routingtable
 import (
 	"context"
 	"encoding/json"
+	"log"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -211,7 +214,7 @@ func TestHandleRebalanceAck_EarlyAckIsBufferedAndHarvested(t *testing.T) {
 
 	// The table with signature 42 has been committed, but its epoch has not
 	// started yet: a fast member acks during the push fan-out.
-	rt.setSignature(42)
+	rt.setVersion(42, 0, 0)
 	require.Equal(t, ackEarly, rt.handleRebalanceAck(42, peer.ID))
 
 	// An ack that matches neither the active epoch nor the committed table.
@@ -231,7 +234,53 @@ func TestHandleRebalanceAck_EarlyAckIsBufferedAndHarvested(t *testing.T) {
 	require.True(t, completed)
 }
 
-func TestStartRebalanceEpoch_UnpushedMemberDoesNotBlockCompletion(t *testing.T) {
+// TestStartRebalanceEpoch_HarvestsEarlyAckOutsidePending checks that an early
+// ack from a member the fan-out did not reach is kept at the epoch start, so
+// that the member counts as acked as soon as the retried push admits it.
+func TestStartRebalanceEpoch_HarvestsEarlyAckOutsidePending(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	peerCfg := testutil.NewConfig()
+	peerCfg.MemberlistConfig.Name = "127.0.0.1:9999"
+	peer := discovery.NewMember(peerCfg)
+
+	otherCfg := testutil.NewConfig()
+	otherCfg.MemberlistConfig.Name = "127.0.0.1:9998"
+	other := discovery.NewMember(otherCfg)
+
+	rt.Members().Lock()
+	rt.Members().Add(peer)
+	rt.Members().Add(other)
+	rt.Members().Unlock()
+
+	// peer pulled the committed table during the fan-out and acked; the push
+	// to it failed, so it is not in the pending set when the epoch starts.
+	rt.setVersion(42, 0, 0)
+	require.Equal(t, ackEarly, rt.handleRebalanceAck(42, peer.ID))
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{other.ID}, nil)
+	_, pending, acked, completed := rt.getRebalanceState()
+	require.Equal(t, 1, pending)
+	require.Equal(t, 1, acked, "the early ack of a member outside the pending set is kept")
+	require.False(t, completed)
+
+	// The retried push lands: peer joins the pending set already acked, and
+	// the other member's ack completes the epoch.
+	rt.admitLatePush(42, peer, &leftOverDataReport{})
+	_, pending, _, completed = rt.getRebalanceState()
+	require.Equal(t, 2, pending)
+	require.False(t, completed)
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(42, other.ID))
+	_, _, _, completed = rt.getRebalanceState()
+	require.True(t, completed)
+}
+
+// TestStartRebalanceEpoch_UnpushedLiveMemberGatesCompletion checks that a
+// live member the push did not reach still gates the epoch: it installs the
+// table through the retried push or its own pull and acks then, and until it
+// does the completion, which tells consumers every member routes on the new
+// table, is not announced.
+func TestStartRebalanceEpoch_UnpushedLiveMemberGatesCompletion(t *testing.T) {
 	c := testutil.NewConfig()
 	rt := newRoutingTableForTest(c, testutil.NewServer(c))
 
@@ -243,19 +292,25 @@ func TestStartRebalanceEpoch_UnpushedMemberDoesNotBlockCompletion(t *testing.T) 
 	joinerCfg.MemberlistConfig.Name = "127.0.0.1:9998"
 	joiner := discovery.NewMember(joinerCfg)
 
-	// Both members are known to memberlist, but the joiner never received the
-	// routing table push (it cannot bootstrap, so it can never ack).
 	rt.Members().Lock()
 	rt.Members().Add(peer)
 	rt.Members().Add(joiner)
 	rt.Members().Unlock()
 
-	rt.setSignature(42)
-	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID}, nil)
+	// Both members are known to memberlist; the joiner rejected the push.
+	rt.setVersion(42, 0, 0)
+	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID, joiner.ID}, nil)
 
-	// The epoch completes with the pushed member's ack alone.
 	require.Equal(t, ackAccepted, rt.handleRebalanceAck(42, peer.ID))
-	_, _, _, completed := rt.getRebalanceState()
+	_, pending, acked, completed := rt.getRebalanceState()
+	require.Equal(t, 2, pending)
+	require.Equal(t, 1, acked)
+	require.False(t, completed, "a live member still on the old table holds the completion")
+
+	// The retried push lands and the joiner acks.
+	rt.admitLatePush(42, joiner, &leftOverDataReport{})
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(42, joiner.ID))
+	_, _, _, completed = rt.getRebalanceState()
 	require.True(t, completed)
 }
 
@@ -291,7 +346,7 @@ func TestStartRebalanceEpoch_CompletesImmediatelyWhenAllAckedEarly(t *testing.T)
 		return nil
 	})
 
-	rt.setSignature(42)
+	rt.setVersion(42, 0, 0)
 	require.Equal(t, ackEarly, rt.handleRebalanceAck(42, peer.ID))
 
 	rt.startRebalanceEpoch(42, rebalanceReasonNodeJoin, "", []uint64{peer.ID}, nil)
@@ -442,5 +497,115 @@ func TestUpdateRouting_UnchangedTableKeepsEpoch(t *testing.T) {
 	require.Equal(t, ackAccepted, rt.handleRebalanceAck(epoch, rt.this.ID))
 	current, _, _, completed := rt.getRebalanceState()
 	require.Equal(t, epoch, current)
+	require.True(t, completed)
+}
+
+// TestHandleRebalanceAck_RecordsAckOutsidePending guards that an ack from a
+// member outside the pending set is recorded, so a member admitted to the
+// epoch later, after a push retry, does not have to ack again.
+func TestHandleRebalanceAck_RecordsAckOutsidePending(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	rt.rebalanceMtx.Lock()
+	rt.rebalanceState = rebalanceState{
+		epoch:   5,
+		pending: map[uint64]struct{}{1: {}},
+		acked:   map[uint64]struct{}{},
+	}
+	rt.rebalanceMtx.Unlock()
+
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(5, 99))
+
+	rt.rebalanceMtx.Lock()
+	_, recorded := rt.rebalanceState.acked[99]
+	rt.rebalanceMtx.Unlock()
+	require.True(t, recorded, "the ack of a member outside the pending set must be kept")
+
+	// The member is admitted late; both members are live.
+	rt.Members().Lock()
+	rt.Members().Add(discovery.Member{ID: 1, Name: "127.0.0.1:1"})
+	rt.Members().Add(discovery.Member{ID: 99, Name: "127.0.0.1:99"})
+	rt.Members().Unlock()
+
+	rt.rebalanceMtx.Lock()
+	rt.rebalanceState.pending[99] = struct{}{}
+	rt.rebalanceMtx.Unlock()
+
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(5, 1))
+	_, _, _, completed := rt.getRebalanceState()
+	require.True(t, completed, "the earlier ack of the late member must count")
+}
+
+// TestHandleRebalanceAck_EarlyAckMatchesCommittedSignature guards that an ack
+// for the table the coordinator committed but has not installed yet, as a
+// member that pulled it during the fan-out sends, is buffered rather than
+// reported stale.
+func TestHandleRebalanceAck_EarlyAckMatchesCommittedSignature(t *testing.T) {
+	c := testutil.NewConfig()
+	rt := newRoutingTableForTest(c, testutil.NewServer(c))
+
+	rt.committedPayload.Store([]byte("committed but not installed"))
+	epoch := rt.committedSignature()
+	require.NotZero(t, epoch)
+	require.NotEqual(t, rt.Signature(), epoch)
+
+	require.Equal(t, ackEarly, rt.handleRebalanceAck(epoch, 7))
+
+	rt.rebalanceMtx.Lock()
+	_, buffered := rt.earlyAcks[epoch][7]
+	rt.rebalanceMtx.Unlock()
+	require.True(t, buffered)
+}
+
+// lockedLog is an io.Writer safe for the logger and the test to share.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.buf.String()
+}
+
+// TestWatchOverdueEpoch_LogsMissingMembers guards the observability of a stuck
+// convergence: an epoch still open after overdueEpochIntervals balancer
+// intervals is logged with the members whose ack is missing, and the log
+// stops once the epoch completes.
+func TestWatchOverdueEpoch_LogsMissingMembers(t *testing.T) {
+	cluster := newTestCluster()
+	defer cluster.shutdown()
+
+	logs := &lockedLog{}
+	c := testutil.NewConfig()
+	c.TriggerBalancerInterval = 50 * time.Millisecond
+	c.Logger = log.New(logs, "", 0)
+	rt, err := cluster.addNode(c)
+	require.NoError(t, err)
+
+	silent := discovery.Member{Name: "127.0.0.1:1", ID: 424242}
+	rt.Members().Lock()
+	rt.Members().Add(silent)
+	rt.Members().Unlock()
+
+	rt.startRebalanceEpoch(rt.Signature(), rebalanceReasonManual, "", []uint64{rt.This().ID, silent.ID}, nil)
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "still open") && strings.Contains(logs.String(), silent.Name)
+	}, 3*time.Second, 20*time.Millisecond, "the overdue epoch must be logged with the missing member")
+
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(rt.Signature(), rt.This().ID))
+	require.Equal(t, ackAccepted, rt.handleRebalanceAck(rt.Signature(), silent.ID))
+	_, _, _, completed := rt.getRebalanceState()
 	require.True(t, completed)
 }

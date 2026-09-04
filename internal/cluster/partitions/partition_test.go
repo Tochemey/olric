@@ -47,6 +47,10 @@ func (tf *testFragment) MoveWithTargetKind(_ *Partition, _ string, _ []discovery
 	return nil
 }
 
+func (tf *testFragment) Replicate(_ *Partition, _ string, _ []discovery.Member, _ Kind) error {
+	return nil
+}
+
 func (tf *testFragment) Close() error {
 	return nil
 }

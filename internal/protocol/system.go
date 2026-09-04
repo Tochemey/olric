@@ -87,28 +87,44 @@ func ParseMoveFragmentCommand(cmd redcon.Command) (*MoveFragment, error) {
 	return NewMoveFragment(cmd.Args[1]), nil
 }
 
+// UpdateRouting pushes a routing table to a member.
 type UpdateRouting struct {
 	Payload       []byte
 	CoordinatorID uint64
+	// Sequence numbers the distinct tables the coordinator computed. It lets
+	// a member tell a new table apart from one it already installed when both
+	// have the same content, which happens when a member joins and leaves
+	// again before any data moved, so it acks the new epoch. It is zero when
+	// the coordinator predates it, and members of the previous version ignore
+	// it, so the command stays compatible both ways during a rolling upgrade.
+	Sequence uint64
 }
 
-func NewUpdateRouting(payload []byte, coordinatorID uint64) *UpdateRouting {
+// NewUpdateRouting builds the push of payload by the coordinator with the
+// given member id, numbered sequence.
+func NewUpdateRouting(payload []byte, coordinatorID, sequence uint64) *UpdateRouting {
 	return &UpdateRouting{
 		Payload:       payload,
 		CoordinatorID: coordinatorID,
+		Sequence:      sequence,
 	}
 }
 
-func (u *UpdateRouting) Command(ctx context.Context) *redis.StringCmd {
+// Command encodes the push. The sequence is the last argument so members of
+// the previous version, which read only the first two, keep decoding it.
+func (x *UpdateRouting) Command(ctx context.Context) *redis.StringCmd {
 	var args []interface{}
 	args = append(args, Internal.UpdateRouting)
-	args = append(args, u.Payload)
-	args = append(args, u.CoordinatorID)
+	args = append(args, x.Payload)
+	args = append(args, x.CoordinatorID)
+	args = append(args, x.Sequence)
 	return redis.NewStringCmd(ctx, args...)
 }
 
+// ParseUpdateRoutingCommand decodes a push. The sequence is optional: a
+// coordinator of the previous version sends none, which parses as zero.
 func ParseUpdateRoutingCommand(cmd redcon.Command) (*UpdateRouting, error) {
-	if len(cmd.Args) < 2 {
+	if len(cmd.Args) < 3 {
 		return nil, errWrongNumber(cmd.Args)
 	}
 	coordinatorID, err := strconv.ParseUint(util.BytesToString(cmd.Args[2]), 10, 64)
@@ -116,7 +132,15 @@ func ParseUpdateRoutingCommand(cmd redcon.Command) (*UpdateRouting, error) {
 		return nil, err
 	}
 
-	return NewUpdateRouting(cmd.Args[1], coordinatorID), nil
+	var sequence uint64
+	if len(cmd.Args) > 3 {
+		sequence, err = strconv.ParseUint(util.BytesToString(cmd.Args[3]), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return NewUpdateRouting(cmd.Args[1], coordinatorID, sequence), nil
 }
 
 // FetchRouting is sent by an unbootstrapped node to pull the current committed

@@ -29,14 +29,21 @@ import (
 )
 
 const (
-	ClusterEventsChannel            = "cluster.events"
-	KindNodeJoinEvent               = "node-join-event"
-	KindNodeLeftEvent               = "node-left-event"
-	KindFragmentMigrationEvent      = "fragment-migration-event"
-	KindFragmentReceivedEvent       = "fragment-received-event"
-	KindRebalanceStartEvent         = "rebalance-start-event"
-	KindRebalanceCompleteEvent      = "rebalance-complete-event"
-	KindInitialSyncCompleteEvent    = "initial-sync-complete-event"
+	ClusterEventsChannel         = "cluster.events"
+	KindNodeJoinEvent            = "node-join-event"
+	KindNodeLeftEvent            = "node-left-event"
+	KindFragmentMigrationEvent   = "fragment-migration-event"
+	KindFragmentReceivedEvent    = "fragment-received-event"
+	KindRebalanceStartEvent      = "rebalance-start-event"
+	KindRebalanceCompleteEvent   = "rebalance-complete-event"
+	KindInitialSyncCompleteEvent = "initial-sync-complete-event"
+	KindMembershipChangeEvent    = "membership-change-event"
+
+	// MembershipChangeJoin, MembershipChangeLeft and MembershipChangeUpdate
+	// are the values of MembershipChangeEvent.Change.
+	MembershipChangeJoin   = "join"
+	MembershipChangeLeft   = "left"
+	MembershipChangeUpdate = "update"
 )
 
 type Event interface {
@@ -344,6 +351,49 @@ func (r *RebalanceCompleteEvent) Encode() (string, error) {
 		default:
 			return nil, fmt.Errorf("invalid field: %s", field)
 		}
+		return value, nil
+	})
+}
+
+// MembershipChangeEvent is the coordinator's announcement of a membership
+// change: one event per member that joined, left or was updated, published
+// before the routing table is recomputed for it, whether or not that
+// recomputation changes the table or is allowed by the member-count quorum.
+// Members lists, sorted, the addresses of the members after the change, and
+// Generation is the coordinator's install generation when it observed the
+// change; every epoch it starts for a table that reflects the change carries a
+// higher one. It is the authoritative membership signal of the cluster, while
+// NodeJoinEvent and NodeLeftEvent are each member's own observations, which
+// reach that member's subscribers only.
+type MembershipChangeEvent struct {
+	Kind       string   `json:"kind"`
+	Source     string   `json:"source"`
+	Change     string   `json:"change"`
+	Node       string   `json:"node"`
+	NodeMeta   string   `json:"node_meta"`
+	Members    []string `json:"members"`
+	Generation uint64   `json:"generation"`
+	Timestamp  int64    `json:"timestamp"`
+}
+
+// Encode serializes the event as JSON for publication on the cluster events channel.
+func (x *MembershipChangeEvent) Encode() (string, error) {
+	fields := []string{"Timestamp", "Source", "Kind", "Change", "Node", "NodeMeta", "Members", "Generation"}
+	return encodeEvent(x, fields, func(rv reflect.Value, field string) (any, error) {
+		var value any
+		switch field {
+		case "Timestamp":
+			value = rv.FieldByName(field).Int()
+		case "Generation":
+			value = rv.FieldByName(field).Uint()
+		case "Members":
+			value = rv.FieldByName(field).Interface()
+		case "Source", "Kind", "Change", "Node", "NodeMeta":
+			value = rv.FieldByName(field).String()
+		default:
+			return nil, fmt.Errorf("invalid field: %s", field)
+		}
+
 		return value, nil
 	})
 }

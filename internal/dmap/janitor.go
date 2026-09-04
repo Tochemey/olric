@@ -51,8 +51,9 @@ func (s *Service) janitor(part *partitions.Partition) {
 		f.Lock()
 		defer f.Unlock()
 
-		if f.storage.Stats().Length != 0 {
-			// It's not empty. Continue scanning.
+		if f.storage.Stats().Length != 0 || f.inFlight.Load() != 0 {
+			// It's not empty, or a write is about to land in it. Continue
+			// scanning.
 			return true
 		}
 

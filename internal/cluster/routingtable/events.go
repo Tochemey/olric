@@ -55,47 +55,113 @@ func (r *RoutingTable) PublishClusterEvent(ctx context.Context, channel, message
 	return publish(ctx, channel, message)
 }
 
-// publishNodeJoinEvent announces the join of m, stamped with generation, the
-// install generation this member held when it observed the join.
-func (r *RoutingTable) publishNodeJoinEvent(m *discovery.Member, generation uint64) {
+// SetLocalClusterEventPublisher registers publish as the transport for the
+// events a member delivers to its own subscribers only, node-join-event and
+// node-left-event. Until one is registered those events go through the
+// cluster-wide publisher, so a deployment or test that registers only that one
+// still receives them.
+func (x *RoutingTable) SetLocalClusterEventPublisher(publish ClusterEventPublisher) {
+	x.eventPublisherMtx.Lock()
+	defer x.eventPublisherMtx.Unlock()
+	x.localEventPublisher = publish
+}
+
+// PublishLocalClusterEvent delivers an encoded cluster event to this member's
+// own subscribers of channel, through the local publisher when one is
+// registered and the cluster-wide one otherwise. Without either, the event is
+// dropped.
+func (x *RoutingTable) PublishLocalClusterEvent(ctx context.Context, channel, message string) error {
+	x.eventPublisherMtx.RLock()
+	publish := x.localEventPublisher
+	if publish == nil {
+		publish = x.eventPublisher
+	}
+
+	x.eventPublisherMtx.RUnlock()
+
+	if publish == nil {
+		x.log.V(4).Printf("[DEBUG] No cluster event publisher is registered, dropping local event to %s", channel)
+		return nil
+	}
+
+	return publish(ctx, channel, message)
+}
+
+// publishMembershipChangeEvent announces, from the coordinator, that m joined,
+// left or was updated (change), together with the sorted addresses of the
+// members after the change and generation, the install generation this
+// coordinator held when it observed the change.
+func (x *RoutingTable) publishMembershipChangeEvent(change string, m *discovery.Member, members []string, generation uint64) {
+	message := events.MembershipChangeEvent{
+		Kind:       events.KindMembershipChangeEvent,
+		Source:     x.this.String(),
+		Change:     change,
+		Node:       m.String(),
+		NodeMeta:   m.Meta,
+		Members:    members,
+		Generation: generation,
+		Timestamp:  time.Now().UnixNano(),
+	}
+
+	data, err := message.Encode()
+	if err != nil {
+		x.log.V(3).Printf("[ERROR] Failed to encode MembershipChangeEvent: %v", err)
+		return
+	}
+
+	err = x.PublishClusterEvent(x.ctx, events.ClusterEventsChannel, data)
+	if err != nil {
+		x.log.V(3).Printf("[ERROR] Failed to publish MembershipChangeEvent to %s: %v", events.ClusterEventsChannel, err)
+	}
+}
+
+// publishNodeJoinEvent announces the join of m to this member's own
+// subscribers, stamped with generation, the install generation this member
+// held when it observed the join.
+func (x *RoutingTable) publishNodeJoinEvent(m *discovery.Member, generation uint64) {
 	message := events.NodeJoinEvent{
 		Kind:       events.KindNodeJoinEvent,
-		Source:     r.this.String(),
+		Source:     x.this.String(),
 		NodeJoin:   m.String(),
 		NodeMeta:   m.Meta,
 		Generation: generation,
 		Timestamp:  time.Now().UnixNano(),
 	}
+
 	data, err := message.Encode()
 	if err != nil {
-		r.log.V(3).Printf("[ERROR] Failed to encode NodeJoinEvent: %v", err)
+		x.log.V(3).Printf("[ERROR] Failed to encode NodeJoinEvent: %v", err)
 		return
 	}
-	err = r.PublishClusterEvent(r.ctx, events.ClusterEventsChannel, data)
+
+	err = x.PublishLocalClusterEvent(x.ctx, events.ClusterEventsChannel, data)
 	if err != nil {
-		r.log.V(3).Printf("[ERROR] Failed to publish NodeJoinEvent to %s: %v", events.ClusterEventsChannel, err)
+		x.log.V(3).Printf("[ERROR] Failed to publish NodeJoinEvent to %s: %v", events.ClusterEventsChannel, err)
 	}
 }
 
-// publishNodeLeftEvent announces the departure of m, stamped with generation,
-// the install generation this member held when it observed the departure.
-func (r *RoutingTable) publishNodeLeftEvent(m *discovery.Member, generation uint64) {
+// publishNodeLeftEvent announces the departure of m to this member's own
+// subscribers, stamped with generation, the install generation this member
+// held when it observed the departure.
+func (x *RoutingTable) publishNodeLeftEvent(m *discovery.Member, generation uint64) {
 	message := events.NodeLeftEvent{
 		Kind:       events.KindNodeLeftEvent,
-		Source:     r.this.String(),
+		Source:     x.this.String(),
 		NodeLeft:   m.String(),
 		NodeMeta:   m.Meta,
 		Generation: generation,
 		Timestamp:  time.Now().UnixNano(),
 	}
+
 	data, err := message.Encode()
 	if err != nil {
-		r.log.V(3).Printf("[ERROR] Failed to encode NodeLeftEvent: %v", err)
+		x.log.V(3).Printf("[ERROR] Failed to encode NodeLeftEvent: %v", err)
 		return
 	}
-	err = r.PublishClusterEvent(r.ctx, events.ClusterEventsChannel, data)
+
+	err = x.PublishLocalClusterEvent(x.ctx, events.ClusterEventsChannel, data)
 	if err != nil {
-		r.log.V(3).Printf("[ERROR] Failed to publish NodeLeftEvent to %s: %v", events.ClusterEventsChannel, err)
+		x.log.V(3).Printf("[ERROR] Failed to publish NodeLeftEvent to %s: %v", events.ClusterEventsChannel, err)
 	}
 }
 

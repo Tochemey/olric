@@ -61,14 +61,40 @@ func (t *transferIterator) Export() ([]byte, int, error) {
 	return nil, 0, io.EOF
 }
 
+// ExportFrom encodes the first live table at or after position index and
+// returns it with the position after it, without removing anything, so the
+// local copy stays intact and the caller can release its lock between tables.
+// It returns io.EOF when no live table remains at or after index.
+func (x *transferIterator) ExportFrom(index int) ([]byte, int, error) {
+	for i := index; i < len(x.storage.tables); i++ {
+		tb := x.storage.tables[i]
+		if tb.State() == table.RecycledState {
+			continue
+		}
+
+		data, err := table.Encode(tb)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		return data, i + 1, nil
+	}
+
+	return nil, 0, io.EOF
+}
+
 func (k *KVStore) Import(data []byte, f func(uint64, storage.Entry) error) error {
 	tb, err := table.Decode(data)
 	if err != nil {
 		return err
 	}
 
+	// The error of f ends the import and is reported: a sender that marks
+	// a copy as delivered must not do so for a table the receiver could not
+	// merge in full.
 	tb.Range(func(hkey uint64, e storage.Entry) bool {
-		return f(hkey, e) == nil
+		err = f(hkey, e)
+		return err == nil
 	})
 	return err
 }

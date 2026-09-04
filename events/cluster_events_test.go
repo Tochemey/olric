@@ -135,3 +135,21 @@ func TestClusterEvents_InitialSyncCompleteEvent(t *testing.T) {
 	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"initial-sync-complete-event"}`
 	require.Equal(t, expected, result)
 }
+
+func TestClusterEvents_MembershipChangeEvent(t *testing.T) {
+	var timestamp int64 = 585199808000 // Author's birthdate!
+	n := MembershipChangeEvent{
+		Kind:       KindMembershipChangeEvent,
+		Source:     "127.0.0.1:3423",
+		Change:     MembershipChangeLeft,
+		Node:       "127.0.0.1:3576",
+		NodeMeta:   "custom-meta",
+		Members:    []string{"127.0.0.1:3423", "127.0.0.1:4000"},
+		Generation: 7,
+		Timestamp:  timestamp,
+	}
+	result, err := n.Encode()
+	require.NoError(t, err)
+	expected := `{"timestamp":585199808000,"source":"127.0.0.1:3423","kind":"membership-change-event","change":"left","node":"127.0.0.1:3576","node_meta":"custom-meta","members":["127.0.0.1:3423","127.0.0.1:4000"],"generation":7}`
+	require.Equal(t, expected, result)
+}

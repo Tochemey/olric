@@ -104,6 +104,18 @@ func NewService(e *environment.Environment) (service.Service, error) {
 		_, err := s.publishToCluster(ctx, channel, message)
 		return err
 	})
+
+	// Each member's own membership observations, node-join-event and
+	// node-left-event, reach its own subscribers only; the coordinator's
+	// membership-change-event is the cluster-wide announcement.
+	s.rt.SetLocalClusterEventPublisher(func(ctx context.Context, channel, message string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		PublishedTotal.Increase(int64(s.pubsub.Publish(channel, message)))
+		return nil
+	})
 	return s, nil
 }
 

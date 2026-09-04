@@ -62,6 +62,34 @@ are not specific to the changes described here.
   already elapsed are not asked about again, so a stable cluster issues no extra requests. On an empty cluster a
   departure's epoch completes on the survivors' next balancer tick instead of seconds later.
 
+The changes in the rest of this section, together with the departure-related fixes in the Data Safety, Client and
+Connection, Concurrency and Shutdown, Cluster Events and Configuration sections below, converge the cluster quickly
+after an abrupt member departure (the olric side of GoAkt
+[#1340](https://github.com/Tochemey/goakt/issues/1340)). Their full design — the root causes, all eight fixes, and the
+failure-detection and tuning guidance — is in
+[Node-left convergence after an abrupt departure](NODE_LEFT_CONVERGENCE_PLAN.md).
+
+* **Routing table pushes are retried, and members pull on a coordinator change.** A push a member rejected or could
+  not receive is pushed again with exponential backoff until it lands, the member leaves, a newer table supersedes it or
+  the periodic push is due. The epoch gates on every live member the table was computed for, including those the
+  fan-out could not reach, which install it through the retry or their own pull and ack then; a completion therefore
+  means every live member routes on the new table. The committed payload is stored before the fan-out, and a member
+  whose coordinator left pulls the committed table from the new one when no push has landed.
+  Before, a push rejected during the window in which a member's memberlist still listed a dead coordinator was left to
+  the periodic push, one minute later, and the epoch could not complete meanwhile. Installs are monotonic: a member does
+  not install a retried push older than the table it holds, nor a pulled table a push replaced meanwhile, and a pull
+  that confirms the installed table keeps the identity of the push that delivered it. Retry rounds push concurrently
+  with every attempt bounded by the client timeouts, and every ack buffered before an epoch starts is kept, whether or
+  not the fan-out reached the member. Addresses GoAkt issue #1340.
+* **A table sequence travels with every push.** Members of the previous version ignore the extra argument. A member that
+  missed an intermediate table, and so holds a table whose content recurred, advances its generation and acks when the
+  sequence changed. Without it a member that left and rejoined before any data moved never acked the new epoch.
+* **An epoch that stays open is explained.** After three balancer intervals the coordinator logs the members whose ack
+  it is waiting for, once per interval, until the epoch completes or is superseded.
+* **Table computation costs one pipelined round trip per member.** The membership is read from memberlist once per
+  computation and the owners are asked for their key counts in one pipelined round trip each, concurrently, instead of
+  one round trip per owner per partition; pushes go to 64 members at a time instead of `NumCPU`.
+
 ## Data Safety Fixes
 
 * **Backup-to-primary promotion on failover**, which fixes a data-loss race inherited from the original library. When a
@@ -72,6 +100,37 @@ are not specific to the changes described here.
   fragments into the survivor's own primary fragment first, through the standard fragment merge path with
   last-write-wins conflict resolution, so what it later pushes to the new replica owner is a copy rather than the last
   copy. Combine this with `EnableProactiveSyncOnJoin` so the replica copy is re-established promptly after promotion.
+
+* **Re-replication after a departure.** With `EnableProactiveSyncOnJoin` set, the survivors that hold the backup copies of
+  a partition whose primary owner left the cluster re-create its primary copy on the new owner once `ReplicaRestoreDelay`
+  (default one minute) has passed since the departure, counted per partition, so the partition is back at `ReplicaCount`
+  copies without waiting for a write. The balancer tracks the owner list of every partition from one cycle to the
+  next and schedules the restore when an owner dropped out of it; when due, the restore is dropped if that owner is
+  still a member, since it drained its copy, and sent otherwise, without asking the owner, as the receiver's merge is
+  version-aware. The delay keeps a rolling restart from moving data
+  twice: a member back within it owns its partitions again and receives them from their previous owner. Without the
+  flag the default stays the original library's lazy repair through reads.
+* **A survivor's sole backup copy is never relocated.** A backup copy of a partition this member owns as primary is merged
+  into its primary fragment by the promotion and, if the promotion fails, stays put; before, the balancer could move it
+  to the new replica owner in the same cycle and drop it locally.
+* **`Expire` keeps the value on the replicas, and ties favour the primary.** A TTL update replicated the entry with an empty
+  value, which a read then served after a timestamp tie. It now carries the current value, and equal timestamps resolve
+  in favour of the primary's copy.
+* **The expiry scanner reaches the replicas.** It addressed the DMap by the fragment's key in the partition map, so its
+  remote deletes went to a DMap that does not exist and the replicas kept every expired key. It also no longer deletes
+  under the fragment lock: it samples under it and deletes each key under the key's own lock, after checking the expiry
+  again.
+* **Storage imports report merge failures.** An import whose merge callback failed answered as if every entry had been
+  merged, so the sender recorded the copy as delivered.
+* **The proactive push copies whole fragments and retries.** It copies every live table of a fragment, not only the
+  first, runs on every balancer cycle once per partition per installed table as soon as the partition holds data, and
+  retries a failed push on the next tick. Before, a replica owner that had not installed the table when the push
+  arrived, or a partition whose primary copy was moved in later, stayed empty until the next table change.
+* **No escape wait on departures.** A partition pending as primary awaits only previous primary owners, whose copy is
+  moved right away; a backup copy held elsewhere is restored by the delayed step above, off the convergence path.
+  Before, every departure held the node-left epoch for the whole `InitialSyncEmptyPartitionTimeout`.
+* **Fragments delivered during a table install are not waited for again.** The sync state records the marks received
+  between the install's scan of empty partitions and its reconcile, and the reconcile skips them.
 
 ## Client and Connection Fixes
 
@@ -103,6 +162,14 @@ are not specific to the changes described here.
   in-flight routing table fetch instead of stalling teardown for a dial timeout. A routine background refresh failure,
   expected during cluster churn and shutdown windows, is logged at `V(2)` rather than as an unconditional error.
 
+* **Deadlines on every remote call made for a request, and no dialing of departed members.** Replica writes, replica
+  and previous-owner reads, read repair, deletes on previous and replica owners and fragment transfers run under the
+  request's deadline, or one attempt's worth of the client timeouts when it has none, and the go-redis client honours
+  context deadlines at the socket level. Writes, reads and fragment transfers skip an owner memberlist has already removed
+  instead of dialing it; deletes, which have no tombstone, fail at once on such an owner and succeed once the routing
+  table has dropped it, and a delete of a key the primary owner does not hold still reaches the replicas. A peer that
+  accepted connections and never answered, as a departed pod does, used to cost each request about 20 seconds.
+
 ## Concurrency and Shutdown Fixes
 
 * **Thread-safe command registration.** The RESP command multiplexer's handler map was read by connection goroutines
@@ -124,6 +191,16 @@ are not specific to the changes described here.
   routing table push or a membership event arriving as a member shut down could call `Add` concurrently with `Wait`.
   Those spawns now go through one guarded helper, and `Shutdown` flips a `closed` flag under the same mutex before
   waiting, so work arriving after shutdown has begun is dropped.
+
+* **Replication runs outside the fragment lock.** Writes and deletes hold the fragment lock only around their storage
+  accesses; a striped per-key lock serializes a key's operations across replication, so a key's writes still reach its
+  replicas in the primary's order while a replica that does not answer stalls that key alone. The expiry scanner and the
+  LRU eviction delete under the key lock as well, so an eviction cannot remove from the replicas a write of the same key
+  that is between its replication and its store, and the janitor leaves a fragment alone while such a write is in
+  flight. A read of a fragment under sync-replicated write load went from 603µs to 94µs, parallel replicated writes to
+  one fragment from 138µs to 49µs.
+* **The balancer acks in the invocation that finished moving.** A cycle that moved data is followed by another one
+  right away, up to three per invocation, instead of waiting for the next `TriggerBalancerInterval`.
 
 ## Cluster Events
 
@@ -172,6 +249,13 @@ are not specific to the changes described here.
   possible in partial test setups because a full member always wires one before joining, events are dropped with a debug
   log instead of surfacing bogus errors.
 
+* **One authoritative membership announcement.** The coordinator publishes `membership-change-event` for every join,
+  departure and update, with the member set after the change and its generation, before the table is recomputed and
+  regardless of whether the table changes or the quorum allows an update.
+* **Local observations stay local (breaking).** `node-join-event` and `node-left-event` reach the publishing member's own
+  subscribers only, instead of being relayed to every member, which cost `members²` deliveries per change. Consumers that
+  relied on other members' copies subscribe to `membership-change-event` instead.
+
 ## Configuration Changes
 
 * **LRU eviction config guard (breaking).** `Config.Validate()` rejects LRU setups whose per-partition budget is too
@@ -183,3 +267,7 @@ are not specific to the changes described here.
 * **`InitialSyncEmptyPartitionTimeout` bounds a narrower wait.** It is now the maximum time a member waits on an owned
   but empty partition whose other owners hold data or could not be answered for. Partitions no owner holds data for
   are not waited on at all. The default is unchanged at `15s`.
+* **`ReplicaRestoreDelay` (default `1m`).** The wait, after the primary owner of a partition left the cluster, before the
+  survivors re-create its primary copy from their backups on the new owner, counted per partition from the departure.
+  The check runs on the balancer tick, and a negative value is rejected. It applies only with `EnableProactiveSyncOnJoin`
+  set and `ReplicaCount` above 1.
