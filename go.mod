@@ -17,7 +17,7 @@ require (
 	github.com/tidwall/match v1.2.0
 	github.com/tidwall/redcon v1.6.4
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 )
 
 require (
