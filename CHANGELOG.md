@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.21 - 2026-09-16
+
+### Changed
+
+- `github.com/hashicorp/memberlist` is upgraded from v0.6.0 to v0.7.0, and `github.com/hashicorp/go-metrics` follows from v0.6.1 to v0.7.0. The release removes the compatibility shim that let memberlist emit its metrics through `github.com/armon/go-metrics`, so that module has left the dependency graph and the `exclude` block in `go.mod` that pinned it at v0.4.1 is removed. Memberlist metrics now always reach the global `hashicorp/go-metrics` sink: the `hashicorpmetrics` build tag has no effect any more, and an application that collected them through an `armon/go-metrics` sink must register a `hashicorp/go-metrics` sink instead. v0.7.0 also hardens the wire path: a push/pull payload that decompresses to more than 40 MiB and a user message longer than 20 MiB are rejected, and a gossiped node whose protocol version vector is truncated is skipped instead of panicking on an index out of range. Olric's push/pull state is far below those limits.
+
 ## v0.3.20 - 2026-09-05
 
 ### Added
