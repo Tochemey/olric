@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.22 - 2026-09-26
+
+### Fixed
+
+- `protocol.ConvertError`, which every remote call runs on the error it gets back, rebuilt any error it did not recognise from the text after its first word, so an error raised on the calling side and never sent over the wire lost its identity. A read forwarded to a partition owner that reached the caller's deadline came back as a bare `deadline exceeded` that `errors.Is(err, context.DeadlineExceeded)` no longer matched; `context.Canceled`, `redis: client is closed` and `redis: nil` were mangled the same way. The conversion exists for wire errors, which the server writes as a prefix followed by the message, and the server only ever writes a registered prefix or the generic `ERR`, so the strip now applies to `ERR` alone and any other error is returned unchanged, message and identity intact. A deadline that expires on the remote member still arrives as text, since RESP carries no error identity. Fixes [#47](https://github.com/Tochemey/olric/issues/47), which mirrors [olric-data/olric#289](https://github.com/olric-data/olric/issues/289); addresses [Tochemey/goakt#1385](https://github.com/Tochemey/goakt/issues/1385).
+
 ## v0.3.21 - 2026-09-16
 
 ### Changed

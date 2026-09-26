@@ -83,6 +83,12 @@ func GetPrefix(err error) string {
 	return prefix
 }
 
+// ConvertError maps an error returned by a remote command back to the error it
+// stands for. A wire error is written by WriteError as a prefix followed by the
+// message: a registered prefix maps to its sentinel, and the generic prefix is
+// stripped to leave the message. Any other error never crossed the wire, such
+// as context.DeadlineExceeded from a request bounded by the caller, and is
+// returned unchanged so that errors.Is keeps working on it.
 func ConvertError(err error) error {
 	if err == nil {
 		return nil
@@ -93,7 +99,7 @@ func ConvertError(err error) error {
 		return perr
 	}
 
-	if len(parsed) > 1 {
+	if parsed[0] == GenericError && len(parsed) > 1 {
 		return fmt.Errorf("%s", parsed[1])
 	}
 

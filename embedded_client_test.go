@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/testutil"
 	"github.com/tochemey/olric/pkg/storage"
@@ -1265,4 +1266,40 @@ func TestEmbeddedClient_Ping_Error(t *testing.T) {
 	e := db.NewEmbeddedClient()
 	_, err := e.Ping(context.Background(), deadAddr, "")
 	require.Error(t, err)
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/47. A read
+// forwarded to the partition owner under a context bounded by the caller must
+// keep the identity of the context error when that deadline expires, instead
+// of the bare "deadline exceeded" text the protocol layer used to rebuild.
+func TestEmbeddedClient_DMap_Get_ContextDeadline(t *testing.T) {
+	cluster := newTestCluster(t)
+	db1 := cluster.addMember(t)
+	db2 := cluster.addMember(t)
+	waitForClusterSize(t, []*Olric{db1, db2}, 2)
+
+	// The read must leave this member, so pick a key whose partition db2 owns.
+	var key string
+	require.Eventually(t, func() bool {
+		for i := 0; i < 1000; i++ {
+			candidate := fmt.Sprintf("mykey-%d", i)
+			hkey := partitions.HKey("mydmap", candidate)
+			if !db1.primary.PartitionByHKey(hkey).Owner().CompareByName(db1.rt.This()) {
+				key = candidate
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 100*time.Millisecond)
+
+	e := db1.NewEmbeddedClient()
+	dm, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	_, err = dm.Get(ctx, key)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
