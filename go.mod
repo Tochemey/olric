@@ -3,7 +3,7 @@ module github.com/tochemey/olric
 go 1.26.0
 
 require (
-	github.com/RoaringBitmap/roaring/v2 v2.28.0
+	github.com/RoaringBitmap/roaring/v2 v2.29.0
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/go-sockaddr v1.0.7
@@ -32,7 +32,7 @@ require (
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect

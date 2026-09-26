@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,4 +67,22 @@ func TestProtocol_ErrNotCoordinator(t *testing.T) {
 	errStr := fmt.Sprintf("NOTCOORDINATOR %s", ErrNotCoordinator.Error())
 	cerr := ConvertError(errors.New(errStr))
 	require.ErrorIs(t, cerr, ErrNotCoordinator)
+}
+
+// A wire error with the generic prefix keeps only its message.
+func TestProtocol_ConvertError_GenericPrefix(t *testing.T) {
+	cerr := ConvertError(errors.New("ERR something went wrong"))
+	require.EqualError(t, cerr, "something went wrong")
+}
+
+// A local error never crossed the wire and must keep its identity, see
+// https://github.com/Tochemey/olric/issues/47.
+func TestProtocol_ConvertError_LocalError(t *testing.T) {
+	for _, err := range []error{context.DeadlineExceeded, context.Canceled, redis.ErrClosed, redis.Nil} {
+		t.Run(err.Error(), func(t *testing.T) {
+			cerr := ConvertError(err)
+			require.ErrorIs(t, cerr, err)
+			require.EqualError(t, cerr, err.Error())
+		})
+	}
 }

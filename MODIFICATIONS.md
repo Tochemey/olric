@@ -169,6 +169,15 @@ failure-detection and tuning guidance — is in
   instead of dialing it; deletes, which have no tombstone, fail at once on such an owner and succeed once the routing
   table has dropped it, and a delete of a key the primary owner does not hold still reaches the replicas. A peer that
   accepted connections and never answered, as a departed pod does, used to cost each request about 20 seconds.
+* **Local errors keep their identity through the protocol layer.** Every remote call converts the error it gets back
+  with `protocol.ConvertError`, which maps a wire error, written by the server as a prefix followed by the message,
+  back to its sentinel. It rebuilt every other error from the text after its first word, so an error raised on the
+  calling side and never sent over the wire came back as a new error: a read forwarded to a partition owner that
+  reached the caller's deadline returned a bare `deadline exceeded` that `errors.Is(err, context.DeadlineExceeded)`
+  no longer matched, and `context.Canceled`, `redis: client is closed` and `redis: nil` were mangled the same way. The
+  server only ever writes a registered prefix or the generic `ERR`, so the strip now applies to `ERR` alone and any
+  other error is returned unchanged, message and identity intact. A deadline that expires on the remote member still
+  arrives as text, since RESP carries no error identity.
 
 ## Concurrency and Shutdown Fixes
 
