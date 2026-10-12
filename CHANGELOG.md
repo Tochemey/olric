@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## v0.3.23 - 2026-10-12
 
+### Added
+
+- `EmbeddedDMap.Owner(key)` returns the member that owns the key's partition at this moment, the member a `Put` of the key is sent to. It hashes the key with the member's own hasher and reads the member's own routing table, so it makes no network call, unlike `EmbeddedClient.RoutingTable`, which asks the coordinator over the network from every other member. It returns `ErrNotBootstrapped` before the member has received a routing table.
+
 ### Fixed
 
 - The hash that maps a DMap key to its partition was process-global: `olric.New` and `NewClusterClient` stored their hasher in a package variable set once per process, so every later instance or cluster client in the same process placed and looked up keys with the first one's hasher, whatever its own `Config.Hasher` or `WithHasher` said. The rest of each instance, the consistent-hash ring included, already used its own hasher. A process that ran instances with different hashers, as GoAkt does with clustered actor systems that set different partition hashers and in its test binaries, stored keys in partitions their hasher did not select, and a member whose process had first started an instance with another hasher placed keys in other partitions than its peers. Each instance and cluster client now hashes keys with its own configured hasher. Members of one cluster must still share the same hasher, and clients should be given it through `WithHasher` to reach partition owners directly; a client with another hasher still gets correct results, with an extra hop through the receiving member. The requirement is now documented on `Config.Hasher`, `WithHasher` and in the README. Fixes [#53](https://github.com/Tochemey/olric/issues/53).

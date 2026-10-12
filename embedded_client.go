@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/dmap"
 	"github.com/tochemey/olric/internal/protocol"
@@ -239,6 +240,30 @@ func (dm *EmbeddedDMap) Get(ctx context.Context, key string) (*GetResponse, erro
 	return &GetResponse{
 		entry:     result,
 		partition: ptr.Deref(part, uint64(0)),
+	}, nil
+}
+
+// Owner returns the member that currently owns the partition of key, the
+// member this member sends a Put of key to. It hashes key with this member's
+// hasher and reads this member's own partition table, so it makes no network
+// call. The result is a snapshot: a later Put resolves the owner again from the
+// table in force at that time. It returns ErrNotBootstrapped while this member
+// has not yet received a routing table.
+func (x *EmbeddedDMap) Owner(key string) (Member, error) {
+	db := x.client.db
+	hkey := partitions.HKey(db.hashFunc, x.name, key)
+	owners := db.primary.PartitionByHKey(hkey).Owners()
+	if len(owners) == 0 {
+		return Member{}, ErrNotBootstrapped
+	}
+
+	owner := owners[len(owners)-1]
+	return Member{
+		Name:        owner.Name,
+		ID:          owner.ID,
+		Birthdate:   owner.Birthdate,
+		Meta:        owner.Meta,
+		Coordinator: db.rt.Discovery().GetCoordinator().ID == owner.ID,
 	}, nil
 }
 
