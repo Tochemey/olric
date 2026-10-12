@@ -818,6 +818,34 @@ func TestEmbeddedClient_RoutingTable_Standalone(t *testing.T) {
 	})
 }
 
+// waitForRoutingTableOwners blocks until the routing table served through e
+// covers every partition and spreads the primary partitions across exactly
+// owners distinct members. The coordinator redistributes partitions
+// asynchronously after a node joins, so a member that has just started may
+// still be served a table computed before its join.
+func waitForRoutingTableOwners(t *testing.T, e *EmbeddedClient, partitionCount, owners int) {
+	t.Helper()
+
+	// Generous deadline: the redistribution after a join is markedly slower on
+	// starved CI runners and under the race detector. The wait returns as soon
+	// as the condition holds.
+	require.Eventually(t, func() bool {
+		rt, err := e.RoutingTable(context.Background())
+		if err != nil || len(rt) != partitionCount {
+			return false
+		}
+
+		distinct := make(map[string]struct{})
+		for _, route := range rt {
+			for _, owner := range route.PrimaryOwners {
+				distinct[owner] = struct{}{}
+			}
+		}
+
+		return len(distinct) == owners
+	}, 30*time.Second, 50*time.Millisecond)
+}
+
 func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
 	t.Run("With TLS", func(t *testing.T) {
 		conf := autotls.Config{AutoTLS: true}
@@ -832,16 +860,7 @@ func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
 		db2 := cluster.addMemberWithConfig(t, testutil.NewConfigWithTLS(t, conf.ServerTLS, conf.ClientTLS))
 		e := db2.NewEmbeddedClient()
 
-		rt, err := e.RoutingTable(context.Background())
-		require.NoError(t, err)
-		require.Len(t, rt, int(db2.config.PartitionCount))
-		owners := make(map[string]struct{})
-		for _, route := range rt {
-			for _, owner := range route.PrimaryOwners {
-				owners[owner] = struct{}{}
-			}
-		}
-		require.Len(t, owners, 3)
+		waitForRoutingTableOwners(t, e, int(db2.config.PartitionCount), 3)
 	})
 	t.Run("Without TLS", func(t *testing.T) {
 		cluster := newTestCluster(t)
@@ -853,16 +872,7 @@ func TestEmbeddedClient_RoutingTable_Cluster(t *testing.T) {
 		db2 := cluster.addMember(t)
 
 		e := db2.NewEmbeddedClient()
-		rt, err := e.RoutingTable(context.Background())
-		require.NoError(t, err)
-		require.Len(t, rt, int(db2.config.PartitionCount))
-		owners := make(map[string]struct{})
-		for _, route := range rt {
-			for _, owner := range route.PrimaryOwners {
-				owners[owner] = struct{}{}
-			}
-		}
-		require.Len(t, owners, 3)
+		waitForRoutingTableOwners(t, e, int(db2.config.PartitionCount), 3)
 	})
 }
 
