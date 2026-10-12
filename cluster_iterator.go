@@ -19,8 +19,12 @@ package olric
 
 import (
 	"context"
+	"errors"
+	"net"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/tochemey/olric/internal/dmap"
 	"github.com/tochemey/olric/internal/protocol"
@@ -50,9 +54,14 @@ type ClusterIterator struct {
 	partitionCount uint64
 	config         *dmap.ScanConfig
 	scanner        func() error
-	wg             sync.WaitGroup
-	ctx            context.Context
-	cancel         context.CancelFunc
+	// unreachable holds the owners a scan command could not reach during this
+	// scan. They are skipped for the rest of the scan instead of being dialed
+	// again for every partition they own; their keys are read from the other
+	// copies of each partition.
+	unreachable map[string]struct{}
+	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 // loadRoute loads the current partition's route from the routing table. It
@@ -152,42 +161,84 @@ func (i *ClusterIterator) removeScannedOwner(idx int) {
 	}
 }
 
-func (i *ClusterIterator) scanOnOwners() error {
-	owners := i.getOwners()
+// scanOnOwners runs one scan step of the current partition on every owner the
+// routing table lists for it. An owner that cannot be reached is dropped from
+// the route and skipped for the rest of the scan, so one dead member does not
+// end the whole scan; any other error is returned.
+func (x *ClusterIterator) scanOnOwners() error {
+	owners := x.getOwners()
 
 	for idx, owner := range owners {
-		cursor := i.loadCursor(owner)
+		if x.isUnreachable(owner) {
+			x.removeScannedOwner(idx)
+			continue
+		}
+
+		cursor := x.loadCursor(owner)
 
 		// Build a scan command here
-		s := protocol.NewScan(i.partID, i.dm.Name(), cursor)
-		if i.config.HasCount {
-			s.SetCount(i.config.Count)
+		s := protocol.NewScan(x.partID, x.dm.Name(), cursor)
+		if x.config.HasCount {
+			s.SetCount(x.config.Count)
 		}
-		if i.config.HasMatch {
-			s.SetMatch(i.config.Match)
+		if x.config.HasMatch {
+			s.SetMatch(x.config.Match)
 		}
-		if i.config.Replica {
+		if x.config.Replica {
 			s.SetReplica()
 		}
 
-		scanCmd := s.Command(i.ctx)
+		scanCmd := s.Command(x.ctx)
 		// Fetch a Redis client for the given owner.
-		rc := i.clusterClient.client.Get(owner)
-		err := rc.Process(i.ctx, scanCmd)
+		rc := x.clusterClient.client.Get(owner)
+		err := rc.Process(x.ctx, scanCmd)
 		if err != nil {
-			return err
+			if !x.markUnreachable(owner, err) {
+				return err
+			}
+			x.removeScannedOwner(idx)
+			continue
 		}
 
 		keys, newCursor, err := scanCmd.Result()
 		if err != nil {
 			return err
 		}
-		i.updateIterator(keys, newCursor, owner)
+		x.updateIterator(keys, newCursor, owner)
 		if newCursor == 0 {
-			i.removeScannedOwner(idx)
+			x.removeScannedOwner(idx)
 		}
 	}
 	return nil
+}
+
+// isUnreachable reports whether a scan command could not reach owner earlier
+// in this scan.
+func (x *ClusterIterator) isUnreachable(owner string) bool {
+	_, ok := x.unreachable[owner]
+	return ok
+}
+
+// markUnreachable records owner as unreachable for the rest of this scan when
+// err shows that the scan command never reached it: the dial failed, or the
+// owner's connection pool was closed because it left the cluster. Such an
+// owner may have died before memberlist confirmed its departure; its keys are
+// still read from the other copies of each partition. It reports false, and
+// records nothing, for any other error or once the scan's context is done.
+func (x *ClusterIterator) markUnreachable(owner string, err error) bool {
+	if x.ctx.Err() != nil {
+		return false
+	}
+
+	var opErr *net.OpError
+	dialFailed := errors.As(err, &opErr) && opErr.Op == "dial"
+	if !dialFailed && !errors.Is(err, redis.ErrClosed) {
+		return false
+	}
+
+	x.logger.V(3).Printf("[WARN] Skipping unreachable owner %s for the rest of the scan: %v", owner, err)
+	x.unreachable[owner] = struct{}{}
+	return true
 }
 
 func (i *ClusterIterator) resetPage() {

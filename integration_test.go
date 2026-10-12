@@ -677,7 +677,7 @@ func scanIntegrationTestCommon(t *testing.T, embedded bool, keyFunc func(i int) 
 
 	db := cluster.addMemberWithConfig(t, newConfig())
 	db2 := cluster.addMemberWithConfig(t, newConfig())
-	_ = cluster.addMemberWithConfig(t, newConfig())
+	survivor := cluster.addMemberWithConfig(t, newConfig())
 
 	t.Log("Wait for 1 second before inserting keys")
 	<-time.After(time.Second)
@@ -714,7 +714,7 @@ func scanIntegrationTestCommon(t *testing.T, embedded bool, keyFunc func(i int) 
 	require.NoError(t, db2.Shutdown(ctx))
 
 	t.Log("Wait for \"NodeLeave\" event propagation")
-	<-time.After(time.Second)
+	waitForClusterSize(t, []*Olric{db, survivor}, 2)
 
 	t.Log("First pass")
 

@@ -137,6 +137,27 @@ func TestEmbeddedClient_Scan_SkipsDeadOwner(t *testing.T) {
 	require.Equal(t, 100, count)
 }
 
+// Regression test: the embedded scan path must skip an owner which died before
+// memberlist confirmed it, once a scan command cannot reach it, and read its
+// keys from the backup copies. It used to end the whole scan silently after the
+// dial retries, returning almost no keys.
+func TestEmbeddedClient_Scan_SkipsUndetectedDeadOwner(t *testing.T) {
+	db, keys := newClusterWithUndetectedCrash(t, 1000)
+
+	dm, err := db.NewEmbeddedClient().NewDMap("mydmap")
+	require.NoError(t, err)
+
+	it, err := dm.Scan(context.Background())
+	require.NoError(t, err)
+	defer it.Close()
+
+	scanned := make(map[string]struct{}, len(keys))
+	for it.Next() {
+		scanned[it.Key()] = struct{}{}
+	}
+	require.Equal(t, keys, scanned)
+}
+
 // Regression test: Close must never panic, even when the scan context has
 // already been canceled by the caller before the iterator is closed. Failing
 // to tear down the internal cluster client's connection pools is not a fatal

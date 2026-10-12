@@ -487,6 +487,7 @@ func (dm *ClusterDMap) Scan(ctx context.Context, options ...ScanOption) (Iterato
 		logger:        dm.clusterClient.logger,
 		partitionKeys: make(map[string]struct{}),
 		cursors:       make(map[uint64]map[string]*currentCursor),
+		unreachable:   make(map[string]struct{}),
 		ctx:           ictx,
 		cancel:        cancel,
 	}

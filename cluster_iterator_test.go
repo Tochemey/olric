@@ -19,14 +19,22 @@ package olric
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/config"
 	"github.com/tochemey/olric/internal/testutil"
+	"github.com/tochemey/olric/pkg/flog"
 )
 
 func TestClusterClient_ScanMatch(t *testing.T) {
@@ -100,6 +108,125 @@ func TestClusterClient_Scan(t *testing.T) {
 		require.Contains(t, allKeys, i.Key())
 	}
 	require.Equal(t, 100, count)
+}
+
+// newClusterWithUndetectedCrash starts a three-member cluster that keeps two
+// copies of every partition, writes keyCount keys, and crashes a member that
+// owns primary partitions without a leave broadcast. It returns a survivor and
+// the written keys. Right after it returns, the survivor's memberlist still
+// lists the crashed member as alive, so a scan still routes to it.
+func newClusterWithUndetectedCrash(t *testing.T, keyCount int) (*Olric, map[string]struct{}) {
+	t.Helper()
+
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.ReplicaCount = 2
+		return c
+	}
+
+	cl := newTestCluster(t)
+	db := cl.addMemberWithConfig(t, newConfig())
+	crashed := cl.addMemberWithConfig(t, newConfig())
+	members := []*Olric{db, crashed, cl.addMemberWithConfig(t, newConfig())}
+	waitForClusterSize(t, members, 3)
+	waitForPartitionOwners(t, members, 1)
+
+	require.Eventually(t, func() bool {
+		for partID := uint64(0); partID < db.config.PartitionCount; partID++ {
+			if db.primary.PartitionByID(partID).Owner().CompareByID(crashed.rt.This()) {
+				return true
+			}
+		}
+		return false
+	}, 30*time.Second, 50*time.Millisecond, "the crashed member must own primary partitions for the scan to reach it")
+
+	dm, err := db.NewEmbeddedClient().NewDMap("mydmap")
+	require.NoError(t, err)
+
+	keys := make(map[string]struct{}, keyCount)
+	for i := range keyCount {
+		require.NoError(t, dm.Put(context.Background(), testutil.ToKey(i), i))
+		keys[testutil.ToKey(i)] = struct{}{}
+	}
+
+	cl.crashMember(t, crashed)
+	require.EqualValues(t, 3, db.rt.NumMembers(), "the crash must not be detected yet")
+	return db, keys
+}
+
+// Regression test: a scan that reaches an owner which died before memberlist
+// confirmed it must skip that owner and read its keys from the backup copies.
+// It used to end the whole scan silently after the dial retries, returning
+// almost no keys.
+func TestClusterClient_Scan_SkipsUndetectedDeadOwner(t *testing.T) {
+	db, keys := newClusterWithUndetectedCrash(t, 1000)
+
+	ctx := context.Background()
+	c, err := NewClusterClient([]string{db.name})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	dm, err := c.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	it, err := dm.Scan(ctx)
+	require.NoError(t, err)
+	defer it.Close()
+
+	scanned := make(map[string]struct{}, len(keys))
+	for it.Next() {
+		scanned[it.Key()] = struct{}{}
+	}
+	require.Equal(t, keys, scanned)
+}
+
+// TestClusterIterator_MarkUnreachable verifies which scan errors drop an owner
+// for the rest of the scan: only errors showing the command never reached it,
+// and none once the scan's context is done.
+func TestClusterIterator_MarkUnreachable(t *testing.T) {
+	const owner = "127.0.0.1:1"
+
+	newIterator := func(ctx context.Context) *ClusterIterator {
+		return &ClusterIterator{
+			ctx:         ctx,
+			logger:      flog.New(log.New(io.Discard, "", 0)),
+			unreachable: make(map[string]struct{}),
+		}
+	}
+
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	readErr := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+
+	testCases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "dial refused", err: dialErr, want: true},
+		{name: "wrapped dial failure", err: fmt.Errorf("scan: %w", dialErr), want: true},
+		{name: "connection pool closed", err: redis.ErrClosed, want: true},
+		{name: "read failure", err: readErr, want: false},
+		{name: "protocol error", err: errors.New("ERR invalid argument"), want: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			it := newIterator(context.Background())
+			require.Equal(t, tc.want, it.markUnreachable(owner, tc.err))
+			require.Equal(t, tc.want, it.isUnreachable(owner))
+		})
+	}
+
+	t.Run("context done", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		it := newIterator(ctx)
+		require.False(t, it.markUnreachable(owner, dialErr))
+		require.False(t, it.isUnreachable(owner))
+	})
 }
 
 // TestClusterIterator_ConcurrentRoutingTableAccess tests that concurrent access

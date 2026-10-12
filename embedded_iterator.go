@@ -33,8 +33,14 @@ type EmbeddedIterator struct {
 	clusterIterator *ClusterIterator
 }
 
-func (e *EmbeddedIterator) scanOnOwners() error {
-	owners := e.clusterIterator.getOwners()
+// scanOnOwners runs one scan step of the current partition on every owner the
+// routing table lists for it, scanning this member's own data in place. Owners
+// memberlist has confirmed dead are skipped without a dial, and an owner whose
+// death memberlist has not confirmed yet is dropped once a scan command cannot
+// reach it, so one dead member does not end the whole scan; any other error is
+// returned.
+func (x *EmbeddedIterator) scanOnOwners() error {
+	owners := x.clusterIterator.getOwners()
 
 	// The embedded member has authoritative, seconds-fresh membership through
 	// memberlist. Build the live set once per pass so a hard-dead owner is
@@ -43,58 +49,63 @@ func (e *EmbeddedIterator) scanOnOwners() error {
 	// data is served by the promoted replica anyway. GetMembers reports members
 	// that are confirmed removed from memberlist (not merely suspected), so a
 	// flapping-but-alive member is never skipped mid-scan.
-	live := e.liveMembers()
+	live := x.liveMembers()
 
 	for idx, owner := range owners {
-		cursor := e.clusterIterator.loadCursor(owner)
+		cursor := x.clusterIterator.loadCursor(owner)
 
-		if e.client.db.rt.This().String() == owner {
-			keys, newCursor, err := e.dm.Scan(e.clusterIterator.partID, cursor, e.clusterIterator.config)
+		if x.client.db.rt.This().String() == owner {
+			keys, newCursor, err := x.dm.Scan(x.clusterIterator.partID, cursor, x.clusterIterator.config)
 			if err != nil {
 				return err
 			}
-			e.clusterIterator.updateIterator(keys, newCursor, owner)
+			x.clusterIterator.updateIterator(keys, newCursor, owner)
 			if newCursor == 0 {
-				e.clusterIterator.removeScannedOwner(idx)
+				x.clusterIterator.removeScannedOwner(idx)
 			}
 			continue
 		}
 
-		// Skip owners memberlist has confirmed dead. Dropping the owner from the
-		// route lets the scan converge without ever dialing the corpse; without
+		// Skip owners memberlist has confirmed dead, and owners an earlier scan
+		// command in this scan could not reach. Dropping the owner from the
+		// route lets the scan converge without dialing the corpse again; without
 		// this removal the route would never empty and the iterator would spin.
-		if _, alive := live[owner]; !alive {
-			e.clusterIterator.removeScannedOwner(idx)
+		if _, alive := live[owner]; !alive || x.clusterIterator.isUnreachable(owner) {
+			x.clusterIterator.removeScannedOwner(idx)
 			continue
 		}
 
 		// Build a scan command here
-		s := protocol.NewScan(e.clusterIterator.partID, e.clusterIterator.dm.Name(), cursor)
-		if e.clusterIterator.config.HasCount {
-			s.SetCount(e.clusterIterator.config.Count)
+		s := protocol.NewScan(x.clusterIterator.partID, x.clusterIterator.dm.Name(), cursor)
+		if x.clusterIterator.config.HasCount {
+			s.SetCount(x.clusterIterator.config.Count)
 		}
-		if e.clusterIterator.config.HasMatch {
-			s.SetMatch(e.clusterIterator.config.Match)
+		if x.clusterIterator.config.HasMatch {
+			s.SetMatch(x.clusterIterator.config.Match)
 		}
-		if e.clusterIterator.config.Replica {
+		if x.clusterIterator.config.Replica {
 			s.SetReplica()
 		}
 
-		scanCmd := s.Command(e.clusterIterator.ctx)
+		scanCmd := s.Command(x.clusterIterator.ctx)
 		// Fetch a Redis client for the given owner.
-		rc := e.clusterIterator.clusterClient.client.Get(owner)
-		err := rc.Process(e.clusterIterator.ctx, scanCmd)
+		rc := x.clusterIterator.clusterClient.client.Get(owner)
+		err := rc.Process(x.clusterIterator.ctx, scanCmd)
 		if err != nil {
-			return err
+			if !x.clusterIterator.markUnreachable(owner, err) {
+				return err
+			}
+			x.clusterIterator.removeScannedOwner(idx)
+			continue
 		}
 
 		keys, newCursor, err := scanCmd.Result()
 		if err != nil {
 			return err
 		}
-		e.clusterIterator.updateIterator(keys, newCursor, owner)
+		x.clusterIterator.updateIterator(keys, newCursor, owner)
 		if newCursor == 0 {
-			e.clusterIterator.removeScannedOwner(idx)
+			x.clusterIterator.removeScannedOwner(idx)
 		}
 	}
 	return nil

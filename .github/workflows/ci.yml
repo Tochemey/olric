@@ -23,14 +23,25 @@ concurrency:
 
 jobs:
   build:
-    name: Tests on ${{ matrix.os }}
-    runs-on: ${{ matrix.runner }}
+    name: Tests (${{ matrix.shard }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: linux
-            runner: ubuntu-latest
+          # The root package dominates the suite's wall-clock time: one test
+          # binary, strictly serial. It is split across three runners by a
+          # deterministic round-robin over the sorted top-level test list, so
+          # new tests distribute automatically.
+          - shard: root-0
+          - shard: root-1
+          - shard: root-2
+          # Packages that bind ports or spin up cluster members.
+          - shard: infra
+            packages: "./internal/cluster/... ./internal/dmap/... ./internal/discovery/... ./internal/pubsub/... ./internal/testcluster/..."
+          # Everything else. The package list is computed in the run step as
+          # the complement of the shards above.
+          - shard: core
     env:
       TZ: UTC
       CGO_ENABLED: "1"
@@ -62,15 +73,31 @@ jobs:
       - name: Install dependencies
         run: |
           go mod download
-      - name: Run tests
+      - name: Run tests (${{ matrix.shard }})
         shell: bash
         run: |
-          go test -mod=vendor -p 1 -timeout 0 -v -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./... `go list -mod=vendor ./... | grep -v -E "(hasher|internal/bufpool|pkg/flog|pkg/neterrors|pkg/service_discovery)"`
+          SHARD="${{ matrix.shard }}"
+          FLAGS="-mod=vendor -p 1 -timeout 0 -v -race -coverprofile=coverage-${SHARD}.out -covermode=atomic -coverpkg=./..."
+
+          if [[ "$SHARD" == root-* ]]; then
+            INDEX="${SHARD#root-}"
+            TESTS=$(go test -mod=vendor . -list '^Test' | grep '^Test' | sort | awk -v i="$INDEX" 'NR % 3 == i' | paste -sd'|' -)
+            if [ -z "$TESTS" ]; then
+              echo "root test slice $INDEX is empty" >&2
+              exit 1
+            fi
+            go test $FLAGS -run "^(${TESTS})$" .
+          elif [ "$SHARD" = "core" ]; then
+            PACKAGES=$(go list -mod=vendor ./... | grep -v -E "(hasher|internal/bufpool|pkg/flog|pkg/neterrors|pkg/service_discovery)" | grep -v -x "github.com/tochemey/olric" | grep -v -E "/internal/(cluster|dmap|discovery|pubsub|testcluster)(/|$)")
+            go test $FLAGS $PACKAGES
+          else
+            go test $FLAGS ${{ matrix.packages }}
+          fi
       - uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.out
-          flags: ${{ matrix.os }}
-          name: coverage-${{ matrix.os }}
+          files: ./coverage-${{ matrix.shard }}.out
+          flags: linux
+          name: coverage-${{ matrix.shard }}
           fail_ci_if_error: false
           verbose: true
