@@ -33,7 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/environment"
 	"github.com/tochemey/olric/internal/protocol"
@@ -144,7 +143,7 @@ func TestDMap_Put_WriteQuorum(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		key := testutil.ToKey(i)
 
-		hkey := partitions.HKey(dm.name, key)
+		hkey := dm.s.hkey(dm.name, key)
 		host := dm.s.primary.PartitionByHKey(hkey).Owner()
 		if s1.rt.This().CompareByID(host) {
 			err = dm.Put(ctx, key, testutil.ToVal(i), nil)
@@ -501,7 +500,7 @@ func benchmarkKeys(b *testing.B, s *Service, name string, count int, samePartiti
 		}
 
 		key := testutil.ToKey(i)
-		part := s.primary.PartitionByHKey(partitions.HKey(name, key))
+		part := s.primary.PartitionByHKey(s.hkey(name, key))
 		if !part.Owner().CompareByID(s.rt.This()) {
 			continue
 		}
@@ -531,8 +530,8 @@ func BenchmarkDMap_Put_ReplicaCount1(b *testing.B) {
 	ctx := context.Background()
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for i := 0; b.Loop(); i++ {
 		if err := dm.Put(ctx, keys[i%len(keys)], value, nil); err != nil {
 			b.Fatal(err)
 		}
@@ -550,8 +549,8 @@ func BenchmarkDMap_Put_SyncReplication_Serial(b *testing.B) {
 	ctx := context.Background()
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for i := 0; b.Loop(); i++ {
 		if err := dm.Put(ctx, keys[i%len(keys)], value, nil); err != nil {
 			b.Fatal(err)
 		}
@@ -625,7 +624,7 @@ func ownedKey(t *testing.T, s *Service, name string) string {
 
 	for i := range 100000 {
 		key := testutil.ToKey(i)
-		part := s.primary.PartitionByHKey(partitions.HKey(name, key))
+		part := s.primary.PartitionByHKey(s.hkey(name, key))
 		if part.OwnerCount() > 0 && part.Owner().CompareByID(s.rt.This()) {
 			return key
 		}
@@ -704,7 +703,7 @@ func TestDMap_Put_BoundedByRequestDeadline(t *testing.T) {
 	s.rt.Members().Lock()
 	s.rt.Members().Add(silent)
 	s.rt.Members().Unlock()
-	s.backup.PartitionByHKey(partitions.HKey("mydmap", key)).SetOwners([]discovery.Member{silent})
+	s.backup.PartitionByHKey(s.hkey("mydmap", key)).SetOwners([]discovery.Member{silent})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
@@ -721,10 +720,10 @@ func sameFragmentKeys(t *testing.T, s *Service, name string) (string, string) {
 	t.Helper()
 
 	first := ownedKey(t, s, name)
-	partID := s.primary.PartitionByHKey(partitions.HKey(name, first)).ID()
+	partID := s.primary.PartitionByHKey(s.hkey(name, first)).ID()
 	for i := range 100000 {
 		key := testutil.ToKey(i)
-		if key != first && s.primary.PartitionByHKey(partitions.HKey(name, key)).ID() == partID {
+		if key != first && s.primary.PartitionByHKey(s.hkey(name, key)).ID() == partID {
 			return first, key
 		}
 	}
@@ -751,7 +750,7 @@ func TestDMap_Put_StuckReplicaDoesNotBlockFragment(t *testing.T) {
 	stuck, other := sameFragmentKeys(t, s, "mydmap")
 	require.NoError(t, dm.Put(context.Background(), other, []byte("other"), nil))
 
-	part := s.primary.PartitionByHKey(partitions.HKey("mydmap", stuck))
+	part := s.primary.PartitionByHKey(s.hkey("mydmap", stuck))
 	silent := discovery.Member{Name: silentListener(t), ID: 424242}
 	s.rt.Members().Lock()
 	s.rt.Members().Add(silent)
@@ -815,7 +814,7 @@ func TestDMap_Put_ConcurrentWritesToOneKeyStayOrdered(t *testing.T) {
 
 	dm2, err := s2.NewDMap("mydmap")
 	require.NoError(t, err)
-	hkey := partitions.HKey("mydmap", key)
+	hkey := s2.hkey("mydmap", key)
 	replica, err := dm2.loadFragment(s2.backup.PartitionByHKey(hkey))
 	require.NoError(t, err)
 

@@ -40,7 +40,7 @@ var (
 )
 
 func (dm *DMap) deleteFromFragment(key string, kind partitions.Kind) error {
-	hkey := partitions.HKey(dm.name, key)
+	hkey := dm.s.hkey(dm.name, key)
 	part := dm.getPartitionByHKey(hkey, kind)
 	f, err := dm.loadFragment(part)
 	if errors.Is(err, errFragmentNotFound) {
@@ -173,7 +173,7 @@ func (x *DMap) deleteOnCluster(ctx context.Context, hkey uint64, key string, f *
 // lock only around the storage accesses, so the remote deletes run without
 // blocking the rest of the fragment.
 func (x *DMap) deleteKey(ctx context.Context, key string) error {
-	hkey := partitions.HKey(x.name, key)
+	hkey := x.s.hkey(x.name, key)
 	part := x.getPartitionByHKey(hkey, partitions.PRIMARY)
 	f, err := x.loadOrCreateFragment(part)
 	if err != nil {
@@ -221,7 +221,7 @@ func (x *DMap) deleteKey(ctx context.Context, key string) error {
 func (x *DMap) deleteKeys(ctx context.Context, keys ...string) (int, error) {
 	members := make(map[discovery.Member][]string)
 	for _, key := range keys {
-		hkey := partitions.HKey(x.name, key)
+		hkey := x.s.hkey(x.name, key)
 		member := x.s.primary.PartitionByHKey(hkey).Owner()
 		members[member] = append(members[member], key)
 	}

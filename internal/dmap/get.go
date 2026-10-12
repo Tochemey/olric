@@ -333,7 +333,7 @@ func (x *DMap) readRepair(ctx context.Context, winner *version, versions []*vers
 			// Sync
 			tmp := *version.host
 			if tmp.CompareByID(x.s.rt.This()) {
-				hkey := partitions.HKey(x.name, winner.entry.Key())
+				hkey := x.s.hkey(x.name, winner.entry.Key())
 				part := x.getPartitionByHKey(hkey, partitions.PRIMARY)
 				f, err := x.loadOrCreateFragment(part)
 				if err != nil {
@@ -422,7 +422,7 @@ func (x *DMap) getOnCluster(ctx context.Context, hkey uint64, key string) (stora
 // does not contain the key. It's thread-safe. It is safe to modify the contents
 // of the returned value.
 func (x *DMap) Get(ctx context.Context, key string) (storage.Entry, *uint64, error) {
-	hkey := partitions.HKey(x.name, key)
+	hkey := x.s.hkey(x.name, key)
 	partition := x.s.primary.PartitionByHKey(hkey)
 	member := partition.Owner()
 	// We are on the partition owner

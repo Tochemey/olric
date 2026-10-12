@@ -221,7 +221,7 @@ func TestDMap_Fragment_Replicate(t *testing.T) {
 
 	replica.Lock()
 	for i := range 3000 {
-		hkey := partitions.HKey("mydmap", testutil.ToKey(i))
+		hkey := s2.hkey("mydmap", testutil.ToKey(i))
 		if s2.backup.PartitionByHKey(hkey).ID() != partID {
 			continue
 		}
@@ -254,7 +254,7 @@ func TestDMap_Fragment_MoveToDepartedOwnerFailsWithoutDialing(t *testing.T) {
 	key := ownedKey(t, s, "mydmap")
 	require.NoError(t, dm.Put(context.Background(), key, []byte("value"), nil))
 
-	part := s.primary.PartitionByHKey(partitions.HKey("mydmap", key))
+	part := s.primary.PartitionByHKey(s.hkey("mydmap", key))
 	f, err := dm.loadFragment(part)
 	require.NoError(t, err)
 	length := f.Stats().Length

@@ -247,9 +247,6 @@ func New(config *config.Config) (*Olric, error) {
 	e := environment.New()
 	e.Set("config", config)
 
-	// Set the hash function. Olric distributes keys over partitions by hashing.
-	partitions.SetHashFunc(config.Hasher)
-
 	flogger := flog.New(config.Logger)
 	flogger.SetLevel(config.LogVerbosity)
 	if config.LogLevel == "DEBUG" {

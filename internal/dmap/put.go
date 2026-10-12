@@ -505,7 +505,7 @@ func (dm *DMap) writePutCommand(e *env) (*redis.StatusCmd, error) {
 // put controls every write operation in Olric. It redirects the requests to its owner,
 // if the key belongs to another host.
 func (dm *DMap) put(e *env) error {
-	e.hkey = partitions.HKey(e.dmap, e.key)
+	e.hkey = dm.s.hkey(e.dmap, e.key)
 	member := dm.s.primary.PartitionByHKey(e.hkey).Owner()
 	if member.CompareByName(dm.s.rt.This()) {
 		// We are on the partition owner.

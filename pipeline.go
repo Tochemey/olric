@@ -81,7 +81,7 @@ func (dp *DMapPipeline) addCommand(key string, cmd redis.Cmder) (uint64, int) {
 	dp.mtx.Lock()
 	defer dp.mtx.Unlock()
 
-	hkey := partitions.HKey(dp.dm.name, key)
+	hkey := partitions.HKey(dp.dm.clusterClient.config.hasher, dp.dm.name, key)
 	partID := hkey % dp.dm.clusterClient.partitionCount
 
 	cmds, ok := dp.commands[partID]

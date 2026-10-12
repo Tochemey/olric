@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/protocol"
 )
 
@@ -75,7 +74,7 @@ func (dm *DMap) unlockKey(ctx context.Context, key string, token []byte) error {
 // Unlock takes key and token and tries to unlock the key.
 // It redirects the request to the partition owner, if required.
 func (dm *DMap) Unlock(ctx context.Context, key string, token []byte) error {
-	hkey := partitions.HKey(dm.name, key)
+	hkey := dm.s.hkey(dm.name, key)
 	member := dm.s.primary.PartitionByHKey(hkey).Owner()
 	if member.CompareByName(dm.s.rt.This()) {
 		return dm.unlockKey(ctx, key, token)
@@ -208,7 +207,7 @@ func (dm *DMap) leaseKey(ctx context.Context, key string, token []byte, timeout 
 // Lease takes key and token and tries to update the expiry with duration.
 // It redirects the request to the partition owner, if required.
 func (dm *DMap) Lease(ctx context.Context, key string, token []byte, timeout time.Duration) error {
-	hkey := partitions.HKey(dm.name, key)
+	hkey := dm.s.hkey(dm.name, key)
 	member := dm.s.primary.PartitionByHKey(hkey).Owner()
 	if member.CompareByName(dm.s.rt.This()) {
 		return dm.leaseKey(ctx, key, token, timeout)

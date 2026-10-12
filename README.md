@@ -21,6 +21,7 @@ See [MODIFICATIONS.md](MODIFICATIONS.md) for the full list of changes this fork 
     * [Failure Detection and Recovery](#failure-detection-and-recovery)
     * [Network Configuration](#network-configuration)
     * [Service Discovery](#service-discovery)
+    * [Hashing Keys to Partitions](#hashing-keys-to-partitions)
     * [Timeouts](#timeouts)
 * [Architecture](#architecture)
     * [Architectural Overview](#architectural-overview)
@@ -270,6 +271,15 @@ You should know that Olric needs a single and stable IP address to function prop
 ### Service Discovery
 
 Olric provides a service discovery interface which can be used to implement plugins.
+
+### Hashing Keys to Partitions
+
+Olric selects the partition that owns a DMap key by hashing the key with `config.Hasher`, which defaults to [xxhash](https://github.com/cespare/xxhash).
+
+* **Every member of a cluster must use the same hasher.** Members with different hashers place and look up keys in different partitions.
+* **Clients should use the cluster's hasher.** A `ClusterClient` hashes keys itself to send each request straight to the partition owner; set its hasher with `olric.WithHasher`. A client with a different hasher still gets correct results, because the receiving member hashes the key again and forwards the request to the owner, but most requests then take an extra hop.
+
+Each Olric instance and each client uses its own hasher, so instances with different hashers can run in the same process.
 
 ### Timeouts
 

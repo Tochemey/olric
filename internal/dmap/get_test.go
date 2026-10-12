@@ -24,7 +24,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/cluster/routingtable"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/ptr"
@@ -76,7 +75,7 @@ func TestDMap_Get_Cluster(t *testing.T) {
 	require.NoError(t, err)
 	for i := 0; i < 10; i++ {
 		key := testutil.ToKey(i)
-		expected := dm2.s.primary.PartitionByHKey(partitions.HKey(dm2.name, key)).ID()
+		expected := dm2.s.primary.PartitionByHKey(dm2.s.hkey(dm2.name, key)).ID()
 		res, part, err := dm2.Get(ctx, key)
 		require.NoError(t, err)
 		require.NotNil(t, part)
@@ -110,7 +109,7 @@ func TestDMap_Get_Lookup(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		key := testutil.ToKey(i)
-		expected := dm3.s.primary.PartitionByHKey(partitions.HKey(dm3.name, key)).ID()
+		expected := dm3.s.primary.PartitionByHKey(dm3.s.hkey(dm3.name, key)).ID()
 		gr, part, err := dm3.Get(ctx, key)
 		require.NoError(t, err)
 		require.Equal(t, testutil.ToVal(i), gr.Value())
@@ -250,7 +249,7 @@ func TestDMap_Get_ReadRepair(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		key := testutil.ToKey(i)
-		expected := dm2.s.primary.PartitionByHKey(partitions.HKey(dm2.name, key)).ID()
+		expected := dm2.s.primary.PartitionByHKey(dm2.s.hkey(dm2.name, key)).ID()
 		gr, part, err := dm2.Get(ctx, key)
 		require.NoError(t, err)
 		require.NotNil(t, part)
@@ -273,8 +272,8 @@ func BenchmarkDMap_Get_LocalHit(b *testing.B) {
 	}
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for i := 0; b.Loop(); i++ {
 		if _, _, err := dm.Get(ctx, keys[i%len(keys)]); err != nil {
 			b.Fatal(err)
 		}
@@ -315,8 +314,8 @@ func BenchmarkDMap_Get_UnderWriteLoad(b *testing.B) {
 	}()
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for i := 0; b.Loop(); i++ {
 		if _, _, err := dm.Get(ctx, readKeys[i%len(readKeys)]); err != nil {
 			b.Fatal(err)
 		}
@@ -346,7 +345,7 @@ func TestDMap_Get_SkipsDepartedReplica(t *testing.T) {
 
 	// A replica owner that never answers and that memberlist has removed.
 	gone := discovery.Member{Name: silentListener(t), ID: 424242}
-	s.backup.PartitionByHKey(partitions.HKey("mydmap", key)).SetOwners([]discovery.Member{gone})
+	s.backup.PartitionByHKey(s.hkey("mydmap", key)).SetOwners([]discovery.Member{gone})
 
 	started := time.Now()
 	gr, _, err := dm.Get(context.Background(), key)

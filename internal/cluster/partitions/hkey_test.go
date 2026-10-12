@@ -18,6 +18,7 @@
 package partitions
 
 import (
+	"hash/fnv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -25,8 +26,29 @@ import (
 	"github.com/tochemey/olric/hasher"
 )
 
+// fnvHasher hashes with FNV-1a so tests can compare it with the default hasher.
+type fnvHasher struct{}
+
+// Sum64 returns the 64-bit FNV-1a hash of key.
+func (fnvHasher) Sum64(key []byte) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write(key)
+	return h.Sum64()
+}
+
 func TestPartitions_HKey(t *testing.T) {
-	SetHashFunc(hasher.NewDefaultHasher())
-	hkey := HKey("storage-unit-name", "some-key")
+	hkey := HKey(hasher.NewDefaultHasher(), "storage-unit-name", "some-key")
 	require.NotEqualf(t, 0, hkey, "HKey is zero. This shouldn't be normal")
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/53. HKey must
+// hash with the hasher it is given, so instances with different hashers in one
+// process stay independent.
+func TestPartitions_HKey_UsesGivenHasher(t *testing.T) {
+	defaultHasher := hasher.NewDefaultHasher()
+	custom := fnvHasher{}
+
+	require.Equal(t, defaultHasher.Sum64([]byte("storage-unit-namesome-key")), HKey(defaultHasher, "storage-unit-name", "some-key"))
+	require.Equal(t, custom.Sum64([]byte("storage-unit-namesome-key")), HKey(custom, "storage-unit-name", "some-key"))
+	require.NotEqual(t, HKey(defaultHasher, "storage-unit-name", "some-key"), HKey(custom, "storage-unit-name", "some-key"))
 }

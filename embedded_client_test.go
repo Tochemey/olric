@@ -20,6 +20,7 @@ package olric
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/tochemey/olric/hasher"
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/testutil"
@@ -1283,7 +1285,7 @@ func TestEmbeddedClient_DMap_Get_ContextDeadline(t *testing.T) {
 	require.Eventually(t, func() bool {
 		for i := 0; i < 1000; i++ {
 			candidate := fmt.Sprintf("mykey-%d", i)
-			hkey := partitions.HKey("mydmap", candidate)
+			hkey := partitions.HKey(db1.hashFunc, "mydmap", candidate)
 			if !db1.primary.PartitionByHKey(hkey).Owner().CompareByName(db1.rt.This()) {
 				key = candidate
 				return true
@@ -1302,4 +1304,53 @@ func TestEmbeddedClient_DMap_Get_ContextDeadline(t *testing.T) {
 
 	_, err = dm.Get(ctx, key)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// fnvHasher hashes with FNV-1a so tests can compare it with the default hasher.
+type fnvHasher struct{}
+
+// Sum64 returns the 64-bit FNV-1a hash of key.
+func (fnvHasher) Sum64(key []byte) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write(key)
+	return h.Sum64()
+}
+
+// keyWithDistinctPartitions returns a key of dmap that the default hasher and
+// fnvHasher map to different partitions, so a test can tell which hasher
+// placed it.
+func keyWithDistinctPartitions(t *testing.T, dmap string, partitionCount uint64) string {
+	t.Helper()
+
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("mykey-%d", i)
+		if partitions.HKey(hasher.NewDefaultHasher(), dmap, key)%partitionCount != partitions.HKey(fnvHasher{}, dmap, key)%partitionCount {
+			return key
+		}
+	}
+
+	t.Fatal("no key maps to different partitions under the two hashers")
+	return ""
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/53. Two
+// instances with different hashers in one process must each place keys in the
+// partition their own hasher selects, whichever instance started first.
+func TestEmbeddedClient_DMap_UsesConfiguredHasher(t *testing.T) {
+	ctx := context.Background()
+
+	for _, h := range []hasher.Hasher{hasher.NewDefaultHasher(), fnvHasher{}} {
+		c := testutil.NewConfig()
+		c.Hasher = h
+		db := newTestCluster(t).addMemberWithConfig(t, c)
+
+		key := keyWithDistinctPartitions(t, "mydmap", c.PartitionCount)
+		dm, err := db.NewEmbeddedClient().NewDMap("mydmap")
+		require.NoError(t, err)
+		require.NoError(t, dm.Put(ctx, key, "value"))
+
+		resp, err := dm.Get(ctx, key)
+		require.NoError(t, err)
+		require.Equal(t, partitions.HKey(h, "mydmap", key)%c.PartitionCount, resp.Partition())
+	}
 }

@@ -19,7 +19,6 @@ package dmap
 
 import (
 	"context"
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"testing"
 	"time"
 
@@ -231,7 +230,7 @@ func TestDMap_Eviction_ExpiredKeyDeletedOnReplica(t *testing.T) {
 	key := ownedKey(t, s1, "mydmap")
 	require.NoError(t, dm.Put(ctx, key, []byte("value"), &PutConfig{HasPX: true, PX: time.Millisecond}))
 
-	hkey := partitions.HKey("mydmap", key)
+	hkey := s2.hkey("mydmap", key)
 	dm2, err := s2.NewDMap("mydmap")
 	require.NoError(t, err)
 	replica, err := dm2.loadFragment(s2.backup.PartitionByHKey(hkey))

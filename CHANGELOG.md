@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.23 - 2026-10-12
+
+### Fixed
+
+- The hash that maps a DMap key to its partition was process-global: `olric.New` and `NewClusterClient` stored their hasher in a package variable set once per process, so every later instance or cluster client in the same process placed and looked up keys with the first one's hasher, whatever its own `Config.Hasher` or `WithHasher` said. The rest of each instance, the consistent-hash ring included, already used its own hasher. A process that ran instances with different hashers, as GoAkt does with clustered actor systems that set different partition hashers and in its test binaries, stored keys in partitions their hasher did not select, and a member whose process had first started an instance with another hasher placed keys in other partitions than its peers. Each instance and cluster client now hashes keys with its own configured hasher. Members of one cluster must still share the same hasher, and clients should be given it through `WithHasher` to reach partition owners directly; a client with another hasher still gets correct results, with an extra hop through the receiving member. The requirement is now documented on `Config.Hasher`, `WithHasher` and in the README. Fixes [#53](https://github.com/Tochemey/olric/issues/53).
+- A `ClusterClient` failed a command that any member can answer when its round-robin turn fell on a member that had left. A standalone client drops a departed member from its rotation on the next routing table tick, one minute by default, and until then `RoutingTable`, `Members`, `RefreshMetadata`, `ClusterDMap.Delete`, `ClusterDMap.Destroy` and the routing table fetch that starts every `Scan` returned `connection refused` whenever their turn landed on it, although the live members could answer. These commands now move on to the next address when the dial to the picked member is refused or its pool is closed, trying each address of the rotation at most once; any other error is returned as before. `RefreshMetadata` no longer retries the member list forever when no member is reachable and returns `ErrConnRefused` instead.
+
+### Upgrade notes
+
+- **No action needed** if every Olric instance in a process uses the same hasher, or the process runs a single instance. Rolling updates are safe.
+- **Action needed** if a process runs instances with different hashers, or creates a `ClusterClient` with a different hasher before `olric.New`. Those instances now place keys differently. Do not roll the update: old and new members disagree on key placement and can forward requests back and forth. Either:
+  - stop the whole cluster and start it on this version, or
+  - set `Config.Hasher` on every instance to the hasher of the first instance or `ClusterClient` the process created, roll the update, and switch hashers later with a full restart.
+- Handle `ErrConnRefused` from `RefreshMetadata`: it now returns when no member is reachable instead of retrying forever.
+
 ## v0.3.22 - 2026-09-26
 
 ### Fixed

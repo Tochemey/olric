@@ -103,6 +103,35 @@ func processProtocolError(err error) error {
 	return convertDMapError(protocol.ConvertError(err))
 }
 
+// processOnAnyMember runs cmd, which any cluster member can answer, against the
+// next address of the client's round-robin rotation. When the picked member
+// cannot be reached, because its dial is refused or its pool was closed, the
+// command was never sent, so it moves on to the next address, at most once per
+// address in the rotation. A departed member stays in the rotation of a
+// standalone ClusterClient until the next routing table tick prunes it; without
+// this, every call that landed on it failed although live members could answer.
+// A pick error is returned as is and a process error through processProtocolError.
+func processOnAnyMember(ctx context.Context, client *server.Client, cmd redis.Cmder) error {
+	attempts := max(len(client.Addresses()), 1)
+
+	var err error
+	for range attempts {
+		var rc *redis.Client
+		rc, err = client.Pick()
+		if err != nil {
+			return err
+		}
+
+		cmd.SetErr(nil)
+		err = rc.Process(ctx, cmd)
+		if !errors.Is(err, syscall.ECONNREFUSED) && !errors.Is(err, redis.ErrClosed) {
+			break
+		}
+	}
+
+	return processProtocolError(err)
+}
+
 func (dm *ClusterDMap) writePutCommand(c *dmap.PutConfig, key string, value []byte) *protocol.Put {
 	cmd := protocol.NewPut(dm.name, key, value)
 	switch {
@@ -147,7 +176,7 @@ func (cl *ClusterClient) clientByPartID(partID uint64) (*redis.Client, error) {
 }
 
 func (cl *ClusterClient) smartPick(dmap, key string) (*redis.Client, error) {
-	hkey := partitions.HKey(dmap, key)
+	hkey := partitions.HKey(cl.config.hasher, dmap, key)
 	partID := hkey % cl.partitionCount
 	return cl.clientByPartID(partID)
 }
@@ -217,15 +246,9 @@ func (dm *ClusterDMap) Get(ctx context.Context, key string) (*GetResponse, error
 // if key doesn't exist. It's thread-safe. It is safe to modify the contents
 // of the argument after Delete returns.
 func (dm *ClusterDMap) Delete(ctx context.Context, keys ...string) (int, error) {
-	rc, err := dm.client.Pick()
-	if err != nil {
-		return 0, err
-	}
-
 	cmd := protocol.NewDel(dm.name, keys...).Command(ctx)
-	err = rc.Process(ctx, cmd)
-	if err != nil {
-		return 0, processProtocolError(err)
+	if err := processOnAnyMember(ctx, dm.client, cmd); err != nil {
+		return 0, err
 	}
 
 	res, err := cmd.Uint64()
@@ -491,15 +514,9 @@ func (dm *ClusterDMap) Scan(ctx context.Context, options ...ScanOption) (Iterato
 // is no global lock on DMaps. So if you call Put/PutEx and Destroy methods
 // concurrently on the cluster, Put call may set new values to the DMap.
 func (dm *ClusterDMap) Destroy(ctx context.Context) error {
-	rc, err := dm.client.Pick()
-	if err != nil {
-		return err
-	}
-
 	cmd := protocol.NewDestroy(dm.name).Command(ctx)
-	err = rc.Process(ctx, cmd)
-	if err != nil {
-		return processProtocolError(err)
+	if err := processOnAnyMember(ctx, dm.client, cmd); err != nil {
+		return err
 	}
 
 	return processProtocolError(cmd.Err())
@@ -554,17 +571,11 @@ func (cl *ClusterClient) Ping(ctx context.Context, addr, message string) (string
 // RoutingTable returns the latest version of the routing table.
 func (cl *ClusterClient) RoutingTable(ctx context.Context) (RoutingTable, error) {
 	cmd := protocol.NewClusterRoutingTable().Command(ctx)
-	rc, err := cl.client.Pick()
-	if err != nil {
+	if err := processOnAnyMember(ctx, cl.client, cmd); err != nil {
 		return RoutingTable{}, err
 	}
 
-	err = rc.Process(ctx, cmd)
-	if err != nil {
-		return RoutingTable{}, processProtocolError(err)
-	}
-
-	if err = cmd.Err(); err != nil {
+	if err := cmd.Err(); err != nil {
 		return RoutingTable{}, processProtocolError(err)
 	}
 
@@ -613,18 +624,12 @@ func (cl *ClusterClient) Stats(ctx context.Context, address string, options ...S
 
 // Members returns a thread-safe list of cluster members.
 func (cl *ClusterClient) Members(ctx context.Context) ([]Member, error) {
-	rc, err := cl.client.Pick()
-	if err != nil {
+	cmd := protocol.NewClusterMembers().Command(ctx)
+	if err := processOnAnyMember(ctx, cl.client, cmd); err != nil {
 		return []Member{}, err
 	}
 
-	cmd := protocol.NewClusterMembers().Command(ctx)
-	err = rc.Process(ctx, cmd)
-	if err != nil {
-		return []Member{}, processProtocolError(err)
-	}
-
-	if err = cmd.Err(); err != nil {
+	if err := cmd.Err(); err != nil {
 		return []Member{}, processProtocolError(err)
 	}
 
@@ -727,16 +732,10 @@ func (cl *ClusterClient) pruneStaleClients(ctx context.Context) error {
 // RefreshMetadata fetches a list of available members and the latest routing
 // table version. It also closes stale clients, if there are any.
 func (cl *ClusterClient) RefreshMetadata(ctx context.Context) error {
-	// Clean stale client connections.
-	for {
-		err := cl.pruneStaleClients(ctx)
-		if errors.Is(err, ErrConnRefused) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		break
+	// Clean stale client connections. Members already fails over to the next
+	// reachable member, so a refusal here means no member answered.
+	if err := cl.pruneStaleClients(ctx); err != nil {
+		return err
 	}
 
 	// Re-fetch the routing table, we should use the latest routing table version.
@@ -802,6 +801,12 @@ type clusterClientConfig struct {
 	routingTableFetchInterval time.Duration
 }
 
+// WithHasher sets the hasher the client uses to send each request straight to
+// the owner of the key's partition. It should be the hasher the cluster members
+// use (config.Config.Hasher). A different hasher still returns correct results,
+// since the receiving member hashes the key again and forwards the request to
+// the owner, but most requests then take an extra hop. Default hasher is
+// github.com/cespare/xxhash/v2, the members' default.
 func WithHasher(h hasher.Hasher) ClusterClientOption {
 	return func(cfg *clusterClientConfig) {
 		cfg.hasher = h
@@ -967,9 +972,6 @@ func NewClusterClient(addresses []string, options ...ClusterClientOption) (*Clus
 	for _, member := range members {
 		cl.client.Get(member.Name)
 	}
-
-	// Hash function is required to target primary owners instead of random cluster members.
-	partitions.SetHashFunc(cc.hasher)
 
 	// Initial fetch. ClusterClient targets the primary owners for a smooth and quick operation.
 	if err := cl.fetchRoutingTable(); err != nil {
