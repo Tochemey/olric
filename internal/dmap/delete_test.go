@@ -30,7 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tochemey/olric/config"
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/discovery"
 	"github.com/tochemey/olric/internal/kvstore"
 	"github.com/tochemey/olric/internal/protocol"
@@ -136,7 +135,7 @@ func TestDMap_Delete_MultiKeyDifferentRemoteOwners(t *testing.T) {
 	// owner.
 	remoteOwners := make(map[string]struct{})
 	for i := 0; i < keyCount; i++ {
-		hkey := partitions.HKey("mymap", testutil.ToKey(i))
+		hkey := s1.hkey("mymap", testutil.ToKey(i))
 		owner := s1.primary.PartitionByHKey(hkey).Owner()
 		if !owner.CompareByName(s1.rt.This()) {
 			remoteOwners[owner.String()] = struct{}{}
@@ -195,7 +194,7 @@ func TestDMap_Delete_RemoteOwnerUnreachable(t *testing.T) {
 
 	// Hand the partition to a member that isn't listening, so the key is
 	// routed to a remote owner that cannot be dialed.
-	hkey := partitions.HKey("mymap", key)
+	hkey := s1.hkey("mymap", key)
 	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{newUnreachableMember(t)})
 
 	count, err := dm.Delete(ctx, key)
@@ -227,7 +226,7 @@ func TestDMap_Delete_PreviousOwnerUnreachable(t *testing.T) {
 	s1.rt.Members().Add(unreachable)
 	s1.rt.Members().Unlock()
 
-	hkey := partitions.HKey("mymap", key)
+	hkey := s1.hkey("mymap", key)
 	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{
 		unreachable,
 		s1.rt.This(),
@@ -259,7 +258,7 @@ func TestDMap_Delete_BackupOwnerUnreachable(t *testing.T) {
 	s1.rt.Members().Add(unreachable)
 	s1.rt.Members().Unlock()
 
-	hkey := partitions.HKey("mymap", key)
+	hkey := s1.hkey("mymap", key)
 	s1.backup.PartitionByHKey(hkey).SetOwners([]discovery.Member{unreachable})
 
 	count, err := dm.Delete(ctx, key)
@@ -281,7 +280,7 @@ func TestDMap_Delete_PanicsWhenPartitionHasNoOwner(t *testing.T) {
 	key := testutil.ToKey(1)
 	require.NoError(t, dm.Put(ctx, key, testutil.ToVal(1), nil))
 
-	hkey := partitions.HKey("mymap", key)
+	hkey := s1.hkey("mymap", key)
 	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{})
 
 	// Delete cannot be used here: grouping the keys by owner would panic in
@@ -312,7 +311,7 @@ func TestDMap_Delete_MixedOwnersOneUnreachable(t *testing.T) {
 
 	// Only the first key moves to an unreachable owner. The rest stay local, so
 	// the fan-out has both a healthy and a failing group.
-	hkey := partitions.HKey("mymap", keys[0])
+	hkey := s1.hkey("mymap", keys[0])
 	s1.primary.PartitionByHKey(hkey).SetOwners([]discovery.Member{newUnreachableMember(t)})
 
 	count, err := dm.Delete(ctx, keys...)
@@ -458,7 +457,7 @@ func TestDMap_Delete_DeleteKeyValFromPreviousOwners(t *testing.T) {
 	}
 
 	// Prepare fragmented partition owners list
-	hkey := partitions.HKey("mydmap", "mykey")
+	hkey := s.hkey("mydmap", "mykey")
 	owners := s.primary.PartitionOwnersByHKey(hkey)
 	owner := owners[len(owners)-1]
 
@@ -629,7 +628,7 @@ func TestDMap_Delete_FailsFastOnDepartedOwner(t *testing.T) {
 	require.Less(t, time.Since(started), time.Second, "a departed replica must not be dialed")
 
 	// The routing table drops the member: the delete goes through.
-	s1.backup.PartitionByHKey(partitions.HKey("mydmap", key)).SetOwners(nil)
+	s1.backup.PartitionByHKey(s1.hkey("mydmap", key)).SetOwners(nil)
 	count, err := dm.Delete(context.Background(), key)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
@@ -651,7 +650,7 @@ func TestDMap_Delete_MissOnPrimaryStillDeletesReplica(t *testing.T) {
 	require.NoError(t, err)
 	key := ownedKey(t, s1, "mydmap")
 	require.NoError(t, dm.Put(context.Background(), key, []byte("value"), nil))
-	hkey := partitions.HKey("mydmap", key)
+	hkey := s1.hkey("mydmap", key)
 
 	dm2, err := s2.NewDMap("mydmap")
 	require.NoError(t, err)

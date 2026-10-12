@@ -110,6 +110,10 @@ var (
 	// ErrMemberClosing is returned by embedded operations that need the member's
 	// shared cluster client after Shutdown has begun tearing it down.
 	ErrMemberClosing = errors.New("member is shutting down")
+
+	// ErrNotBootstrapped is returned by EmbeddedDMap.Owner before this member
+	// has received a routing table, when no partition has an owner yet.
+	ErrNotBootstrapped = errors.New("member is not bootstrapped yet")
 )
 
 // Olric implements a distributed cache and in-memory key/value data store.
@@ -246,9 +250,6 @@ func New(config *config.Config) (*Olric, error) {
 
 	e := environment.New()
 	e.Set("config", config)
-
-	// Set the hash function. Olric distributes keys over partitions by hashing.
-	partitions.SetHashFunc(config.Hasher)
 
 	flogger := flog.New(config.Logger)
 	flogger.SetLevel(config.LogVerbosity)

@@ -114,6 +114,12 @@ func NewService(e *environment.Environment) (service.Service, error) {
 	return s, nil
 }
 
+// hkey hashes the key of the named DMap with this instance's configured hasher.
+// The result selects the partition that owns the key.
+func (x *Service) hkey(name, key string) uint64 {
+	return partitions.HKey(x.config.Hasher, name, key)
+}
+
 func (s *Service) isAlive() bool {
 	select {
 	case <-s.ctx.Done():

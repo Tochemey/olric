@@ -18,24 +18,15 @@
 package partitions
 
 import (
-	"sync"
 	"unsafe"
 
 	"github.com/tochemey/olric/hasher"
 )
 
-var (
-	hashFunc hasher.Hasher
-	once     sync.Once
-)
-
-func SetHashFunc(h hasher.Hasher) {
-	once.Do(func() {
-		hashFunc = h
-	})
-}
-
-func HKey(name, key string) uint64 {
+// HKey hashes the key of the named storage unit with h. The result selects
+// the partition that owns the key, so every member of a cluster must hash with
+// the same hasher.
+func HKey(h hasher.Hasher, name, key string) uint64 {
 	tmp := name + key
-	return hashFunc.Sum64(*(*[]byte)(unsafe.Pointer(&tmp)))
+	return h.Sum64(*(*[]byte)(unsafe.Pointer(&tmp)))
 }

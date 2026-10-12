@@ -59,7 +59,7 @@ func TestDMap_Balance_FragmentMergeFunction(t *testing.T) {
 	err = dm.Put(context.Background(), "mykey", "myval", nil)
 	require.NoError(t, err)
 
-	hkey := partitions.HKey("mymap", "mykey")
+	hkey := dm.s.hkey("mymap", "mykey")
 	part := dm.getPartitionByHKey(hkey, partitions.PRIMARY)
 	f, err := dm.loadFragment(part)
 	require.NoError(t, err)

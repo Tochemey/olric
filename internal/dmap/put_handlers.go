@@ -22,7 +22,6 @@ import (
 
 	"github.com/tidwall/redcon"
 
-	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/protocol"
 )
 
@@ -88,7 +87,7 @@ func (s *Service) putEntryCommandHandler(conn redcon.Conn, cmd redcon.Command) {
 	}
 
 	e := newEnv(s.ctx)
-	e.hkey = partitions.HKey(putEntryCmd.DMap, putEntryCmd.Key)
+	e.hkey = s.hkey(putEntryCmd.DMap, putEntryCmd.Key)
 	e.dmap = putEntryCmd.DMap
 	e.key = putEntryCmd.Key
 	e.value = putEntryCmd.Value

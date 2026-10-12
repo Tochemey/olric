@@ -25,6 +25,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/testutil"
 )
 
@@ -676,4 +677,18 @@ func TestFutureDelete_Result_OK(t *testing.T) {
 	num, err := f.Result()
 	require.NoError(t, err)
 	require.Equal(t, 1, num)
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/53. A pipeline
+// must group a key under the partition the cluster client's own hasher selects.
+func TestDMapPipeline_addCommand_UsesConfiguredHasher(t *testing.T) {
+	const partitionCount = 7
+
+	cl := &ClusterClient{config: &clusterClientConfig{hasher: fnvHasher{}}, partitionCount: partitionCount}
+	dp, err := (&ClusterDMap{name: "mydmap", clusterClient: cl}).Pipeline()
+	require.NoError(t, err)
+
+	key := keyWithDistinctPartitions(t, "mydmap", partitionCount)
+	partID, _ := dp.addCommand(key, redis.NewStringCmd(context.Background(), "get", key))
+	require.Equal(t, partitions.HKey(fnvHasher{}, "mydmap", key)%partitionCount, partID)
 }

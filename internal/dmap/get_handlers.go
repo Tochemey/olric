@@ -69,7 +69,7 @@ func (s *Service) getEntryCommandHandler(conn redcon.Conn, cmd redcon.Command) {
 	e := newEnv(s.ctx)
 	e.dmap = getEntryCmd.DMap
 	e.key = getEntryCmd.Key
-	e.hkey = partitions.HKey(getEntryCmd.DMap, getEntryCmd.Key)
+	e.hkey = s.hkey(getEntryCmd.DMap, getEntryCmd.Key)
 	e.kind = kind
 	nt, err := dm.getOnFragment(e)
 	if err == errFragmentNotFound {

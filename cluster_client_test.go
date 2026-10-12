@@ -868,6 +868,7 @@ func TestWithRoutingTableFetchInterval_Option(t *testing.T) {
 
 	require.Equal(t, 3*time.Second, cfg.routingTableFetchInterval)
 }
+
 // getDeadAddr returns an address on the loopback interface that refuses
 // connections: it binds an ephemeral port and closes the listener right away.
 func getDeadAddr(t *testing.T) string {
@@ -894,14 +895,6 @@ func newFastFailClientConfig(t *testing.T) *config.Client {
 	return cc
 }
 
-// setDefaultHashFunc makes sure the partitions package has a hash function.
-// It is normally set by NewClusterClient or the Olric node itself; tests that
-// build ClusterClient values manually need to set it explicitly.
-func setDefaultHashFunc(t *testing.T) {
-	t.Helper()
-	partitions.SetHashFunc(hasher.NewDefaultHasher())
-}
-
 // newStaticRoutingTable builds a routing table where every partition is owned
 // by the given address.
 func newStaticRoutingTable(partitionCount uint64, owner string) RoutingTable {
@@ -916,7 +909,6 @@ func newStaticRoutingTable(partitionCount uint64, owner string) RoutingTable {
 // to a TCP endpoint that refuses connections.
 func newDeadClusterClient(t *testing.T) (*ClusterClient, *ClusterDMap, string) {
 	t.Helper()
-	setDefaultHashFunc(t)
 
 	deadAddr := getDeadAddr(t)
 	c := server.NewClient(newFastFailClientConfig(t))
@@ -925,7 +917,7 @@ func newDeadClusterClient(t *testing.T) (*ClusterClient, *ClusterDMap, string) {
 
 	cl := &ClusterClient{
 		client:         c,
-		config:         &clusterClientConfig{routingTableFetchInterval: time.Minute},
+		config:         &clusterClientConfig{routingTableFetchInterval: time.Minute, hasher: hasher.NewDefaultHasher()},
 		logger:         newTestFlogger(&bytes.Buffer{}),
 		partitionCount: 7,
 	}
@@ -968,11 +960,9 @@ func TestClusterClient_clientByPartID_Errors(t *testing.T) {
 }
 
 func TestClusterDMap_smartPick_Error_Propagation(t *testing.T) {
-	setDefaultHashFunc(t)
-
 	// A ClusterClient without a routing table makes smartPick fail for all
 	// DMap operations that route requests to partition owners.
-	cl := &ClusterClient{partitionCount: 7}
+	cl := &ClusterClient{config: &clusterClientConfig{hasher: hasher.NewDefaultHasher()}, partitionCount: 7}
 	dm := &ClusterDMap{
 		name:          "mydmap",
 		newEntry:      func() storage.Entry { return entry.New() },
@@ -1020,12 +1010,10 @@ func TestClusterDMap_smartPick_Error_Propagation(t *testing.T) {
 }
 
 func TestClusterDMap_Encode_Errors(t *testing.T) {
-	setDefaultHashFunc(t)
-
 	// smartPick succeeds (clients are created lazily, no connection is made)
 	// but encoding an unsupported value type fails.
 	c := server.NewClient(newFastFailClientConfig(t))
-	cl := &ClusterClient{client: c, partitionCount: 7}
+	cl := &ClusterClient{client: c, config: &clusterClientConfig{hasher: hasher.NewDefaultHasher()}, partitionCount: 7}
 	cl.routingTable.Store(newStaticRoutingTable(cl.partitionCount, "127.0.0.1:0"))
 	dm := &ClusterDMap{
 		name:          "mydmap",
@@ -1045,6 +1033,28 @@ func TestClusterDMap_Encode_Errors(t *testing.T) {
 	_, err = dm.GetPut(ctx, "mykey", unsupported{A: 1})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "can't marshal")
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/53. smartPick
+// must route a key to the owner of the partition the client's own hasher
+// selects, whichever hasher another instance in the process uses.
+func TestClusterClient_smartPick_UsesConfiguredHasher(t *testing.T) {
+	const partitionCount = 7
+
+	c := server.NewClient(newFastFailClientConfig(t))
+	cl := &ClusterClient{client: c, config: &clusterClientConfig{hasher: fnvHasher{}}, partitionCount: partitionCount}
+	rt := RoutingTable{}
+	for partID := uint64(0); partID < partitionCount; partID++ {
+		rt[partID] = Route{PrimaryOwners: []string{fmt.Sprintf("127.0.0.1:%d", 20000+partID)}}
+	}
+	cl.routingTable.Store(rt)
+
+	key := keyWithDistinctPartitions(t, "mydmap", partitionCount)
+	rc, err := cl.smartPick("mydmap", key)
+	require.NoError(t, err)
+
+	partID := partitions.HKey(fnvHasher{}, "mydmap", key) % partitionCount
+	require.Equal(t, fmt.Sprintf("127.0.0.1:%d", 20000+partID), rc.Options().Addr)
 }
 
 func TestClusterClient_DeadNode_Errors(t *testing.T) {
@@ -1448,4 +1458,120 @@ func TestClusterClient_RefreshMetadata_PrunesDeadMembers(t *testing.T) {
 		_, ok := c.client.Addresses()[db2Addr]
 		return !ok
 	}, 10*time.Second, 100*time.Millisecond)
+}
+
+// A departed member stays in a standalone ClusterClient's rotation until the
+// next routing table tick prunes it. Commands that any member can answer must
+// skip it and be answered by a live member instead of failing.
+func TestClusterClient_AnyMemberCommands_SkipUnreachableMember(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	ctx := context.Background()
+	// A long fetch interval keeps the background prune from removing the
+	// unreachable address during the test; the fast-fail configuration keeps
+	// each refused dial from being retried.
+	c, err := NewClusterClient([]string{db.name}, WithRoutingTableFetchInterval(time.Hour), WithConfig(newFastFailClientConfig(t)))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, c.Close(ctx))
+	}()
+
+	c.client.Get(getDeadAddr(t))
+	require.Len(t, c.client.Addresses(), 2)
+
+	dm, err := c.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	// The rotation alternates between the two addresses, so one of two
+	// consecutive calls of each command lands on the unreachable one first.
+	for range 2 {
+		_, err = c.RoutingTable(ctx)
+		require.NoError(t, err)
+	}
+
+	for range 2 {
+		_, err = c.Members(ctx)
+		require.NoError(t, err)
+	}
+
+	for range 2 {
+		_, err = dm.Delete(ctx, "mykey")
+		require.NoError(t, err)
+	}
+
+	for range 2 {
+		require.NoError(t, dm.Destroy(ctx))
+	}
+
+	for range 2 {
+		require.NoError(t, c.RefreshMetadata(ctx))
+	}
+}
+
+// A departing member's pool can be closed while a command still holds it, and
+// the command then fails with redis.ErrClosed without being sent. Commands that
+// any member can answer must skip such a pool like an unreachable member.
+func TestClusterClient_AnyMemberCommands_SkipClosedPool(t *testing.T) {
+	cluster := newTestCluster(t)
+	db := cluster.addMember(t)
+
+	ctx := context.Background()
+	c := server.NewClient(newFastFailClientConfig(t))
+	c.Get(db.name)
+	// Close the pool but keep it in the rotation, as during the race above.
+	closedAddr := getDeadAddr(t)
+	require.NoError(t, c.Get(closedAddr).Close())
+	defer func() {
+		require.NoError(t, c.Close(db.name))
+	}()
+
+	cl := &ClusterClient{client: c, config: &clusterClientConfig{hasher: hasher.NewDefaultHasher()}, logger: newTestFlogger(&bytes.Buffer{})}
+	dm := &ClusterDMap{
+		name:          "mydmap",
+		newEntry:      func() storage.Entry { return entry.New() },
+		config:        &dmapConfig{},
+		client:        c,
+		clusterClient: cl,
+	}
+
+	// The rotation alternates between the two addresses, so one of two
+	// consecutive calls of each command lands on the closed pool first.
+	for range 2 {
+		_, err := cl.RoutingTable(ctx)
+		require.NoError(t, err)
+	}
+
+	for range 2 {
+		_, err := cl.Members(ctx)
+		require.NoError(t, err)
+	}
+
+	for range 2 {
+		_, err := dm.Delete(ctx, "mykey")
+		require.NoError(t, err)
+	}
+
+	for range 2 {
+		require.NoError(t, dm.Destroy(ctx))
+	}
+}
+
+// RefreshMetadata must return when no member is reachable instead of retrying
+// the refused member list forever.
+func TestClusterClient_RefreshMetadata_NoReachableMember(t *testing.T) {
+	cl, _, _ := newDeadClusterClient(t)
+	defer cl.cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cl.RefreshMetadata(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrConnRefused)
+	case <-time.After(10 * time.Second):
+		t.Fatal("RefreshMetadata did not return although no member is reachable")
+	}
 }

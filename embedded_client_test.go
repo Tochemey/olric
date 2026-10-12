@@ -20,6 +20,7 @@ package olric
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/tochemey/olric/config"
+	"github.com/tochemey/olric/hasher"
 	"github.com/tochemey/olric/internal/cluster/partitions"
 	"github.com/tochemey/olric/internal/kvstore/entry"
 	"github.com/tochemey/olric/internal/testutil"
@@ -1283,7 +1286,7 @@ func TestEmbeddedClient_DMap_Get_ContextDeadline(t *testing.T) {
 	require.Eventually(t, func() bool {
 		for i := 0; i < 1000; i++ {
 			candidate := fmt.Sprintf("mykey-%d", i)
-			hkey := partitions.HKey("mydmap", candidate)
+			hkey := partitions.HKey(db1.hashFunc, "mydmap", candidate)
 			if !db1.primary.PartitionByHKey(hkey).Owner().CompareByName(db1.rt.This()) {
 				key = candidate
 				return true
@@ -1302,4 +1305,110 @@ func TestEmbeddedClient_DMap_Get_ContextDeadline(t *testing.T) {
 
 	_, err = dm.Get(ctx, key)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// fnvHasher hashes with FNV-1a so tests can compare it with the default hasher.
+type fnvHasher struct{}
+
+// Sum64 returns the 64-bit FNV-1a hash of key.
+func (fnvHasher) Sum64(key []byte) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write(key)
+	return h.Sum64()
+}
+
+// keyWithDistinctPartitions returns a key of dmap that the default hasher and
+// fnvHasher map to different partitions, so a test can tell which hasher
+// placed it.
+func keyWithDistinctPartitions(t *testing.T, dmap string, partitionCount uint64) string {
+	t.Helper()
+
+	for i := 0; i < 1000; i++ {
+		key := fmt.Sprintf("mykey-%d", i)
+		if partitions.HKey(hasher.NewDefaultHasher(), dmap, key)%partitionCount != partitions.HKey(fnvHasher{}, dmap, key)%partitionCount {
+			return key
+		}
+	}
+
+	t.Fatal("no key maps to different partitions under the two hashers")
+	return ""
+}
+
+// Regression test for https://github.com/Tochemey/olric/issues/53. Two
+// instances with different hashers in one process must each place keys in the
+// partition their own hasher selects, whichever instance started first.
+func TestEmbeddedClient_DMap_UsesConfiguredHasher(t *testing.T) {
+	ctx := context.Background()
+
+	for _, h := range []hasher.Hasher{hasher.NewDefaultHasher(), fnvHasher{}} {
+		c := testutil.NewConfig()
+		c.Hasher = h
+		db := newTestCluster(t).addMemberWithConfig(t, c)
+
+		key := keyWithDistinctPartitions(t, "mydmap", c.PartitionCount)
+		dm, err := db.NewEmbeddedClient().NewDMap("mydmap")
+		require.NoError(t, err)
+		require.NoError(t, dm.Put(ctx, key, "value"))
+
+		resp, err := dm.Get(ctx, key)
+		require.NoError(t, err)
+		require.Equal(t, partitions.HKey(h, "mydmap", key)%c.PartitionCount, resp.Partition())
+	}
+}
+
+// Owner must name the member Put sends the key to: the primary owner of the
+// partition this member's hasher selects, read from the local partition table.
+// The cluster runs a custom hasher so that hashing with any other one fails.
+func TestEmbeddedDMap_Owner(t *testing.T) {
+	newConfig := func() *config.Config {
+		c := testutil.NewConfig()
+		c.Hasher = fnvHasher{}
+		return c
+	}
+
+	cluster := newTestCluster(t)
+	db1 := cluster.addMemberWithConfig(t, newConfig())
+	db2 := cluster.addMemberWithConfig(t, newConfig())
+	waitForClusterSize(t, []*Olric{db1, db2}, 2)
+
+	e := db1.NewEmbeddedClient()
+	dm, err := e.NewDMap("mydmap")
+	require.NoError(t, err)
+
+	// db1 is the coordinator, so its RoutingTable is the local table.
+	rt, err := e.RoutingTable(context.Background())
+	require.NoError(t, err)
+
+	var remote bool
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("mykey-%d", i)
+		owner, err := dm.(*EmbeddedDMap).Owner(key)
+		require.NoError(t, err)
+
+		partID := partitions.HKey(db1.hashFunc, "mydmap", key) % db1.config.PartitionCount
+		primaryOwners := rt[partID].PrimaryOwners
+		require.Equal(t, primaryOwners[len(primaryOwners)-1], owner.Name)
+		require.Equal(t, owner.Name == db1.rt.This().String(), owner.Coordinator)
+
+		if owner.Name == db2.rt.This().String() {
+			remote = true
+		}
+	}
+
+	require.True(t, remote, "no key is owned by the other member")
+}
+
+// Owner must not block or panic before the member has a routing table.
+func TestEmbeddedDMap_Owner_NotBootstrapped(t *testing.T) {
+	c := testutil.NewConfig()
+	require.NoError(t, c.Sanitize())
+	require.NoError(t, c.Validate())
+
+	db, err := New(c)
+	require.NoError(t, err)
+	t.Cleanup(db.cancel)
+
+	dm := &EmbeddedDMap{client: db.NewEmbeddedClient(), name: "mydmap"}
+	_, err = dm.Owner("mykey")
+	require.ErrorIs(t, err, ErrNotBootstrapped)
 }

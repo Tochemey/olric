@@ -296,7 +296,11 @@ type Config struct {
 	// cluster.events channel. Default is false.
 	EnableClusterEventsChannel bool
 
-	// Default hasher is github.com/cespare/xxhash/v2
+	// Hasher hashes DMap keys to select the partition that owns each key. Every
+	// member of a cluster must use the same hasher, or members place and look up
+	// keys in different partitions. Give cluster clients the same hasher with
+	// WithHasher. Each instance uses its own hasher, so instances in one process
+	// may use different ones. Default hasher is github.com/cespare/xxhash/v2.
 	Hasher hasher.Hasher
 
 	// LogOutput is the writer where logs should be sent. If this is not

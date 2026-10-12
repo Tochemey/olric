@@ -180,7 +180,6 @@ func (t *TestCluster) AddMember(e *environment.Environment) service.Service {
 		e = NewEnvironment(nil)
 	}
 	c := e.Get("config").(*config.Config)
-	partitions.SetHashFunc(c.Hasher)
 
 	port, err := testutil.GetFreePort()
 	if err != nil {
