@@ -34,7 +34,29 @@ import (
 	"github.com/tochemey/olric/pkg/flog"
 )
 
+// freePortAttempts bounds how many kernel-assigned ports GetFreePort tries
+// before it gives up.
+const freePortAttempts = 10
+
+// GetFreePort returns a loopback port that is free for both TCP and UDP.
+// Memberlist binds its TCP and UDP listeners on the same port number, so a
+// port checked for TCP alone can still fail with "address already in use"
+// when another socket holds the UDP side.
 func GetFreePort() (int, error) {
+	var lastErr error
+	for range freePortAttempts {
+		port, err := tryFreePort()
+		if err == nil {
+			return port, nil
+		}
+		lastErr = err
+	}
+	return 0, lastErr
+}
+
+// tryFreePort asks the kernel for a free loopback TCP port and accepts it only
+// if the UDP port with the same number is free as well.
+func tryFreePort() (int, error) {
 	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
@@ -45,10 +67,24 @@ func GetFreePort() (int, error) {
 		return 0, err
 	}
 	port := l.Addr().(*net.TCPAddr).Port
+	udpErr := ensureUDPPortFree(port)
 	if err := l.Close(); err != nil {
 		return 0, err
 	}
+	if udpErr != nil {
+		return 0, udpErr
+	}
 	return port, nil
+}
+
+// ensureUDPPortFree returns an error if the loopback UDP port cannot be bound,
+// which means another socket already holds it.
+func ensureUDPPortFree(port int) error {
+	u, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		return err
+	}
+	return u.Close()
 }
 
 func NewFlogger(c *config.Config) *flog.Logger {
