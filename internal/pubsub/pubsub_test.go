@@ -19,6 +19,7 @@ package pubsub
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -27,9 +28,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/redcon"
 
+	"github.com/tochemey/olric/internal/testcluster"
 	"github.com/tochemey/olric/internal/testutil"
 )
 
@@ -320,4 +323,75 @@ func TestPubSub_bgrunner(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("connection was not closed by the server after QUIT")
 	}
+}
+
+// TestPubSub_Publish_SkipsOtherChannels makes sure a message published on one
+// channel reaches only that channel's subscribers, even when another channel
+// sorts after it in the subscription tree.
+func TestPubSub_Publish_SkipsOtherChannels(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+	ctx := context.Background()
+
+	first := rc.Subscribe(ctx, "achan")
+	defer func() {
+		require.NoError(t, first.Close())
+	}()
+
+	_, err := first.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	second := rc.Subscribe(ctx, "bchan")
+	defer func() {
+		require.NoError(t, second.Close())
+	}()
+
+	_, err = second.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, s.pubsub.Publish("achan", "for-a"))
+	require.Equal(t, 1, s.pubsub.Publish("bchan", "for-b"))
+
+	// Messages on one connection arrive in order, so the first message the
+	// "bchan" subscriber sees must be the one published to "bchan".
+	msg, err := second.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "for-b", msg.(*redis.Message).Payload)
+}
+
+// TestPubSub_Publish_CountsOnlyMatchingPatterns makes sure the number returned
+// by Publish includes a pattern subscriber only when its pattern matches the
+// channel.
+func TestPubSub_Publish_CountsOnlyMatchingPatterns(t *testing.T) {
+	cluster := testcluster.New(NewService)
+	s := cluster.AddMember(nil).(*Service)
+	defer cluster.Shutdown()
+
+	rc := s.client.Get(s.rt.This().String())
+	ctx := context.Background()
+
+	matching := rc.PSubscribe(ctx, "h?llo")
+	defer func() {
+		require.NoError(t, matching.Close())
+	}()
+
+	_, err := matching.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	other := rc.PSubscribe(ctx, "x*")
+	defer func() {
+		require.NoError(t, other.Close())
+	}()
+
+	_, err = other.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, s.pubsub.Publish("hello", "hi"))
+
+	msg, err := matching.ReceiveTimeout(ctx, time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "hi", msg.(*redis.Message).Payload)
 }

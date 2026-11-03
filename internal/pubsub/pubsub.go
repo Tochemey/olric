@@ -22,7 +22,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tidwall/btree"
+	"github.com/tidwall/btree/v2"
 	"github.com/tidwall/match"
 	"github.com/tidwall/redcon"
 )
@@ -32,7 +32,7 @@ type PubSub struct {
 	mu     sync.RWMutex
 	nextid uint64
 	initd  bool
-	chans  *btree.BTree
+	chans  *btree.Table[*pubSubEntry]
 	conns  map[redcon.Conn]*pubSubConn
 
 	// callbacks
@@ -51,36 +51,35 @@ func (ps *PubSub) Psubscribe(conn redcon.Conn, channel string) {
 }
 
 // Publish a message to subscribers
-func (ps *PubSub) Publish(channel, message string) int {
-	ps.mu.RLock()
-	defer ps.mu.RUnlock()
-	if !ps.initd {
+func (x *PubSub) Publish(channel, message string) int {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+
+	if !x.initd {
 		return 0
 	}
+
 	var sent int
 	// write messages to all clients that are subscribed on the channel
 	pivot := &pubSubEntry{pattern: false, channel: channel}
-	ps.chans.Ascend(pivot, func(item interface{}) bool {
-		entry := item.(*pubSubEntry)
+	for entry := range x.chans.Ascend(pivot) {
 		if entry.channel != pivot.channel || entry.pattern != pivot.pattern {
-			return false
+			break
 		}
+
 		entry.sconn.writeMessage(entry.pattern, "", channel, message)
 		sent++
-		return true
-	})
+	}
 
 	// match on and write all psubscribe clients
 	pivot = &pubSubEntry{pattern: true}
-	ps.chans.Ascend(pivot, func(item interface{}) bool {
-		entry := item.(*pubSubEntry)
+	for entry := range x.chans.Ascend(pivot) {
 		if match.Match(channel, entry.channel) {
 			entry.sconn.writeMessage(entry.pattern, entry.channel, channel,
 				message)
+			sent++
 		}
-		sent++
-		return true
-	})
+	}
 
 	return sent
 }
@@ -220,9 +219,7 @@ func (sconn *pubSubConn) bgrunner(ps *PubSub) {
 // byEntry is a "less" function that sorts the entries in a btree. The tree
 // is sorted be (pattern, channel, conn.id). All pattern=true entries are at
 // the end (right) of the tree.
-func byEntry(a, b interface{}) bool {
-	aa := a.(*pubSubEntry)
-	bb := b.(*pubSubEntry)
+func byEntry(aa, bb *pubSubEntry) bool {
 	if !aa.pattern && bb.pattern {
 		return true
 	}
@@ -246,31 +243,31 @@ func byEntry(a, b interface{}) bool {
 	return aid < bid
 }
 
-func (ps *PubSub) subscribe(conn redcon.Conn, pattern bool, channel string) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
+func (x *PubSub) subscribe(conn redcon.Conn, pattern bool, channel string) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
 
 	// initialize the PubSub instance
-	if !ps.initd {
-		ps.conns = make(map[redcon.Conn]*pubSubConn)
-		ps.chans = btree.New(byEntry)
-		ps.initd = true
+	if !x.initd {
+		x.conns = make(map[redcon.Conn]*pubSubConn)
+		x.chans = btree.NewTableOptions(btree.TableOptions[*pubSubEntry]{Less: byEntry})
+		x.initd = true
 	}
 
 	// fetch the pubSubConn
-	sconn, ok := ps.conns[conn]
+	sconn, ok := x.conns[conn]
 	if !ok {
 		// initialize a new pubSubConn, which runs on a detached connection,
 		// and attach it to the PubSub channels/conn btree
-		ps.nextid++
+		x.nextid++
 		dconn := conn.Detach()
 		sconn = &pubSubConn{
-			id:      ps.nextid,
+			id:      x.nextid,
 			conn:    conn,
 			dconn:   dconn,
 			entries: make(map[*pubSubEntry]bool),
 		}
-		ps.conns[conn] = sconn
+		x.conns[conn] = sconn
 	}
 	sconn.mu.Lock()
 	defer sconn.mu.Unlock()
@@ -281,7 +278,7 @@ func (ps *PubSub) subscribe(conn redcon.Conn, pattern bool, channel string) {
 		channel: channel,
 		sconn:   sconn,
 	}
-	ps.chans.Set(entry)
+	x.chans.Set(entry)
 	sconn.entries[entry] = true
 
 	// send a message to the client
@@ -303,7 +300,7 @@ func (ps *PubSub) subscribe(conn redcon.Conn, pattern bool, channel string) {
 
 	// start the background client operation
 	if !ok {
-		go sconn.bgrunner(ps)
+		go sconn.bgrunner(x)
 	}
 }
 
