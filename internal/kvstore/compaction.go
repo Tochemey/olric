@@ -28,6 +28,15 @@ import (
 )
 
 func (k *KVStore) evictTable(t *table.Table) error {
+	// Entries are moved to the head table. If t is the head itself, they
+	// would be written back into t and then deleted from it, losing them.
+	// Start a new head first.
+	if k.tables[len(k.tables)-1] == t {
+		if err := k.makeTable(); err != nil {
+			return err
+		}
+	}
+
 	var total int
 	var evictErr error
 	t.Range(func(hkey uint64, e storage.Entry) bool {

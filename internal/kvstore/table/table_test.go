@@ -412,3 +412,28 @@ func TestTable_ScanRegexMatch_SingleMatch(t *testing.T) {
 	require.Equal(t, 1, num)
 	require.Equal(t, 1, count)
 }
+
+func TestTable_PutRaw_OverwriteMarksPreviousVersionAsGarbage(t *testing.T) {
+	src, e := setupTable()
+	require.NoError(t, src.Put(hkey, e))
+	raw, err := src.GetRaw(hkey)
+	require.NoError(t, err)
+
+	tb := New(1 << 20)
+	for i := 0; i < 100; i++ {
+		require.NoError(t, tb.PutRaw(hkey, raw))
+	}
+
+	stats := tb.Stats()
+	require.Equal(t, 1, stats.Length)
+	require.Equal(t, uint64(len(raw)), stats.Inuse)
+	require.Equal(t, uint64(99*len(raw)), stats.Garbage)
+
+	var scanned int
+	_, err = tb.Scan(0, 1000, func(storage.Entry) bool {
+		scanned++
+		return true
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, scanned)
+}
