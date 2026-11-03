@@ -227,7 +227,19 @@ func (k *KVStore) PutRaw(hkey uint64, value []byte) error {
 		break
 	}
 
+	k.deleteFromOlderTables(hkey)
 	return nil
+}
+
+// deleteFromOlderTables removes hkey from every table except the head one.
+// It is called after a successful write to the head table, so a key never
+// has more than one live version: an older copy left behind would never be
+// accounted as garbage, and compaction would copy it back over the newer one.
+func (k *KVStore) deleteFromOlderTables(hkey uint64) {
+	for i := 0; i < len(k.tables)-1; i++ {
+		// ErrHKeyNotFound is the expected case; Delete reports nothing else.
+		_ = k.tables[i].Delete(hkey)
+	}
 }
 
 // Put sets the value for the given key. It overwrites any previous value for that key
@@ -262,6 +274,7 @@ func (k *KVStore) Put(hkey uint64, value storage.Entry) error {
 		break
 	}
 
+	k.deleteFromOlderTables(hkey)
 	return nil
 }
 

@@ -125,3 +125,114 @@ func TestKVStore_Compaction_MaxIdleTableDuration(t *testing.T) {
 
 	require.Equal(t, 1, len(s.(*KVStore).tables))
 }
+
+func compactUntilDone(t *testing.T, s *KVStore) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		done, err := s.Compaction()
+		require.NoError(t, err)
+		if done {
+			return
+		}
+	}
+	t.Fatal("compaction did not finish in 100 passes")
+}
+
+func TestKVStore_Compaction_HeadTableKeepsLiveKeys(t *testing.T) {
+	s := testKVStore(t, nil).(*KVStore)
+
+	for i := 0; i < 10; i++ {
+		e := entry.New()
+		e.SetKey(bkey(i))
+		e.SetValue(bval(i))
+		require.NoError(t, s.Put(xxhash.Sum64([]byte(bkey(i))), e))
+	}
+
+	// Overwrite one key until the only table is garbage-heavy enough to be
+	// compacted while it is still the head.
+	hot := xxhash.Sum64([]byte("hot"))
+	for i := 0; i < 5000; i++ {
+		e := entry.New()
+		e.SetKey("hot")
+		e.SetValue([]byte(fmt.Sprintf("%0100d", i)))
+		require.NoError(t, s.Put(hot, e))
+	}
+	require.Len(t, s.tables, 1)
+	require.True(t, s.isCompactionOK(s.tables[0]))
+
+	compactUntilDone(t, s)
+
+	for i := 0; i < 10; i++ {
+		e, err := s.Get(xxhash.Sum64([]byte(bkey(i))))
+		require.NoError(t, err)
+		require.Equal(t, bval(i), e.Value())
+	}
+	e, err := s.Get(hot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(fmt.Sprintf("%0100d", 4999)), e.Value())
+	require.Equal(t, 11, s.Stats().Length)
+}
+
+func TestKVStore_Compaction_DoesNotRestoreOverwrittenValue(t *testing.T) {
+	s := testKVStore(t, nil).(*KVStore)
+
+	put := func(key string, value []byte) {
+		e := entry.New()
+		e.SetKey(key)
+		e.SetValue(value)
+		require.NoError(t, s.Put(xxhash.Sum64([]byte(key)), e))
+	}
+
+	put("a", []byte("old"))
+	for i := 0; len(s.tables) < 2; i++ {
+		put(bkey(i), []byte(fmt.Sprintf("%01000d", i)))
+	}
+	// "a" now lives in a read-only table; the new version goes to the head.
+	put("a", []byte("new"))
+
+	// Make the old table garbage-heavy so compaction evicts it.
+	for i := 0; i < 600; i++ {
+		require.NoError(t, s.Delete(xxhash.Sum64([]byte(bkey(i)))))
+	}
+
+	compactUntilDone(t, s)
+
+	e, err := s.Get(xxhash.Sum64([]byte("a")))
+	require.NoError(t, err)
+	require.Equal(t, []byte("new"), e.Value())
+}
+
+func TestKVStore_PutRaw_OverwriteAcrossTablesLeavesOneVersion(t *testing.T) {
+	s := testKVStore(t, nil).(*KVStore)
+	src := testKVStore(t, nil).(*KVStore)
+
+	hkey := xxhash.Sum64([]byte("k"))
+	for i := 0; i < 20000; i++ {
+		e := entry.New()
+		e.SetKey("k")
+		e.SetValue([]byte(fmt.Sprintf("%0100d", i)))
+		require.NoError(t, src.Put(hkey, e))
+		raw, err := src.GetRaw(hkey)
+		require.NoError(t, err)
+		require.NoError(t, s.PutRaw(hkey, raw))
+	}
+	// ~2.6 MB written into 1 MB tables: the key crossed table boundaries.
+	require.Greater(t, len(s.tables), 1)
+
+	var versions int
+	s.RangeHKey(func(h uint64) bool {
+		if h == hkey {
+			versions++
+		}
+		return true
+	})
+	require.Equal(t, 1, versions)
+	require.Equal(t, 1, s.Stats().Length)
+
+	compactUntilDone(t, s)
+
+	e, err := s.Get(hkey)
+	require.NoError(t, err)
+	require.Equal(t, []byte(fmt.Sprintf("%0100d", 19999)), e.Value())
+	require.Equal(t, 1, s.Stats().Length)
+}

@@ -113,6 +113,18 @@ func (t *Table) PutRaw(hkey uint64, value []byte) error {
 	if inuse+t.offset >= t.allocated {
 		return ErrNotEnoughSpace
 	}
+
+	// If we already have the key, delete it. Otherwise the previous version
+	// stays in offsetIndex and is never accounted as garbage, so compaction
+	// can never reclaim it.
+	err := t.Delete(hkey)
+	if errors.Is(err, ErrHKeyNotFound) {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+
 	t.hkeys[hkey] = t.offset
 	t.offsetIndex.Add(t.offset)
 	copy(t.memory[t.offset:], value)
