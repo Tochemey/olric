@@ -159,8 +159,19 @@ func (x *DMap) asyncPutOnBackup(e *env, data []byte, owner discovery.Member) {
 }
 
 // asyncPutOnCluster stores the entry locally, then replicates it to the live
-// backup owners in the background.
+// backup owners in the background. The write is admitted before the local
+// store, and once Shutdown has started draining it is refused with
+// ErrServerGone, so Shutdown waits for every acknowledged write's backup
+// writes before it cancels the service context they run under.
 func (x *DMap) asyncPutOnCluster(e *env, nt storage.Entry) error {
+	if !x.s.admitAsyncWrite() {
+		return ErrServerGone
+	}
+
+	// The write's own count keeps the total above zero until its backup
+	// writes are counted, so Shutdown cannot see zero in between.
+	defer x.s.asyncWrites.Add(-1)
+
 	err := x.putOnFragmentLocked(e, nt)
 	if err != nil {
 		return err
@@ -178,7 +189,20 @@ func (x *DMap) asyncPutOnCluster(e *env, nt storage.Entry) error {
 			continue
 		}
 
-		x.s.spawn(func() { x.asyncPutOnBackup(e, encodedEntry, owner) })
+		// Counted before the goroutine starts, so Shutdown waits for it, see
+		// Service.waitAsyncWrites.
+		x.s.asyncWrites.Add(1)
+		started := x.s.spawn(func() {
+			defer x.s.asyncWrites.Add(-1)
+			x.asyncPutOnBackup(e, encodedEntry, owner)
+		})
+
+		if !started {
+			// Only once Shutdown gave up waiting at its deadline: the backup
+			// write is dropped, so the write is not acknowledged.
+			x.s.asyncWrites.Add(-1)
+			return ErrServerGone
+		}
 	}
 
 	return nil

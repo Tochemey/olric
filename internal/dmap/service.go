@@ -22,6 +22,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tochemey/olric/config"
@@ -37,6 +38,10 @@ import (
 	"github.com/tochemey/olric/pkg/flog"
 	"github.com/tochemey/olric/pkg/storage"
 )
+
+// asyncWritesPollInterval is how often Shutdown checks whether the async
+// replication writes in flight have finished.
+const asyncWritesPollInterval = 10 * time.Millisecond
 
 var errFragmentNotFound = errors.New("fragment not found")
 
@@ -73,6 +78,28 @@ type Service struct {
 	// concurrently with wg.Wait.
 	shutdownMtx sync.Mutex
 	closed      bool
+
+	// asyncWrites counts the async replication writes in flight: each write
+	// from its admission, before the local store, until it has handed its
+	// backup writes off, and each backup write until it is done. A write is
+	// acknowledged before its backup writes finish, and they run under ctx, so
+	// Shutdown waits for the count to drop to zero before it cancels ctx, see
+	// waitAsyncWrites. A counter rather than a WaitGroup: the backup writes of
+	// an admitted write are added while Shutdown waits, and a WaitGroup
+	// forbids an Add from zero concurrent with Wait.
+	asyncWrites atomic.Int64
+
+	// asyncWritesMtx orders the admission of async writes against Shutdown:
+	// a write is counted under the read lock only while draining is unset,
+	// and Shutdown sets draining under the write lock before it waits. Every
+	// write is therefore either counted before Shutdown starts waiting or
+	// refused before it stores anything, and none is acknowledged without its
+	// backup writes.
+	asyncWritesMtx sync.RWMutex
+
+	// draining is set once Shutdown starts waiting for the async writes; new
+	// async writes are refused from then on. Guarded by asyncWritesMtx.
+	draining bool
 }
 
 func registerErrors() {
@@ -209,19 +236,59 @@ func (s *Service) initialSyncCompletePublisher() {
 	}
 }
 
-func (s *Service) Shutdown(ctx context.Context) error {
-	s.cancel()
+// admitAsyncWrite counts an async replication write in flight and reports
+// true, or reports false once Shutdown has started draining the async writes.
+// An admitted write must end its count with asyncWrites.Add(-1).
+func (x *Service) admitAsyncWrite() bool {
+	x.asyncWritesMtx.RLock()
+	defer x.asyncWritesMtx.RUnlock()
+
+	if x.draining {
+		return false
+	}
+
+	x.asyncWrites.Add(1)
+	return true
+}
+
+// waitAsyncWrites refuses new async replication writes, then returns once the
+// admitted ones and their backup writes have finished, or when ctx is done.
+func (x *Service) waitAsyncWrites(ctx context.Context) {
+	x.asyncWritesMtx.Lock()
+	x.draining = true
+	x.asyncWritesMtx.Unlock()
+
+	ticker := time.NewTicker(asyncWritesPollInterval)
+	defer ticker.Stop()
+
+	for x.asyncWrites.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// Shutdown stops the service: it lets the async replication writes in flight
+// finish, cancels the service context and waits for the background
+// goroutines, all within ctx.
+func (x *Service) Shutdown(ctx context.Context) error {
+	// The async backup writes run under the service context: cancelling it
+	// first would drop writes already acknowledged to their callers.
+	x.waitAsyncWrites(ctx)
+	x.cancel()
 
 	// Flip closed under shutdownMtx before waiting so no further spawn can call
 	// wg.Add once wg.Wait is in progress. Any spawn already past the guard has
 	// completed its wg.Add under the same lock, so it is counted before Wait.
-	s.shutdownMtx.Lock()
-	s.closed = true
-	s.shutdownMtx.Unlock()
+	x.shutdownMtx.Lock()
+	x.closed = true
+	x.shutdownMtx.Unlock()
 
 	done := make(chan struct{})
 	go func() {
-		s.wg.Wait()
+		x.wg.Wait()
 		close(done)
 	}()
 
